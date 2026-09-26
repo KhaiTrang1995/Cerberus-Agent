@@ -576,6 +576,54 @@ def _waf_payload_differential(subdomain: str, ip: str, timeout: int = 10) -> Opt
     return None
 
 
+def check_cache_purge_exposed(ip: str, hostnames: Optional[List[str]] = None,
+                              timeout: int = 10) -> Optional[Dict]:
+    """Unauthenticated cache-purge endpoint (class 14, CDN misconfiguration).
+
+    Caches (Varnish, nginx proxy_cache, some CDNs) expose PURGE/BAN methods to flush
+    cached objects. Left unauthenticated, anyone can evict a competitor's cache (cache
+    DoS) or force re-fetches. Detected with a METHOD DIFFERENTIAL to stay low-FP: a
+    bogus control method must be refused (else the server accepts any method and we
+    cannot tell), while PURGE or BAN is accepted (2xx).
+    """
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
+    if hostnames:
+        headers["Host"] = hostnames[0]
+    for scheme in ("http", "https"):
+        base = f"{scheme}://{ip}/"
+        try:
+            control = requests.request("RDMNNOOP", base, timeout=timeout, verify=False,
+                                       allow_redirects=False, headers=headers)
+        except requests.exceptions.RequestException:
+            continue
+        if 200 <= control.status_code < 300:
+            continue  # server 2xx's an arbitrary method -> cannot distinguish; no claim
+        for method in ("PURGE", "BAN"):
+            try:
+                r = requests.request(method, base, timeout=timeout, verify=False,
+                                     allow_redirects=False, headers=headers)
+            except requests.exceptions.RequestException:
+                continue
+            if 200 <= r.status_code < 300:
+                return {
+                    "type": "cache_purge_exposed",
+                    "severity": "high",
+                    "name": f"Unauthenticated Cache Purge Endpoint ({method})",
+                    "description": (
+                        f"The cache at {ip} accepts an unauthenticated {method} request "
+                        f"(HTTP {r.status_code}) while a bogus control method is refused "
+                        f"(HTTP {control.status_code}). Anyone can flush cached content, "
+                        "enabling cache denial-of-service and forced origin re-fetches."
+                    ),
+                    "url": base,
+                    "matched_ip": ip,
+                    "evidence": (f"method={method}; purge_status={r.status_code}; "
+                                 f"control_status={control.status_code}"),
+                    "detection_method": "method_differential",
+                }
+    return None
+
+
 def check_waf_bypass(
     subdomain: str,
     ip: str,
@@ -759,6 +807,11 @@ def run_direct_ip_checks(
 
         if enabled_checks.get("ip_api_exposed", True):
             result = check_ip_api_exposed(ip, timeout)
+            if result:
+                ip_findings.append(result)
+
+        if enabled_checks.get("cache_purge_exposed", True):
+            result = check_cache_purge_exposed(ip, hostnames=hostnames, timeout=timeout)
             if result:
                 ip_findings.append(result)
 
