@@ -58,6 +58,9 @@ const READ_ONLY: McpScope[] = ['recon:read']
 
 let tools: Tool[]
 beforeAll(async () => {
+  // The build's full surface. Unset reads as off and withdraws the sandbox
+  // tools, while docker-compose.yml defaults the switch on.
+  vi.stubEnv('MCP_KALI_EXEC_ENABLED', 'true')
   tools = await listAdvertisedTools()
 })
 

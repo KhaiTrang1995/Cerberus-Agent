@@ -48,7 +48,7 @@ vi.mock('@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js', () => (
   },
 }))
 
-import { POST, GET, DELETE, mcpServerEnabled, __resetAuthAuditThrottle } from './route'
+import { POST, GET, DELETE, MCP_DISABLED_MESSAGE, mcpServerEnabled, __resetAuthAuditThrottle } from './route'
 
 const TOKEN = {
   tokenId: 't1', userId: 'owner', tokenPrefix: 'rdmn_mcp_aaaaaaaa',
@@ -115,6 +115,62 @@ describe('MCP_SERVER_ENABLED defaults off', () => {
     expect(res.status).toBe(404)
     // It must not reveal whether a token is valid.
     expect(h.resolve).not.toHaveBeenCalled()
+  })
+})
+
+// =============================================================================
+// REGRESSION: a disabled server read as a wrong URL
+// =============================================================================
+//
+// It answered `-32601 "Not found"`, byte-identical with and without a token,
+// which is exactly what a nonexistent route looks like. An operator spent an
+// hour on paths, auth schemes and TLS before finding the flag in the source.
+
+describe('REGRESSION: the disabled answer names the switch', () => {
+  async function disabledBody(headers?: Record<string, string>) {
+    vi.stubEnv('MCP_SERVER_ENABLED', 'false')
+    const res = await POST(req({ headers }))
+    expect(res.status).toBe(404)
+    return (await res.json()) as { jsonrpc: string; id: null; error: { code: number; message: string } }
+  }
+
+  test('the message says the server is disabled and names the flag', async () => {
+    const body = await disabledBody()
+    expect(body.jsonrpc).toBe('2.0')
+    expect(body.id).toBeNull()
+    expect(body.error.message).toBe(MCP_DISABLED_MESSAGE)
+    expect(body.error.message).toMatch(/disabled/i)
+    expect(body.error.message).toContain('MCP_SERVER_ENABLED=true')
+    // A plain `docker compose restart` keeps the old environment, so the fix
+    // it names must be the one that re-reads it.
+    expect(body.error.message).toContain('docker compose up -d webapp')
+  })
+
+  test('it is not -32601 "method not found" nor a bare "Not found"', async () => {
+    const body = await disabledBody()
+    expect(body.error.code).toBe(-32000)
+    expect(body.error.message).not.toBe('Not found')
+  })
+
+  test('the answer is identical whatever credential is sent, and none is read', async () => {
+    // Naming the switch must not become a token oracle: no header, a
+    // well-formed bearer and garbage all get the same bytes, and the resolver
+    // is never reached.
+    const bearer = await disabledBody()
+    const none = await disabledBody({ authorization: '' })
+    const garbage = await disabledBody({ authorization: 'Basic Zm9vOmJhcg==' })
+    expect(none).toEqual(bearer)
+    expect(garbage).toEqual(bearer)
+    expect(h.resolve).not.toHaveBeenCalled()
+    expect(h.audit).not.toHaveBeenCalled()
+    expect(h.build).not.toHaveBeenCalled()
+  })
+
+  test('an enabled server does not use the disabled message', async () => {
+    h.resolve.mockResolvedValue({ ok: false, failure: 'invalid', prefix: 'rdmn_mcp_aaaaaaaa' })
+    const res = await POST(req())
+    expect(res.status).toBe(401)
+    expect(JSON.stringify(await res.json())).not.toContain('MCP_SERVER_ENABLED')
   })
 })
 

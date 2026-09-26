@@ -17,7 +17,7 @@
 import { existsSync, readFileSync, readdirSync } from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
-import { describe, test, expect, vi } from 'vitest'
+import { describe, test, expect, beforeAll, vi } from 'vitest'
 
 // tools/list needs a server, and a server imports the Prisma-touching tool
 // bodies. Nothing here calls a tool, so an absent client is enough.
@@ -39,6 +39,12 @@ import {
   scopesForProfile,
   validateProfile,
 } from './profiles'
+
+beforeAll(() => {
+  // The build's full surface. Unset reads as off and withdraws the sandbox
+  // tools, while docker-compose.yml defaults the switch on.
+  vi.stubEnv('MCP_KALI_EXEC_ENABLED', 'true')
+})
 
 const LIB_MCP_DIR = fileURLToPath(new URL('.', import.meta.url))
 const MCP_AUTH = fileURLToPath(new URL('../mcpAuth.ts', import.meta.url))

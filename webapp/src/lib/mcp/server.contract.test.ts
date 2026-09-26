@@ -23,8 +23,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { ListToolsResultSchema, ToolSchema } from '@modelcontextprotocol/sdk/types.js'
 
-import { buildMcpServer } from './server'
-import { listAdvertisedTools } from './apiReference'
+import { SANDBOX_TOOL_NAMES, buildMcpServer } from './server'
+import { listAdvertisedTools, toolScopes } from './apiReference'
 import { renderInlineOnboarding } from './onboarding'
 import type { McpContext } from './tools'
 
@@ -61,6 +61,9 @@ const EXPECTED_TOOL_COUNT = 34
 
 beforeEach(async () => {
   vi.clearAllMocks()
+  // The build's full surface. Unset reads as off and withdraws the sandbox
+  // tools, while docker-compose.yml defaults the switch on.
+  vi.stubEnv('MCP_KALI_EXEC_ENABLED', 'true')
   tools = (await listTools()).tools
 })
 
@@ -253,6 +256,103 @@ describe('MCP_DISABLED_TOOLS withdraws a tool from the surface', () => {
     // starting, which would turn a narrow withdrawal into a total outage.
     vi.stubEnv('MCP_DISABLED_TOOLS', 'no_such_tool')
     expect((await listTools()).tools).toHaveLength(EXPECTED_TOOL_COUNT)
+  })
+})
+
+// =============================================================================
+// REGRESSION: a sandbox switched off was still advertised
+// =============================================================================
+//
+// With MCP_KALI_EXEC_ENABLED=false the sandbox tools stayed in tools/list and
+// refused only when called, so an agent planned a multi-step task around a
+// shell it could never use and failed halfway through.
+
+describe('REGRESSION: MCP_KALI_EXEC_ENABLED off withdraws the sandbox tools', () => {
+  afterEach(() => { vi.unstubAllEnvs() })
+
+  const names = async () => (await listTools()).tools.map(t => t.name)
+
+  async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
+    const server = buildMcpServer(ctx)
+    const client = new Client({ name: 'contract-test', version: '1.0.0' }, { capabilities: {} })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+    try {
+      // The SDK has answered an unknown tool both ways across versions: a
+      // thrown protocol error and an isError result. Either is a refusal.
+      return await client.callTool({ name, arguments: args })
+        .then(r => JSON.stringify(r), (e: Error) => e.message)
+    } finally {
+      await client.close()
+      await server.close()
+    }
+  }
+
+  test.each(['false', '0', ''])('MCP_KALI_EXEC_ENABLED=%j withdraws all four, and nothing else', async value => {
+    const on = await names()
+    vi.stubEnv('MCP_KALI_EXEC_ENABLED', value)
+    const off = await names()
+    for (const n of SANDBOX_TOOL_NAMES) expect(off, n).not.toContain(n)
+    expect([...off].sort()).toEqual(on.filter(n => !SANDBOX_TOOL_NAMES.has(n)).sort())
+    expect(off).toHaveLength(EXPECTED_TOOL_COUNT - SANDBOX_TOOL_NAMES.size)
+  })
+
+  test.each(['true', '1'])('MCP_KALI_EXEC_ENABLED=%j keeps all four', async value => {
+    vi.stubEnv('MCP_KALI_EXEC_ENABLED', value)
+    const on = await names()
+    for (const n of SANDBOX_TOOL_NAMES) expect(on, n).toContain(n)
+    expect(on).toHaveLength(EXPECTED_TOOL_COUNT)
+  })
+
+  test('the set names only real tools, so a rename cannot leave one advertised', () => {
+    const advertised = new Set(tools.map(t => t.name))
+    for (const n of SANDBOX_TOOL_NAMES) expect(advertised.has(n), n).toBe(true)
+  })
+
+  test('every tool that needs kali:exec is in the set', () => {
+    // A new exec tool that did not join the set would stay advertised on a
+    // deployment that switched the sandbox off.
+    const needsExec = tools
+      .filter(t => {
+        const s = toolScopes(t)
+        return !!s && (s.required.includes('kali:exec') ||
+          (s.conditional ?? []).some(c => c.scope === 'kali:exec'))
+      })
+      .map(t => t.name)
+    expect(needsExec.length).toBeGreaterThan(0)
+    for (const n of needsExec) expect(SANDBOX_TOOL_NAMES.has(n), n).toBe(true)
+  })
+
+  test('it composes with MCP_DISABLED_TOOLS', async () => {
+    vi.stubEnv('MCP_KALI_EXEC_ENABLED', 'false')
+    vi.stubEnv('MCP_DISABLED_TOOLS', 'queue_recon')
+    const off = await names()
+    expect(off).not.toContain('queue_recon')
+    expect(off).not.toContain('kali_exec')
+    expect(off).toHaveLength(EXPECTED_TOOL_COUNT - SANDBOX_TOOL_NAMES.size - 1)
+  })
+
+  test('a withdrawn tool cannot be called by name either', async () => {
+    const args = { projectId: 'p1', command: 'id' }
+    // Registered, the call reaches the tool's handler (which then fails on
+    // this file's empty Prisma mock - any failure but "unknown tool" will do).
+    expect(await callTool('kali_exec', args)).not.toMatch(/not found/i)
+    vi.stubEnv('MCP_KALI_EXEC_ENABLED', 'false')
+    // Withdrawn, the server does not know the tool at all.
+    expect(await callTool('kali_exec', args)).toMatch(/kali_exec not found/i)
+  })
+
+  test('the withdrawal is not logged: it is a standing choice, not an emergency', async () => {
+    // The server is rebuilt for every request, so a warning here would be four
+    // log lines per call for a deployment configured exactly as intended.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      vi.stubEnv('MCP_KALI_EXEC_ENABLED', 'false')
+      await names()
+      expect(warn).not.toHaveBeenCalled()
+    } finally {
+      warn.mockRestore()
+    }
   })
 })
 

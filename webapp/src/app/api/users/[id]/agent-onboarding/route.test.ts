@@ -45,6 +45,9 @@ const valid = (over: Record<string, unknown> = {}) => ({
 beforeEach(() => {
   vi.clearAllMocks()
   h.requireUserAccess.mockResolvedValue(null)
+  // The build's full surface. Unset reads as off and withdraws the sandbox
+  // tools, while docker-compose.yml defaults the switch on.
+  vi.stubEnv('MCP_KALI_EXEC_ENABLED', 'true')
 })
 
 afterEach(() => {
@@ -232,5 +235,48 @@ describe('a tool this deployment withdrew is absent from the pack', () => {
     )).json()
     expect(data.available).toContain('get_blast_radius')
     expect(data.available).toContain('list_exploit_paths')
+  })
+})
+
+// --- REGRESSION: a sandbox switched off was still taught -----------------------
+
+describe('a deployment with the sandbox off teaches no sandbox tool', () => {
+  /**
+   * MCP_KALI_EXEC_ENABLED=false used to leave the sandbox tools in tools/list,
+   * so a pentest pack for a token holding `kali:exec` taught a validation step
+   * that could only ever fail. They are now withdrawn at registration, the same
+   * path as MCP_DISABLED_TOOLS, so the pack follows for free.
+   */
+  const pentest = () => POST(
+    req(valid({ profile: 'pentest', scopes: ['recon:read', 'triage:read', 'kali:exec'] })),
+    params()
+  )
+  const sandboxTools = ['kali_toolbox', 'kali_exec', 'kali_output', 'kali_cancel']
+
+  test('no file, procedure or tool list mentions the sandbox', async () => {
+    vi.stubEnv('MCP_KALI_EXEC_ENABLED', 'false')
+    const res = await pentest()
+    expect(res.status).toBe(200)
+
+    const data = await res.json()
+    const paths = data.files.map((f: { path: string }) => f.path)
+    expect(paths).not.toContain('references/kali-exec.md')
+    const text = data.files.map((f: { content: string }) => f.content).join('\n')
+    for (const name of sandboxTools) {
+      expect(text, `the pack still teaches ${name}`).not.toContain(name)
+      expect(data.available).not.toContain(name)
+      // Absent, not "needs a permission": the token HOLDS kali:exec, so that
+      // would send the agent to ask for something that cannot help.
+      expect(data.unavailable).not.toContain(name)
+    }
+    expect(text).toContain('list_findings')
+  })
+
+  test('with the sandbox on, the same request teaches it', async () => {
+    // The control: without it the assertions above would pass on a pack that
+    // never mentioned the sandbox for an unrelated reason.
+    const data = await (await pentest()).json()
+    expect(data.files.map((f: { path: string }) => f.path)).toContain('references/kali-exec.md')
+    for (const name of sandboxTools) expect(data.available).toContain(name)
   })
 })

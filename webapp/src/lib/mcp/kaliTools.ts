@@ -37,6 +37,9 @@ import { enforceRate, type McpContext } from '@/lib/mcp/tools'
  * The default-on lives in docker-compose.yml (`:-true`), not here: an unset
  * variable reads as OFF, so a bare `node` run or a test without the env gets no
  * sandbox.
+ *
+ * Off, buildMcpServer does not register the sandbox tools at all
+ * (SANDBOX_TOOL_NAMES). assertEnabled() below is the backstop for a direct call.
  */
 export function kaliExecEnabled(): boolean {
   return process.env.MCP_KALI_EXEC_ENABLED === 'true' || process.env.MCP_KALI_EXEC_ENABLED === '1'

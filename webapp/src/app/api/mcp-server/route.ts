@@ -106,6 +106,24 @@ export function mcpServerEnabled(): boolean {
   return process.env.MCP_SERVER_ENABLED === 'true' || process.env.MCP_SERVER_ENABLED === '1'
 }
 
+/**
+ * What a disabled deployment answers, to every caller alike.
+ *
+ * It names the switch because a bare "Not found" is indistinguishable from a
+ * mistyped URL, and sends an operator after paths and auth schemes instead of
+ * the flag. Naming it reveals nothing a caller cannot already see - the JSON-RPC
+ * envelope already tells this route apart from a nonexistent one - and it is
+ * returned before any token is read, so token validity stays hidden.
+ *
+ * Still a 404: `deploy.sh verify` and the wiki's troubleshooting table key on
+ * that status. -32000 is JSON-RPC's implementation-defined server error;
+ * -32601 would claim the METHOD is unknown, which it is not.
+ */
+export const MCP_DISABLED_MESSAGE =
+  'The MCP server is disabled on this RedAmon deployment. An operator enables it with ' +
+  'MCP_SERVER_ENABLED=true in .env, then recreates the webapp container ' +
+  '(docker compose up -d webapp).'
+
 function jsonRpcError(code: number, message: string, status: number): NextResponse {
   return NextResponse.json(
     { jsonrpc: '2.0', error: { code, message }, id: null },
@@ -169,7 +187,7 @@ export async function POST(request: NextRequest) {
   // The flag is checked before anything else, so a disabled deployment does no
   // database work and reveals nothing about whether a token is valid.
   if (!mcpServerEnabled()) {
-    return jsonRpcError(-32601, 'Not found', 404)
+    return jsonRpcError(-32000, MCP_DISABLED_MESSAGE, 404)
   }
 
   const contentType = request.headers.get('content-type') || ''

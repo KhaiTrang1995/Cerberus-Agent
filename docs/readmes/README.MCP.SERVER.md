@@ -178,8 +178,8 @@ and a value set only in `.env` would be silently inert.
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `MCP_SERVER_ENABLED` | `false` | The master switch. |
-| `MCP_KALI_EXEC_ENABLED` | `true` | `kali_exec` / `kali_output` / `kali_cancel`. Independent of the master switch on purpose; `false` withdraws the sandbox from every token. |
+| `MCP_SERVER_ENABLED` | `false` | The master switch. Off, every request gets a `404` whose error message says the server is disabled and names this variable - before any token is read, so it is no token oracle. |
+| `MCP_KALI_EXEC_ENABLED` | `true` | `kali_exec` / `kali_output` / `kali_cancel`. Independent of the master switch on purpose; `false` withdraws the sandbox from every token, and removes `kali_toolbox`, `kali_exec`, `kali_output` and `kali_cancel` from `tools/list` (registration-time, like `MCP_DISABLED_TOOLS`) so no agent plans around them. |
 | `MCP_RATE_EXEC_PER_MIN` | `20` | `kali_exec` calls per token per minute. Polling uses the read bucket. |
 | `MCP_TOKEN_RETENTION_DAYS` | `90` | How long revoked/expired token rows are kept before pruning. |
 | `MCP_RATE_READ_PER_MIN` | `120` | Cheap reads per token per minute. |

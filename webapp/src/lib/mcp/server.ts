@@ -85,6 +85,7 @@ import {
   MAX_WAIT_SECONDS,
   cancelCommand,
   execCommand,
+  kaliExecEnabled,
   readCommandOutput,
 } from '@/lib/mcp/kaliTools'
 
@@ -243,6 +244,19 @@ export function disabledToolNames(): ReadonlySet<string> {
   )
 }
 
+/**
+ * The tools that exist only to reach the Kali sandbox.
+ *
+ * With `MCP_KALI_EXEC_ENABLED` off they are withdrawn exactly like
+ * `MCP_DISABLED_TOOLS`, instead of being advertised and then refusing every
+ * call: an agent builds its plan from tools/list and would otherwise fail
+ * mid-task. kali_toolbox goes with them because its whole job is to say what
+ * kali_exec can run.
+ */
+export const SANDBOX_TOOL_NAMES: ReadonlySet<string> = new Set([
+  'kali_toolbox', 'kali_exec', 'kali_output', 'kali_cancel',
+])
+
 export function buildMcpServer(ctx: McpContext, instructions?: string): McpServer {
   const server = new McpServer(
     { name: MCP_SERVER_NAME, version: process.env.NEXT_PUBLIC_REDAMON_VERSION || '0.0.0' },
@@ -258,17 +272,22 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
   // tools/list entirely rather than advertised and then refusing. A client that
   // cannot see a tool will not plan around it.
   const disabled = disabledToolNames()
-  if (disabled.size > 0) {
+  const sandboxOff = !kaliExecEnabled()
+  if (disabled.size > 0 || sandboxOff) {
     // The SDK's signature is generic per tool, so the pass-through is typed
     // loosely here and cast back once. Every registration below keeps its own
     // full type-checking, which is what matters.
     const register = server.registerTool.bind(server) as (...a: unknown[]) => unknown
+    // The handle is never used: registrations below ignore the return.
+    const withdrawn = { remove() {}, enable() {}, disable() {}, update() {} }
     server.registerTool = ((name: string, ...rest: unknown[]) => {
       if (disabled.has(name)) {
         console.warn(`[mcp] tool '${name}' is withdrawn by MCP_DISABLED_TOOLS`)
-        // The handle is never used: registrations below ignore the return.
-        return { remove() {}, enable() {}, disable() {}, update() {} }
+        return withdrawn
       }
+      // Not logged: a sandbox switched off is a standing deployment choice, not
+      // an emergency, and the server is rebuilt for every request.
+      if (sandboxOff && SANDBOX_TOOL_NAMES.has(name)) return withdrawn
       return register(name, ...rest)
     }) as typeof server.registerTool
   }
