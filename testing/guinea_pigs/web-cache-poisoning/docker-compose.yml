@@ -38,8 +38,19 @@ services:
       - "80:80"
       - "9090:80"
     networks:
-      - wcp
+      wcp:
+      # Fixed IP on the RedAmon network so a recon project can be pinned to an
+      # address that survives lab restarts. Auto-assigned IPs drift on every
+      # restart, which silently repoints a pinned scan at a dead address (the
+      # crawler then seeds an unreachable URL and discovers nothing). Under
+      # --net=host the nested scan tools can't resolve container-name DNS, so a
+      # stable IP -- not a name -- is the reliable handle.
+      redamon:
+        ipv4_address: 172.25.0.90
 
 networks:
   wcp:
     name: wcp-guinea-net
+  redamon:
+    external: true
+    name: redamon-network
