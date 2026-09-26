@@ -14,6 +14,7 @@ import ssl
 import requests
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Any, Set
+from urllib.parse import quote
 import concurrent.futures
 
 from recon.helpers.cdn_ranges import (
@@ -516,6 +517,65 @@ def check_ip_api_exposed(ip: str, timeout: int = 10) -> Optional[Dict]:
     return None
 
 
+# Canonical WAF-signature probes for the blocked-vs-allowed differential (class 13).
+# These are the standard strings every WAF ships a detection rule for; sent as a
+# throwaway query parameter they exercise the ruleset without touching application
+# logic. The FINDING is the differential (edge blocks, origin serves) -- never the
+# payload -- so this is a WAF-efficacy test, not an exploit.
+_WAF_PROBE_PARAM = "rdmnwafprobe"
+_WAF_PROBES = [
+    ("xss", "<script>alert(1)</script>"),
+    ("sqli", "' OR '1'='1"),
+    ("traversal", "../../../../etc/passwd"),
+]
+# Status codes an edge WAF typically returns when it blocks a request.
+_WAF_BLOCK_CODES = {403, 406, 429, 501, 999, 202}
+
+
+def _looks_blocked(status: int) -> bool:
+    return status in _WAF_BLOCK_CODES
+
+
+def _waf_payload_differential(subdomain: str, ip: str, timeout: int = 10) -> Optional[Dict]:
+    """Blocked-vs-allowed payload differential (class 13).
+
+    A probe the edge WAF blocks for the hostname but the origin serves when addressed
+    directly by IP (with the real Host header) is concrete proof the WAF is bypassable
+    -- stronger than comparing Server-header tokens. Returns a finding dict or None.
+    """
+    ua = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
+    for kind, payload in _WAF_PROBES:
+        q = f"?{_WAF_PROBE_PARAM}={quote(payload)}"
+        try:
+            edge = requests.get(f"https://{subdomain}/{q}", timeout=timeout, verify=False,
+                                allow_redirects=False, headers=ua)
+            origin = requests.get(f"https://{ip}/{q}", timeout=timeout, verify=False,
+                                  allow_redirects=False, headers={**ua, "Host": subdomain})
+        except requests.exceptions.RequestException:
+            continue
+        # Edge blocks the probe, origin accepts it (and is not merely erroring) -> bypass.
+        if _looks_blocked(edge.status_code) and not _looks_blocked(origin.status_code) \
+                and origin.status_code < 500:
+            return {
+                "type": "waf_bypass",
+                "severity": "high",
+                "name": "WAF Bypass via Direct Origin Access (payload differential)",
+                "description": (
+                    f"A {kind} signature probe is blocked at the edge for {subdomain} "
+                    f"(HTTP {edge.status_code}) but served by the origin {ip} "
+                    f"(HTTP {origin.status_code}) addressed directly with the real Host "
+                    "header. The WAF can be bypassed by reaching the origin directly."
+                ),
+                "url": f"https://{ip}/",
+                "matched_ip": ip,
+                "subdomain": subdomain,
+                "evidence": (f"probe_class={kind}; edge_status={edge.status_code}; "
+                             f"origin_status={origin.status_code}"),
+                "detection_method": "payload_differential",
+            }
+    return None
+
+
 def check_waf_bypass(
     subdomain: str,
     ip: str,
@@ -533,6 +593,12 @@ def check_waf_bypass(
     Returns:
         Vulnerability dict if WAF bypass is possible, None otherwise
     """
+    # Strongest signal first: a real blocked-vs-allowed payload differential. A token
+    # comparison only infers "a WAF is present"; this proves the WAF is bypassable.
+    payload_finding = _waf_payload_differential(subdomain, ip, timeout)
+    if payload_finding:
+        return payload_finding
+
     try:
         # Try accessing via subdomain (through WAF/CDN)
         subdomain_url = f"https://{subdomain}"
