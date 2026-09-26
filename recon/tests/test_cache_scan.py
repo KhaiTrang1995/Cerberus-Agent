@@ -37,7 +37,7 @@ class VulnerableCacheSession:
         self.store = {}  # url -> body
         self.headers_base = {"User-Agent": "x"}
 
-    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
         headers = headers or {}
         injected = None
         for k, v in headers.items():
@@ -55,14 +55,14 @@ class VulnerableCacheSession:
 class SafeCacheSession:
     """Cache that does NOT reflect the header (not vulnerable)."""
 
-    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
         return FakeResponse("<clean/>", {"x-cache": "hit", "age": "5"})
 
 
 class NoCacheSession:
     """No cache headers at all."""
 
-    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
         return FakeResponse("<dynamic/>", {"content-type": "text/html"})
 
 
@@ -79,7 +79,7 @@ class DifferentialCacheSession:
         self.trigger_header = trigger_header.lower()
         self.store = {}  # url -> (status, location)
 
-    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
         headers = headers or {}
         injected = any(k.lower() == self.trigger_header for k in headers)
         if injected:
@@ -100,7 +100,7 @@ class DynamicNoiseSession:
     def __init__(self):
         self.n = 0
 
-    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
         self.n += 1
         return FakeResponse(f"<page id={self.n}/>", {"x-cache": "hit", "age": "3"}, status=200)
 
@@ -113,7 +113,7 @@ class StatusPoisonCacheSession:
         self.trigger = trigger.lower()
         self.store = {}
 
-    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
         headers = headers or {}
         if any(k.lower() == self.trigger for k in headers):
             self.store[url] = 403
@@ -127,7 +127,7 @@ class UncachedRedirectSession:
     """The trigger header changes the response (a redirect) but NOTHING is cached:
     the clean follow-up reverts to baseline -> must NOT be flagged as persisted."""
 
-    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
         headers = headers or {}
         if any(k.lower() == "x-forwarded-proto" for k in headers):
             return FakeResponse("", {"x-cache": "miss", "location": "https://evil.example/"}, status=301)
@@ -138,7 +138,7 @@ class RateLimitOnPoisonSession:
     """The poison request trips a 429. Differential detection must treat 429 as
     rate-limit noise and NOT raise a finding from it."""
 
-    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
         headers = headers or {}
         if any(k.lower() == "x-forwarded-proto" for k in headers):
             return FakeResponse("blocked", {"x-cache": "miss"}, status=429)
@@ -154,7 +154,7 @@ class BodyPoisonCacheSession:
         self.trigger = trigger.lower()
         self.store = {}
 
-    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
         headers = headers or {}
         if any(k.lower() == self.trigger for k in headers):
             self.store[url] = "<maintenance/>"
@@ -174,7 +174,7 @@ class NoisyBodyLocationPoisonSession:
         self.store = {}
         self.n = 0
 
-    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
         self.n += 1
         headers = headers or {}
         if any(k.lower() == self.trigger for k in headers):
@@ -183,6 +183,28 @@ class NoisyBodyLocationPoisonSession:
         if url in self.store:
             return FakeResponse(f"<p {self.n}/>", {"x-cache": "hit", "age": "2", "location": self.store[url]}, status=301)
         return FakeResponse(f"<p {self.n}/>", {"x-cache": "miss"}, status=200)
+
+
+class FatGetCacheSession:
+    """Models fat-GET parameter cloaking: the origin merges GET *body* params and
+    reflects the value; the cache keys on the URL only, so the poisoned body is stored
+    under the bare URL and served back to a body-less (victim) request as a HIT."""
+
+    def __init__(self, param="q"):
+        self.param = param
+        self.store = {}
+
+    def get(self, url, headers=None, data=None, timeout=10, verify=True, allow_redirects=False):
+        if data:
+            from urllib.parse import parse_qs
+            vals = parse_qs(data).get(self.param, [])
+            if vals:
+                body = f"<p>results for {vals[0]}</p>"
+                self.store[url] = body
+                return FakeResponse(body, {"x-cache": "miss"})
+        if url in self.store:
+            return FakeResponse(self.store[url], {"x-cache": "hit", "age": "9"})
+        return FakeResponse("<p>results for </p>", {"x-cache": "miss"})
 
 
 class TestWcvsParser(unittest.TestCase):
@@ -593,14 +615,14 @@ class _HeaderSession:
         self._headers = headers
         self._body = body
 
-    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
         return FakeResponse(self._body, dict(self._headers))
 
 
 class _FrozenDateSession:
     """Silent cache: no cache headers, but the Date is frozen (cached replay)."""
 
-    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
         return FakeResponse("<cached/>", {"date": "Mon, 30 Jun 2026 10:00:00 GMT"})
 
 
@@ -610,7 +632,7 @@ class _LiveOriginSession:
     def __init__(self):
         self._n = 0
 
-    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
         self._n += 1
         return FakeResponse("<dynamic/>", {"date": f"Mon, 30 Jun 2026 10:00:0{self._n} GMT"})
 
@@ -627,7 +649,7 @@ class _SeqSession:
         self._body = body
         self.calls = 0
 
-    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
         hdrs = self._steps[min(self.calls, len(self._steps) - 1)]
         self.calls += 1
         return FakeResponse(self._body, dict(hdrs))
@@ -636,7 +658,7 @@ class _SeqSession:
 class _RaisingSession:
     """Every GET raises a network error (timeouts, connection resets)."""
 
-    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
         raise requests.RequestException("boom")
 
 
@@ -765,7 +787,7 @@ class TestOracle(unittest.TestCase):
     def test_behavioral_frozen_date_but_body_changes_not_cached(self):
         class _FrozenDateLiveBody:
             def __init__(self): self.n = 0
-            def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False):
+            def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
                 self.n += 1
                 return FakeResponse(f"<b {self.n}/>", {"date": "Mon, 30 Jun 2026 10:00:00 GMT"})
         info = oracle.detect_cache_oracle(
@@ -886,25 +908,47 @@ class TestConfirm(unittest.TestCase):
         self.assertEqual(tier, "Strong")
 
     def test_apply_vector_header(self):
-        url, hdrs = confirm._apply_vector("https://x/p", "header", "X-Forwarded-Host", "evil.invalid")
+        url, hdrs, body = confirm._apply_vector("https://x/p", "header", "X-Forwarded-Host", "evil.invalid")
         self.assertEqual(url, "https://x/p")
         self.assertEqual(hdrs, {"X-Forwarded-Host": "evil.invalid"})
+        self.assertIsNone(body)
 
     def test_apply_vector_param(self):
-        url, hdrs = confirm._apply_vector("https://x/p", "param", "utm", "evil")
+        url, hdrs, body = confirm._apply_vector("https://x/p", "param", "utm", "evil")
         self.assertIn("utm=evil", url)
         self.assertEqual(hdrs, {})
+        self.assertIsNone(body)
 
     def test_apply_vector_path_uses_vector_name_before_query(self):
         # Nuxt vector: ("_payload.json", "path", "path", "reflected"). The confusion
         # suffix must land as a real path segment BEFORE the cache-buster query, and
         # must be the vector NAME, not the random canary payload (the old bug appended
         # the payload after "?rdmncb=", so "_payload.json" was never exercised).
-        url, hdrs = confirm._apply_vector(
+        url, hdrs, body = confirm._apply_vector(
             "https://x/fw/nuxt?rdmncb=abc123", "path", "_payload.json", "/rdmncanary")
         self.assertEqual(url, "https://x/fw/nuxt/_payload.json?rdmncb=abc123")
         self.assertNotIn("rdmncanary", url)       # random payload not used for path
         self.assertEqual(hdrs, {})
+        self.assertIsNone(body)
+
+    def test_apply_vector_fat_get_puts_param_in_body_not_url(self):
+        # Fat GET: the param rides in the request BODY, the URL stays clean (so a
+        # URL-keyed cache never sees it), with a form content-type set.
+        url, hdrs, body = confirm._apply_vector("https://x/p", "fat_get", "q", "rdmncanary")
+        self.assertEqual(url, "https://x/p")            # URL untouched
+        self.assertEqual(body, "q=rdmncanary")          # param in the body
+        self.assertEqual(hdrs.get("Content-Type"), "application/x-www-form-urlencoded")
+
+    def test_fat_get_confirmation_reflected_and_cached(self):
+        # End-to-end confirmation against a fat-GET-vulnerable fake cache: the canary
+        # sent in the GET body is reflected, then served from cache to the body-less
+        # victim request -> a persisted, cache-backed poisoning.
+        vec = {"url": "https://shop/search", "vector_type": "fat_get",
+               "vector_name": "q", "payload_kind": "value", "impact_hint": "reflected"}
+        rec = confirm.confirm_vector(vec, {"param": "rdmncb"}, FatGetCacheSession("q"), {})
+        self.assertTrue(rec["reflected_in_baseline"])   # canary echoed by the origin
+        self.assertTrue(rec["persisted_on_clean"])      # still there on the clean read
+        self.assertTrue(rec["cache_hit_on_clean"])      # and that read was a cache HIT
 
     def test_classify_impact_redirect(self):
         vec = {"impact_hint": "reflected"}
@@ -970,6 +1014,15 @@ class TestWcvsVectorMapping(unittest.TestCase):
                                                 "vector_name": "X-Host", "reason": "reflected"})
         self.assertEqual(v["source"], "wcvs")
         self.assertEqual(v["wcvs_reason"], "reflected")
+
+    def test_fat_get_vector_not_forced_to_header(self):
+        # A WCVS fat-GET hit must re-test as a fat_get body vector, not a header
+        # (the old default), so the native confirmation matches WCVS's transport.
+        v = scanner._wcvs_vector("https://x/", {"technique": "FatGET body reflection",
+                                                "vector_name": "q"})
+        self.assertEqual(v["vector_type"], "fat_get")
+        self.assertEqual(v["technique"], "fat_get")
+        self.assertEqual(v["payload_kind"], "value")
 
 
 class TestScannerTargets(unittest.TestCase):

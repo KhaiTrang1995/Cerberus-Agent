@@ -437,6 +437,20 @@ def p_param_cloak() -> Response:
     return cacheable(Response(f"<html><body>campaign source: {v}</body></html>", mimetype="text/html"))
 
 
+@page("/poison/fat-get", "8 · Fat GET -> reflected", "reads a `q` param from the GET request BODY and reflects it; the cache keys on the URL only, so the body param is unkeyed")
+def p_fat_get() -> Response:
+    # A fat-GET-vulnerable origin reads request-body params even on GET, and reads them
+    # PREFERENTIALLY over the query (the misconfiguration this class exploits: the app
+    # trusts the body, the cache keys only on the URL). Werkzeug does not populate
+    # request.form for GET, so parse the body by hand. Body `q` wins; else query `q`.
+    # The nginx cache key is URL-only, so the body `q` is UNKEYED -> a poisoned body is
+    # cached under the URL and served to body-less victims (class 8, fat-GET cloaking).
+    from urllib.parse import parse_qs
+    body_vals = parse_qs(request.get_data(as_text=True) or "").get("q")
+    q = body_vals[0] if body_vals else request.args.get("q", "none")
+    return cacheable(Response(f"<html><body>results for: {q}</body></html>", mimetype="text/html"))
+
+
 # =========================================================================== #
 # NEGATIVE CONTROLS — must be REJECTED by scoring (prove low false-positive rate)
 # =========================================================================== #

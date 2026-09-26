@@ -39,6 +39,7 @@ points a victim at live attacker infrastructure.
 
 import hashlib
 import re
+from urllib.parse import urlencode
 
 import requests
 
@@ -131,19 +132,30 @@ def _pick_diff(base, mod, trusted: set, cb_param: str = "") -> str:
 
 
 def _apply_vector(url: str, vector_type: str, vector_name: str, payload: str):
-    """Return (request_url, extra_headers) with the payload applied."""
+    """Return (request_url, extra_headers, body) with the payload applied.
+
+    ``body`` is None for every vector except ``fat_get``.
+    """
     if vector_type == "header":
-        return url, {vector_name: payload}
+        return url, {vector_name: payload}, None
     if vector_type == "param":
-        return add_cache_buster(url, vector_name, payload), {}
+        return add_cache_buster(url, vector_name, payload), {}, None
+    if vector_type == "fat_get":
+        # Fat GET: the param rides in the GET request BODY, never in the URL. A cache
+        # keys on the URL and so never sees it; an origin that merges GET body params
+        # still reads and reflects it -> body-borne parameter cloaking. The clean
+        # victim request carries no body, so a HIT that still shows the value proves
+        # the poisoned body was cached under the bare URL key.
+        body = urlencode({vector_name: payload})
+        return url, {"Content-Type": "application/x-www-form-urlencoded"}, body
     if vector_type == "path":
         # The segment is the vector NAME (a fixed confusion suffix like
         # "_payload.json"), inserted BEFORE the cache-buster query so it reaches the
         # route. The random `payload` canary is deliberately not used: a path vector
         # poisons via path-keying confusion (detected differentially), not by echoing
         # a marker, so the suffix must be the exact, fixed path the framework serves.
-        return add_path_segment(url, vector_name), {}
-    return url, {}
+        return add_path_segment(url, vector_name), {}, None
+    return url, {}, None
 
 
 def confirm_vector(vector: dict, buster: dict, session: requests.Session,
@@ -185,7 +197,12 @@ def confirm_vector(vector: dict, buster: dict, session: requests.Session,
         "cross_vantage": False,
     }
 
-    def _get(req_url, extra_headers=None):
+    def _get(req_url, extra_headers=None, body=None):
+        # Only pass data= when there IS a body: the clean/baseline reads must stay
+        # plain GETs, and it keeps fake sessions (no data kwarg) working unchanged.
+        if body is not None:
+            return session.get(req_url, headers=extra_headers or None, data=body,
+                               timeout=timeout, verify=verify_ssl, allow_redirects=False)
         return session.get(req_url, headers=extra_headers or None,
                            timeout=timeout, verify=verify_ssl, allow_redirects=False)
 
@@ -204,8 +221,8 @@ def confirm_vector(vector: dict, buster: dict, session: requests.Session,
             record["baseline_stable"] = not unstable
 
         # 2. POISON FIRST on the fresh poison slot -> MISS -> origin -> poison cached.
-        req_url, extra_headers = _apply_vector(poison_url, vector_type, vector_name, payload)
-        poisoned = _get(req_url, extra_headers)
+        req_url, extra_headers, body = _apply_vector(poison_url, vector_type, vector_name, payload)
+        poisoned = _get(req_url, extra_headers, body)
         poisoned_body = poisoned.text or ""
         poisoned_loc = poisoned.headers.get("location", "") or ""
         reflected = (token in poisoned_body) or (token in poisoned_loc)

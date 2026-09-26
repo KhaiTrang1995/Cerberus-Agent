@@ -71,6 +71,15 @@ _GENERIC_PARAMS = [
     ("callback", "reflected"),   # JSONP
 ]
 
+# Fat GET: params carried in the GET request BODY (not the query). An origin that
+# merges GET body params reflects them while a URL-keyed cache never sees them, so a
+# poisoned body is stored under the bare URL and served to body-less victims. Kept
+# short (this is an unusual request shape) and reflection-only.
+_FAT_GET_PARAMS = [
+    ("q", "reflected"),          # ubiquitous search param, commonly reflected
+    ("utm_source", "reflected"),
+]
+
 # Framework packs keyed by a technology-name substring (matched case-insensitively
 # against the recon technology fingerprint).
 _FRAMEWORK_PACKS = {
@@ -162,6 +171,21 @@ def generate_hypotheses(url: str, combined_result: dict, settings: dict,
             "url": url,
             "technique": "unkeyed_param",
             "vector_type": "param",
+            "vector_name": name,
+            "payload_kind": "value",
+            "impact_hint": impact,
+            "source": "hypothesis",
+        })
+
+    # Fat GET (body-borne parameter cloaking). A distinct TRANSPORT from the query
+    # sweep above (param in the GET body, not the URL), so it is emitted even when
+    # the same name rode the query -- the two exercise different code paths. A WCVS
+    # fat_get candidate is instead re-tested via _wcvs_vector's fat_get branch.
+    for name, impact in _FAT_GET_PARAMS:
+        hypotheses.append({
+            "url": url,
+            "technique": "fat_get",
+            "vector_type": "fat_get",
             "vector_name": name,
             "payload_kind": "value",
             "impact_hint": impact,

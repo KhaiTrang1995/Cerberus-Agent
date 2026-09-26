@@ -253,6 +253,10 @@ def _wcvs_vector(url: str, candidate: dict) -> dict:
         vector_type, payload_kind, impact = "path", "path", "deception"
     elif technique == "unkeyed_param":
         vector_type, payload_kind, impact = "param", "value", "reflected"
+    elif technique == "fat_get":
+        # Body-borne param: re-test as a fat GET, NOT a header (the old default),
+        # so the native confirmation matches the transport WCVS actually exercised.
+        vector_type, payload_kind, impact = "fat_get", "value", "reflected"
     else:
         # Header vector: host-style headers carry a hostname payload (open
         # redirect / host-header abuse); other headers carry a plain value.
