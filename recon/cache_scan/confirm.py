@@ -42,7 +42,7 @@ import re
 
 import requests
 
-from recon.cache_scan.buster import add_cache_buster
+from recon.cache_scan.buster import add_cache_buster, add_path_segment
 from recon.cache_scan.oracle import response_cache_state
 from recon.cache_scan.safety import (
     new_canary_token, canary_host, canary_value, new_cache_buster_value,
@@ -137,9 +137,12 @@ def _apply_vector(url: str, vector_type: str, vector_name: str, payload: str):
     if vector_type == "param":
         return add_cache_buster(url, vector_name, payload), {}
     if vector_type == "path":
-        # Append the payload as a path segment (deception / path-confusion style).
-        sep = "" if url.endswith("/") else "/"
-        return f"{url}{sep}{payload.lstrip('/')}", {}
+        # The segment is the vector NAME (a fixed confusion suffix like
+        # "_payload.json"), inserted BEFORE the cache-buster query so it reaches the
+        # route. The random `payload` canary is deliberately not used: a path vector
+        # poisons via path-keying confusion (detected differentially), not by echoing
+        # a marker, so the suffix must be the exact, fixed path the framework serves.
+        return add_path_segment(url, vector_name), {}
     return url, {}
 
 

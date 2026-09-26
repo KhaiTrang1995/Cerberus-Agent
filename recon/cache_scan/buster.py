@@ -30,6 +30,20 @@ def add_cache_buster(url: str, param: str, value: str) -> str:
     return urlunparse(parts._replace(query=new_query))
 
 
+def add_path_segment(url: str, segment: str) -> str:
+    """Append a path segment BEFORE the query string, preserving the query.
+
+    Framework path-confusion vectors (e.g. Nuxt's ``_payload.json``) must land as a
+    real path segment so the request actually reaches the confusion route. Appending
+    after ``?rdmncb=`` (the old behaviour) buried the segment inside the query, so the
+    route was never exercised and the buster stayed a valid key at the same time.
+    """
+    parts = urlparse(url)
+    base = parts.path if parts.path.endswith("/") else parts.path + "/"
+    new_path = base + segment.lstrip("/")
+    return urlunparse(parts._replace(path=new_path))
+
+
 def find_cache_buster(url: str, session: requests.Session, settings: dict,
                       timeout: int = 10, verify_ssl: bool = True) -> dict:
     """Determine a safe isolated cache-buster location for this URL.

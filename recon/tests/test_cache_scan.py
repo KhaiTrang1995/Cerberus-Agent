@@ -484,6 +484,15 @@ class TestBuster(unittest.TestCase):
         out = buster.add_cache_buster("http://x:8080/a/b", "cb", "1")
         self.assertTrue(out.startswith("http://x:8080/a/b?"))
 
+    def test_add_path_segment_before_query(self):
+        # Segment lands as a real path element, query (the buster) preserved after it.
+        out = buster.add_path_segment("https://x/fw/nuxt?rdmncb=1", "_payload.json")
+        self.assertEqual(out, "https://x/fw/nuxt/_payload.json?rdmncb=1")
+
+    def test_add_path_segment_no_query_and_trailing_slash(self):
+        self.assertEqual(buster.add_path_segment("https://x/a", "b"), "https://x/a/b")
+        self.assertEqual(buster.add_path_segment("https://x/a/", "/b"), "https://x/a/b")
+
     def test_find_buster_default_param_and_always_isolated(self):
         info = buster.find_cache_buster("https://x/", _HeaderSession({"x-cache": "miss"}), {})
         self.assertEqual(info["param"], "rdmncb")
@@ -884,6 +893,17 @@ class TestConfirm(unittest.TestCase):
     def test_apply_vector_param(self):
         url, hdrs = confirm._apply_vector("https://x/p", "param", "utm", "evil")
         self.assertIn("utm=evil", url)
+        self.assertEqual(hdrs, {})
+
+    def test_apply_vector_path_uses_vector_name_before_query(self):
+        # Nuxt vector: ("_payload.json", "path", "path", "reflected"). The confusion
+        # suffix must land as a real path segment BEFORE the cache-buster query, and
+        # must be the vector NAME, not the random canary payload (the old bug appended
+        # the payload after "?rdmncb=", so "_payload.json" was never exercised).
+        url, hdrs = confirm._apply_vector(
+            "https://x/fw/nuxt?rdmncb=abc123", "path", "_payload.json", "/rdmncanary")
+        self.assertEqual(url, "https://x/fw/nuxt/_payload.json?rdmncb=abc123")
+        self.assertNotIn("rdmncanary", url)       # random payload not used for path
         self.assertEqual(hdrs, {})
 
     def test_classify_impact_redirect(self):
