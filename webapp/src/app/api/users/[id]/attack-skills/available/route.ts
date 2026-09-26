@@ -43,6 +43,11 @@ const BUILT_IN_SKILLS = [
     description: 'Authorization bypass: forced browsing, IDOR / BOLA, vertical/horizontal privilege escalation, HTTP verb tampering, 401/403 path-normalization and trust-header bypass, hidden-field / role tampering, JWT attacks, and CORS/GraphQL authz flaws',
   },
   {
+    id: 'http_request_smuggling',
+    name: 'HTTP Request Smuggling / Desync',
+    description: 'Desync a front proxy / load balancer / CDN / cache from the back-end app via CL.TE / TE.CL / TE.TE, obfuscated Transfer-Encoding, and CL.0 framing disagreements to bypass front-enforced access controls, poison another user\'s request, or reach internal-only hosts',
+  },
+  {
     id: 'xxe',
     name: 'XML External Entity',
     description: 'XXE testing against XML parsers: in-band file read, php-filter source read, error-based and out-of-band exfiltration via external/local DTD, SSRF via entities, XInclude, content-type switching, and XXE in SVG/DOCX/SAML uploads',

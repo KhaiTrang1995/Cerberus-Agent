@@ -313,6 +313,21 @@ export const EXPLOITATION_GROUPS: SESubGroup[] = [
     ],
   },
   {
+    id: 'http_request_smuggling',
+    title: 'HTTP Request Smuggling / Desync',
+    items: [
+      {
+        suggestions: [
+          { label: 'Confirm a front/back-end chain exists', prompt: 'Query the graph for HTTP endpoints and their response headers. Identify whether a reverse proxy / load balancer / CDN / cache sits in front of a distinct back-end (Via, X-Cache, CF-Ray, X-Served-By, differing Server / X-* headers, or a front tier that answers some paths itself). Only pursue smuggling on a confirmed multi-tier path; report the evidence for the chain.' },
+          { label: 'Detect a CL.TE / TE.CL desync with raw sockets', prompt: 'On the confirmed fronted endpoint, use execute_code with a raw socket (byte-exact framing over ONE keep-alive connection, unique filename per run) to send CL.TE and TE.CL probes: a chunked body ended early with a Content-Length that hides trailing bytes, and its inverse. Use timing only as a screening signal. Do NOT declare it safe on a clean timing probe.' },
+          { label: 'Fuzz obfuscated Transfer-Encoding (TE.TE)', prompt: 'Use execute_code raw sockets to systematically vary the Transfer-Encoding header one byte at a time (xchunked, leading space/tab, duplicated TE header, odd casing, trailing whitespace, embedded CR/LF) and diff status / timing / connection-close against a captured baseline. A single-byte mutation that one tier honours and the other ignores is the desync candidate.' },
+          { label: 'Prove the desync across a SEPARATE connection', prompt: 'For a candidate desync, rule out the HTTP pipelining false positive: with execute_code, issue the poisoning request on one socket, then a NORMAL request on a DIFFERENT fresh connection, and confirm the smuggled prefix visibly changed that separate-connection response. An effect that only appears within one reused connection is pipelining, not a desync -- do not report it.' },
+          { label: 'Weaponize via routing metadata (Host / authority)', prompt: 'Once a desync is confirmed on a separate connection, smuggle a request whose method/path targets a front-blocked or internal-only resource, and systematically vary the smuggled request Host / authority to reach internal virtual hosts the front tier normally rewrites. Follow with a normal request on the same connection to read the smuggled response and cite the exact framing variant that proved impact.' },
+        ],
+      },
+    ],
+  },
+  {
     id: 'xxe',
     title: 'XML External Entity (XXE)',
     items: [

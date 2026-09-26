@@ -1,0 +1,49 @@
+# Self-contained vulnerable target for end-to-end validation of the RedAmon
+# http_request_smuggling agent skill. A deliberately vulnerable CL.TE two-tier
+# HTTP stack: a Content-Length-based edge proxy in front of a Transfer-Encoding
+# -honoring backend origin.
+#
+#   docker compose up -d --build
+#   open http://localhost:9092/          (the EDGE; /admin is 403 here)
+#   open http://localhost:9092/admin     -> 403 Forbidden (blocked at the edge)
+#
+# The flag at the backend's /admin is only reachable by smuggling a request past
+# the edge (CL.TE). Point a RedAmon project at the host's Docker-bridge IP on
+# port 9092 (the edge) so the agent container can reach it (see README).
+#
+# Port 9093 exposes the backend DIRECTLY (bypassing the edge) only so recon can
+# see that a distinct back-end app server sits behind the edge. The intended
+# attack path is entirely through the edge on 9092.
+
+services:
+  backend:
+    build: ./backend
+    container_name: hrs-guinea-backend
+    environment:
+      - BACKEND_PORT=5000
+      - HRS_FLAG=REDAMON_HRS{cl_te_desync_reached_the_backend}
+    expose:
+      - "5000"
+    ports:
+      - "9093:5000"
+    networks:
+      - hrs
+
+  edge:
+    build: ./frontend
+    container_name: hrs-guinea-edge
+    depends_on:
+      - backend
+    environment:
+      # Port 80 so a plain-hostname recon target is found by default httpx probing.
+      - FRONT_PORT=80
+      - BACKEND_HOST=backend
+      - BACKEND_PORT=5000
+    ports:
+      - "9092:80"
+    networks:
+      - hrs
+
+networks:
+  hrs:
+    name: hrs-guinea-net

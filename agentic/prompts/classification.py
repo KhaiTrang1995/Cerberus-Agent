@@ -52,10 +52,10 @@ _XSS_SECTION = """### xss — Cross-Site Scripting (XSS)
 - Keywords: XSS, cross-site scripting, reflected XSS, stored XSS, DOM XSS, blind XSS, dalfox, payload encoding, CSP bypass, innerHTML, event handler, script injection
 """
 
-_HTTP_SMUGGLING_SECTION = """### http_request_smuggling — HTTP Request Smuggling / Desync
-- Desynchronize a FRONT tier (reverse proxy / load balancer / CDN / cache) and the BACK-END app so a smuggled request is interpreted differently by each — reaching endpoints the front tier blocks, poisoning another user's request, or bypassing front-enforced access controls
+_HTTP_SMUGGLING_SECTION = """### http_request_smuggling - HTTP Request Smuggling / Desync
+- Desynchronize a FRONT tier (reverse proxy / load balancer / CDN / cache) and the BACK-END app so a smuggled request is interpreted differently by each - reaching endpoints the front tier blocks, poisoning another user's request, or bypassing front-enforced access controls
 - Includes: CL.TE, TE.CL, TE.TE (obfuscated Transfer-Encoding), CL.0 / request-queue poisoning, cache poisoning via smuggling
-- Key distinction: the flaw is in how a CHAIN of HTTP processors (a proxy/cache in FRONT of a distinct app server) disagree on where one request ends — not a single app parameter (SQLi/XSS) or a URL fetcher (SSRF)
+- Key distinction: the flaw is in how a CHAIN of HTTP processors (a proxy/cache in FRONT of a distinct app server) disagree on where one request ends - not a single app parameter (SQLi/XSS) or a URL fetcher (SSRF)
 - Keywords: request smuggling, HTTP desync, CL.TE, TE.CL, Transfer-Encoding, Content-Length, chunked, front-end/back-end, reverse proxy, load balancer, request queue poisoning, connection reuse
 """
 
@@ -195,11 +195,11 @@ _CLASSIFICATION_INSTRUCTIONS = {
       - Does it mention access control, authorization/authentication bypass, IDOR/BOLA, privilege escalation, forced browsing, method/verb tampering, hidden fields, mass assignment, JWT tampering, CORS, or business-logic abuse?
       - Boundary: if the goal is specifically SQLi / XSS / SSRF / RCE / file read / credential guessing, use THAT skill instead — access_control is for defeating the access DECISION itself.""",
     'http_request_smuggling': """   - **http_request_smuggling**:
-      - Does recon reveal a MULTI-TIER HTTP path — a reverse proxy, load balancer, CDN, or cache in FRONT of a distinct back-end app server (differing `Server`/`Via`/`X-Cache`/`X-*` proxy headers, hop-by-hop header differences, or a front tier that answers before the app)?
-      - Is there a resource the FRONT tier blocks (401/403/redirect) that the back-end would serve if the request reached it directly — a front-enforced access control worth bypassing from behind?
-      - Is there an INTERNAL-ONLY virtual host, hostname, or backend the app itself references (in a response header, a link, an error, or verbose output) that a DIRECT request cannot reach because the front tier rewrites the `Host` / authority? Reaching it requires smuggling a request whose `Host` / authority survives the front tier untouched — a strong smuggling tell even when a login or admin panel is the visible surface.
+      - Does recon reveal a MULTI-TIER HTTP path - a reverse proxy, load balancer, CDN, or cache in FRONT of a distinct back-end app server (differing `Server`/`Via`/`X-Cache`/`X-*` proxy headers, hop-by-hop header differences, or a front tier that answers before the app)?
+      - Is there a resource the FRONT tier blocks (401/403/redirect) that the back-end would serve if the request reached it directly - a front-enforced access control worth bypassing from behind?
+      - Is there an INTERNAL-ONLY virtual host, hostname, or backend the app itself references (in a response header, a link, an error, or verbose output) that a DIRECT request cannot reach because the front tier rewrites the `Host` / authority? Reaching it requires smuggling a request whose `Host` / authority survives the front tier untouched - a strong smuggling tell even when a login or admin panel is the visible surface.
       - Is there a page (often reachable via weak or DEFAULT credentials) that REFLECTS the response of a SERVER-SIDE fetch the app makes to an internal host? That reflected fetch is your READ ORACLE for a response/desync: chain the default-credential foothold to reach it, then use smuggling to change what that internal fetch returns.
-      - Do the two tiers appear to disagree on request framing — does the server react differently to a `Transfer-Encoding: chunked` + `Content-Length` combination, an obfuscated TE header, or trailing/pipelined bytes than a single server would?
+      - Do the two tiers appear to disagree on request framing - does the server react differently to a `Transfer-Encoding: chunked` + `Content-Length` combination, an obfuscated TE header, or trailing/pipelined bytes than a single server would?
       - Boundary: if there is only ONE HTTP server with no proxy/cache in front, or the goal is a single-parameter injection, use the matching skill instead. This skill defeats the request-boundary AGREEMENT between chained HTTP processors.""",
     'xxe': """   - **xxe**:
       - Does the request mention XXE, XML external entity, XML injection, a DOCTYPE / ENTITY / DTD, or XInclude?
@@ -312,7 +312,7 @@ def build_classification_prompt(objective: str) -> str:
     parts.append("## Attack Skill Types (ONLY for exploitation phase)\n")
 
     # Built-in skills (only enabled ones)
-    for skill_id in ['phishing_social_engineering', 'brute_force_credential_guess', 'cve_exploit', 'denial_of_service', 'sql_injection', 'xss', 'ssrf', 'rce', 'path_traversal', 'access_control', 'xxe', 'crypto_attack']:
+    for skill_id in ['phishing_social_engineering', 'brute_force_credential_guess', 'cve_exploit', 'denial_of_service', 'sql_injection', 'xss', 'ssrf', 'rce', 'path_traversal', 'access_control', 'http_request_smuggling', 'xxe', 'crypto_attack']:
         if skill_id in enabled_builtins:
             section_text, _, _ = _BUILTIN_SKILL_MAP[skill_id]
             parts.append(section_text)
@@ -343,7 +343,7 @@ def build_classification_prompt(objective: str) -> str:
                  "'brute force SSH' → brute_force_credential_guess). Pick the one whose criteria fit most closely:\n")
 
     # Built-in skill classification criteria
-    builtin_skill_ids = ['phishing_social_engineering', 'brute_force_credential_guess', 'cve_exploit', 'denial_of_service', 'sql_injection', 'xss', 'ssrf', 'rce', 'path_traversal', 'access_control', 'xxe', 'crypto_attack']
+    builtin_skill_ids = ['phishing_social_engineering', 'brute_force_credential_guess', 'cve_exploit', 'denial_of_service', 'sql_injection', 'xss', 'ssrf', 'rce', 'path_traversal', 'access_control', 'http_request_smuggling', 'xxe', 'crypto_attack']
     for skill_id in builtin_skill_ids:
         if skill_id in enabled_builtins:
             parts.append(_CLASSIFICATION_INSTRUCTIONS[skill_id])

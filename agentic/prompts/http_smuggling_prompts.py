@@ -24,8 +24,18 @@ precise `Content-Length`, literal CRLFs, exact chunk sizes, deliberately
 malformed headers). `execute_curl` and `execute_httpx` normalize the request and
 will NOT reproduce a desync. Use `execute_code` with a raw socket (Python
 `socket` / `http.client` with manual bytes) or `kali_shell` with a raw-request
-tool. Send over ONE reused keep-alive connection so you can observe how the
-smuggled bytes affect the FOLLOWING response.
+tool. When you run `execute_code`, pass a per-run unique `filename=` (e.g.
+`/tmp/desync_<random>.py`); the default script path is shared and collides with
+other concurrent sessions in the sandbox. Send over ONE reused keep-alive
+connection so you can observe how the smuggled bytes affect the FOLLOWING
+response.
+
+DETECTION MINDSET (discrepancy-first): the modern, higher-accuracy approach probes
+for the PARSER DISCREPANCY itself -- does one boundary byte change what the FRONT
+tier sees without changing what the BACK-END sees (or vice versa) -- rather than
+firing a weaponized payload and hoping. Track connection state so you can tell a
+real desync from ordinary connection noise. This same discrepancy-first model
+underlies the 0.CL / CL.0 and Expect / obfuscation-fuzzing steps.
 
 ### Step 1: Confirm a front/back-end chain exists (grounding, no payloads)
 Only proceed if recon shows a multi-tier HTTP path: a proxy/cache/LB in front of
@@ -45,10 +55,15 @@ weaponized:
 - TE.TE: both support chunked but one is fooled by an OBFUSCATED Transfer-Encoding
   header (`Transfer-Encoding: xchunked`, leading space/tab, duplicated TE header,
   odd casing, `\\r\\n` tricks) so only one tier applies it.
-Confirm with a timing signal (one variant delays, its mirror does not), then a
-differential (a smuggled request visibly changes the NEXT response). A single
-byte (a stray space in the TE header, an off-by-one Content-Length) is often the
-whole difference. Vary the framing systematically.
+Timing is a SCREENING signal only, never a confirmation. It has a high
+false-positive AND false-negative rate: always corroborate a timing hit with the
+cross-connection differential in Step 4, and do NOT close the class on a clean
+timing probe -- common mitigations and WAF rules MASK the classic timing signal
+while the underlying parser discrepancy stays exploitable, so a negative timing
+result does not mean "not vulnerable." Confirm with a differential (a smuggled
+request visibly changes the NEXT response). A single byte (a stray space in the
+TE header, an off-by-one Content-Length) is often the whole difference. Vary the
+framing systematically.
 
 ### Step 3: Weaponize toward the objective
 Once a desync is confirmed, smuggle a request whose method/path targets what the
@@ -72,10 +87,24 @@ front tier denies but the back-end trusts:
 - On the SAME connection, follow with a normal request to READ the smuggled
   response.
 
-### Step 4: Confirm impact
+### Step 4: Confirm impact -- and RULE OUT pipelining first
+RULE OUT THE PIPELINING FALSE POSITIVE BEFORE YOU REPORT. Reading the smuggled
+response back on the SAME reused connection is correct for weaponizing but is NOT
+by itself proof of an exploitable desync: ordinary HTTP pipelining / connection
+reuse produces the SAME visible effect within a single connection with no
+cross-user impact ("the false false-positive"). A genuine front/back desync must
+be observed ACROSS TWO SEPARATE connections -- the poisoning request on one
+connection must visibly change a NORMAL request issued on a DIFFERENT, fresh
+connection (or produce a cache-poison / access-control-bypass consequence). Open a
+second socket for the confirming request; if the effect appears ONLY within one
+reused connection and vanishes on a separate connection, it is pipelining, NOT a
+desync -- do not report it. The raw-socket `execute_code` path can open both
+sockets, so no new tool is needed.
+
 Success = you retrieved content or triggered an action that the front tier blocks
-for a direct request, proving the boundary disagreement is exploitable. Cite the
-exact framing variant that desynced and the response that proves it.
+for a direct request, confirmed on a SEPARATE connection, proving the boundary
+disagreement is exploitable. Cite the exact framing variant that desynced and the
+separate-connection response that proves it.
 
 A desync is a TRANSPORT primitive, not a finished exploit. If smuggled requests to
 protected resources return auth redirects / denials (302 / 401 / 403) WHILE the

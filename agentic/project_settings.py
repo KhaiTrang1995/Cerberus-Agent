@@ -403,7 +403,12 @@ DEFAULT_AGENT_SETTINGS: dict[str, Any] = {
             'rce': True,
             'path_traversal': True,
             'access_control': True,
-            'http_request_smuggling': True,
+            # Fail-closed OFF: execute_code / kali_shell raw sockets bypass check_egress,
+            # the capture proxy AND the non-disableable is_hard_blocked tool guardrail
+            # (it is enforced only against declared in-scope domains, never the host a
+            # raw socket dials), and redamon.finding() does not persist. Operators enable
+            # this per project once the go-live egress/RoE decision is settled.
+            'http_request_smuggling': False,
             'xxe': True,
             'crypto_attack': True,
         },

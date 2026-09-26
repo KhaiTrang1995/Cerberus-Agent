@@ -112,6 +112,12 @@ export const KNOWN_ATTACK_PATH_CONFIG: Record<string, { label: string; shortLabe
     color: 'var(--accent-indigo, #6366f1)',
     bgColor: 'rgba(99, 102, 241, 0.15)',
   },
+  http_request_smuggling: {
+    label: 'HTTP Request Smuggling / Desync',
+    shortLabel: 'DESYNC',
+    color: 'var(--accent-lime, #84cc16)',
+    bgColor: 'rgba(132, 204, 22, 0.15)',
+  },
   xxe: {
     label: 'XML External Entity',
     shortLabel: 'XXE',

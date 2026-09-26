@@ -314,10 +314,14 @@ for t in redamon.search(method="POST"):
     if any(k in resp for k in ("via", "x-cache", "cf-ray", "x-served-by", "x-forwarded")):
         print("smuggling candidate (fronted):", t.id, "->", redamon.to_curl(t.id).splitlines()[-1])
 ```
-2) CONFIRM with a tool that preserves byte framing, run via `kali_shell` (NOT redamon):
-   a raw-socket Python script or `smuggler`, sending CL.TE / TE.CL probes directly. A
-   vulnerable back-end HANGS ~10s waiting for bytes the front-end already ended.
-   HTTP/2 front-ends that downgrade to HTTP/1.1 re-expose these.
+2) CONFIRM with a tool that preserves byte framing: a raw-socket Python script run via
+   `execute_code` (or `kali_shell`), sending CL.TE / TE.CL probes directly over one
+   keep-alive socket. (There is no `smuggler` binary in the sandbox image; write the
+   raw socket yourself.) A vulnerable back-end HANGS ~10s waiting for bytes the
+   front-end already ended. Rule out ordinary pipelining by reproducing the effect on a
+   SEPARATE connection before reporting. HTTP/2 front-ends that downgrade to HTTP/1.1
+   re-expose these. The `http_request_smuggling` built-in agent skill teaches this
+   raw-socket workflow end to end.
 
 ## cache — web cache poisoning & hidden inputs (Param Miner, in code)
 
