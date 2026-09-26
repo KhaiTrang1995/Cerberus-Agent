@@ -1,0 +1,40 @@
+# Self-contained vulnerable target for end-to-end validation of the CL.0 leg of the
+# RedAmon http_request_smuggling agent skill (class 2). A streaming Content-Length
+# edge in front of a backend that answers server-generated endpoints WITHOUT reading
+# the body (CL.0). The backend /admin flag is blocked at the edge and only reachable
+# by smuggling a request inside a CL.0 carrier body.
+#
+#   docker compose up -d --build
+#   open http://localhost:9094/           (the EDGE; /admin is 403 here)
+#   python3 tests/verify_cl0.py           (paused oracle + queue-poison exploit)
+#
+# Port 9095 exposes the backend directly so recon can see the distinct backend.
+services:
+  backend:
+    build: ./backend
+    container_name: cl0-guinea-backend
+    environment:
+      - BACKEND_PORT=5000
+      - HRS_FLAG=REDAMON_HRS{cl_0_desync_body_ignored_by_backend}
+    expose:
+      - "5000"
+    ports:
+      - "9095:5000"
+    networks:
+      - cl0
+  edge:
+    build: ./frontend
+    container_name: cl0-guinea-edge
+    depends_on:
+      - backend
+    environment:
+      - FRONT_PORT=80
+      - BACKEND_HOST=backend
+      - BACKEND_PORT=5000
+    ports:
+      - "9094:80"
+    networks:
+      - cl0
+networks:
+  cl0:
+    name: cl0-guinea-net

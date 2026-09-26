@@ -63,7 +63,9 @@ sys.modules['langchain_core.messages'].HumanMessage = FakeHumanMessage
 sys.modules['langgraph.graph.message'].add_messages = _fake_add_messages
 
 import project_settings as ps  # noqa: E402
-from prompts import build_builtin_skill_workflow, HTTP_SMUGGLING_TOOLS  # noqa: E402
+from prompts import (  # noqa: E402
+    build_builtin_skill_workflow, HTTP_SMUGGLING_TOOLS, HTTP_SMUGGLING_ZERO_CL_STEP,
+)
 from prompts.base import build_attack_path_behavior  # noqa: E402
 from prompts.classification import (  # noqa: E402
     build_skill_menu, build_classification_prompt,
@@ -175,6 +177,56 @@ class TestHrsInjection(unittest.TestCase):
         with patch("project_settings.get_enabled_builtin_skills", return_value={"xss"}):
             self.assertEqual(
                 build_builtin_skill_workflow(CLS, {"execute_code"}), [])
+
+
+class TestHrsZeroClStep(unittest.TestCase):
+    """Class 2: the CL.0 / 0.CL sub-section (X4 wiring + content)."""
+
+    def test_step_injected_with_tools_when_enabled(self):
+        # Fail-closed default OFF -> enable in the settings context first.
+        with patch("project_settings.get_enabled_builtin_skills", return_value={CLS}):
+            wf = build_builtin_skill_workflow(CLS, {"execute_code"})
+        blob = "\n".join(wf)
+        self.assertIn(HTTP_SMUGGLING_ZERO_CL_STEP, wf)
+        # rides the same execute_code branch as the base workflow
+        self.assertIn("MANDATORY HTTP REQUEST SMUGGLING WORKFLOW", blob)
+        self.assertIn("CL.0", blob)
+
+    def test_step_absent_without_execute_code(self):
+        with patch("project_settings.get_enabled_builtin_skills", return_value={CLS}):
+            self.assertEqual(build_builtin_skill_workflow(CLS, {"execute_curl"}), [])
+
+    def test_zero_cl_content(self):
+        s = HTTP_SMUGGLING_ZERO_CL_STEP
+        # case-sensitive: the class labels
+        for token in ("0.CL", "CL.0", "Content-Length"):
+            self.assertIn(token, s, token)
+        # the paused-oracle detection primitive + the "no TE header" premise
+        low = s.lower()
+        for token in ("paused", "pause before sending", "connection-state",
+                      "read timeout", "no such header"):
+            self.assertIn(token, low, token)
+
+    def test_candidate_endpoint_heuristic(self):
+        s = HTTP_SMUGGLING_ZERO_CL_STEP.lower()
+        for token in ("favicon", "robots.txt", "redirect", "health", "options"):
+            self.assertIn(token, s, token)
+
+    def test_pipelining_guard_shared(self):
+        # the separate-connection guard must be present here too (sharper for 0.CL)
+        self.assertIn("SEPARATE", HTTP_SMUGGLING_ZERO_CL_STEP)
+        self.assertIn("pipelining", HTTP_SMUGGLING_ZERO_CL_STEP)
+
+    def test_no_em_dash_no_braces(self):
+        self.assertNotIn("—", HTTP_SMUGGLING_ZERO_CL_STEP)
+        self.assertEqual(HTTP_SMUGGLING_ZERO_CL_STEP.count("{"), 0)
+        self.assertEqual(HTTP_SMUGGLING_ZERO_CL_STEP.count("}"), 0)
+
+    def test_full_system_prompt_includes_zero_cl(self):
+        from prompts import get_phase_tools
+        with patch("project_settings.get_enabled_builtin_skills", return_value={CLS}):
+            sysprompt = get_phase_tools(phase="exploitation", attack_path_type=CLS)
+        self.assertIn("CL.0 / 0.CL DESYNC", sysprompt)
 
 
 class TestHrsDisabledSwitchIsGraceful(unittest.TestCase):

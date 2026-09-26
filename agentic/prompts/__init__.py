@@ -111,7 +111,7 @@ from .path_traversal_prompts import (
 )
 
 # Re-export from HTTP request smuggling prompts
-from .http_smuggling_prompts import HTTP_SMUGGLING_TOOLS
+from .http_smuggling_prompts import HTTP_SMUGGLING_TOOLS, HTTP_SMUGGLING_ZERO_CL_STEP
 
 # Re-export from XML External Entity (XXE) injection prompts
 from .xxe_prompts import XXE_TOOLS
@@ -372,6 +372,9 @@ def build_builtin_skill_workflow(
             and "http_request_smuggling" in enabled_builtins
             and "execute_code" in allowed_tools):
         parts.append(HTTP_SMUGGLING_TOOLS)
+        # CL.0 / 0.CL is the 2025 desync shape with no TE header to probe; it rides
+        # the same raw-socket execute_code path, so append it unconditionally here.
+        parts.append(HTTP_SMUGGLING_ZERO_CL_STEP)
         return parts
     elif (attack_path_type == "xxe"
             and "xxe" in enabled_builtins
@@ -652,6 +655,7 @@ __all__ = [
     "UNCLASSIFIED_EXPLOIT_TOOLS",
     "ACCESS_CONTROL_TOOLS",
     "HTTP_SMUGGLING_TOOLS",
+    "HTTP_SMUGGLING_ZERO_CL_STEP",
     # XML External Entity (XXE) injection
     "XXE_TOOLS",
     "CRYPTO_ATTACK_TOOLS",

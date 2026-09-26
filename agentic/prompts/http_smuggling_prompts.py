@@ -115,3 +115,65 @@ credentials at the discovered login, or capture a victim session via request /
 response socket poisoning -- then re-smuggle the request as the authenticated
 principal. An auth block on a working channel means CHAIN, not STOP.
 """
+
+
+HTTP_SMUGGLING_ZERO_CL_STEP = """
+## CL.0 / 0.CL DESYNC (no Transfer-Encoding to probe)
+
+The CL.TE / TE.CL / TE.TE probes above key on a `Transfer-Encoding` ambiguity.
+CL.0 and 0.CL have NO such header: the request looks completely ordinary, which is
+exactly why stacks that patched classic smuggling are still exposed. A CLEAN
+classic-smuggling probe does NOT mean the target is safe -- if the front/back chain
+is real, run these two probes before concluding.
+
+- CL.0: the FRONT tier reads `Content-Length` and forwards the body, but the
+  BACK-END answers WITHOUT reading the body (it decided the request has no body),
+  so your body bytes are parsed as the START of the NEXT request on that connection.
+  The endpoints that do this are SERVER-GENERATED responses, not app handlers:
+  server-level redirects (`/dir` -> `/dir/`), static assets, `/favicon.ico`,
+  `/robots.txt`, health checks, `OPTIONS` handlers, and anything that returns the
+  same 301/302/200 regardless of what you send it. ENUMERATE those first -- they are
+  the CL.0 candidate set.
+- 0.CL: the reverse and the genuinely new one -- the FRONT decides there is no body
+  while the BACK-END reads a `Content-Length` body. It requires making the FRONT
+  ABANDON the request while the back-end is still reading, which is what the paused
+  probe below is for.
+
+### The paused / partial-request oracle (the detection primitive)
+Open ONE keep-alive connection with a raw socket (`execute_code`), send the request
+HEADERS with a `Content-Length` that PROMISES a body, then PAUSE before sending the
+body. Watch the connection state:
+- an EARLY response (the server answered without your body) == the server treated
+  the request as having no body -> CL.0 candidate on that endpoint.
+- the server WAITS for the promised bytes -> normal framing on that endpoint.
+Classify each candidate endpoint as V (visible to one parser) vs H (hidden from the
+other) -- the parser-discrepancy model -- rather than reading timing alone. Timing
+is a screening signal only.
+
+Socket discipline (fail closed): set an EXPLICIT per-socket read timeout of 5-10s as
+the "back-end waited" threshold. This is INDEPENDENT of the 120s `execute_code` wall
+clock -- a probe that hits the socket timeout OR the process wall is INCONCLUSIVE
+(report "not confirmed"), NEVER a desync. A candidate sweep across many endpoints
+must be CHUNKED so one `execute_code` call does not hit the wall mid-sweep (or use
+`kali_shell`, which has a longer wall). Use a per-run unique `filename=`.
+
+### Connection-state tracking is mandatory (not optional)
+Correlate WHICH response belongs to WHICH request across the pause boundary, and
+confirm the SAME TCP connection carried both. Without this, ordinary pipelining or a
+lost packet mimics the desync signal.
+
+### Rule out pipelining (the dominant false positive here)
+This is the same guard as Step 4, made sharper: a "desync" that reproduces ONLY when
+you reuse your OWN client connection is almost certainly a client<->server pipelining
+artifact, not a front<->back desync. Require evidence of REAL front/back impact: the
+smuggled prefix must visibly change a request issued on a SEPARATE, fresh connection
+(front/back socket poisoning), or produce a cache-poison / access-control-bypass
+consequence. An early response on a single reused socket is a lead, not a finding.
+
+### Weaponize
+Once a CL.0 endpoint is confirmed, smuggle a request for a front-blocked or
+internal-only path inside the body of a request to that endpoint, then read the
+smuggled response on a SEPARATE connection sharing the poisoned front->back socket
+(exactly as Step 4 requires). Report the endpoint that desynced, the smuggled
+request, and the separate-connection response that proves it.
+"""
