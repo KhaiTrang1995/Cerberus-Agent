@@ -1,5 +1,12 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 60" fill="none">
-  <text x="50%" y="48" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif" font-size="52" font-weight="700" letter-spacing="-1">
-    <tspan fill="#e53935">Red</tspan><tspan fill="#a1a1aa">Amon</tspan>
+  <style>
+    /* Amon tracks the app logo's --text-primary: near-black on light
+       backgrounds, near-white on dark. Solid and strong in both, where a
+       fixed white fill would wash out on the light README background. */
+    .amon { fill: #18181b; }
+    @media (prefers-color-scheme: dark) { .amon { fill: #fafafa; } }
+  </style>
+  <text x="50%" y="48" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif" font-size="52" font-weight="700" letter-spacing="-1">
+    <tspan fill="#e53935">Red</tspan><tspan class="amon">Amon</tspan>
   </text>
 </svg>

