@@ -302,3 +302,65 @@ OWN STATUS. Do not rely on timing. Known false-positive stacks (ELB, Apache Traf
 Server, IIS, some WAFs) can flag on the differential alone, so treat any h2-downgrade
 hit as a CANDIDATE and confirm it with the OOB `Host` proof before reporting.
 """
+
+
+HTTP_SMUGGLING_CLIENT_SIDE_STEP = """
+## CLIENT-SIDE DESYNC (the browser desyncs its OWN connection)
+
+This variant needs NO front/back shared socket: the BROWSER reuses one connection to
+the server, so a CL.0-shaped server lets a request smuggled in a body poison the
+BROWSER's own next navigation. It therefore works even against a single-tier target
+with no reverse proxy.
+
+- Vulnerable condition: the server "responds to a POST WITHOUT reading the body" and
+  then lets the browser REUSE the same connection. First confirm the CL.0 condition
+  with the paused / partial-request oracle from the CL.0 step above (raw sockets in
+  `execute_code`): a POST whose body is longer than what was read gets an immediate
+  response, not a timeout.
+- BROWSER-LEGAL VECTOR ONLY: the poisoning request must be something a browser will
+  actually send cross-domain -- an HTML-form or `fetch()` POST. A browser will NOT
+  emit a space-before-colon, a duplicated `Transfer-Encoding`, or other header
+  obfuscation, so the CL.TE / TE.CL / TE.TE tricks above DO NOT apply here. Only the
+  CL.0-shaped, browser-legal body vector works.
+
+### Tooling and hard constraints
+- Use `execute_playwright` (SYNC Playwright API only -- async is rejected), NOT
+  `redamon.browser` (it is host-pinned and egress-guarded and cannot express an
+  attacker-page cross-origin sequence). Keep the whole browser sequence under the tool
+  wall clock (about 45s) with explicit per-step timeouts, and run ONE at a time (no
+  concurrent chromium).
+- ASYNC-GUARD FOOTGUN: the tool rejects the script if the LITERAL text contains
+  `await` / `async` / `asyncio` ANYWHERE, including inside a `page.evaluate(...)` JS
+  string. `fetch()` is async, so do NOT write `await fetch(...)`. Instead pass a JS
+  function that RETURNS a promise and let `page.evaluate` auto-await it, using a
+  `.then()` chain and no `await` keyword, e.g.
+  `page.evaluate("(b) => fetch('/beacon',{method:'POST',body:b}).then(r=>r.text())", body)`.
+  Then `page.goto(url)` for the reused-connection navigation. Launch chromium with
+  `--disable-http2` so the reused connection is HTTP/1.1.
+- BEWARE INTERVENING REQUESTS: any other request the browser makes on that connection
+  between the poisoning fetch and the navigation (a favicon, a subresource, a probe
+  from `wait_until="networkidle"`) will CONSUME the queued smuggled response and hide
+  the desync. Navigate IMMEDIATELY after the fetch, use `wait_until="load"` (not
+  `networkidle`), and keep the page free of subresources. The proof is timing-
+  sensitive; retry the navigation a few times before concluding it is not vulnerable.
+- CAPTURE MUST BE OFF. The capture proxy re-originates connections and destroys the
+  connection-reuse the attack IS (this is why `redamon.replay` cannot detect
+  smuggling). This step is injected only when capture is disabled.
+- Hard-scope EVERY navigation to the seeded target origin; abort any cross-origin
+  navigation to a non-target (RFC1918, 169.254.169.254, `.gov`/`.mil`/`.edu`).
+
+### The sequence and the proof
+Drive the browser to (1) issue the CL.0 POST whose body carries a smuggled request,
+then (2) navigate same-origin on the REUSED connection. Prove connection reuse with
+CDP: `context.new_cdp_session(page)`, enable `Network`, and read the `connectionId`
+of the two requests (the DevTools "Connection ID" column) -- they must share one
+connection. The finding is that your OWN second navigation returns the SMUGGLED
+response.
+
+### Verdict (three-way, sharper than "differs from baseline")
+Do not report on "it only works with connection reuse" alone -- that is the exact
+shape of a pipelining false positive. Require: the persistent follow-up (Response 2)
+EQUALS the smuggled request's response AND DIFFERS from the normal baseline. Matching
+one but not distinguishing from the other is not proof. Prove the primitive on
+YOURSELF (your own navigation), never on a stranger.
+"""

@@ -117,6 +117,7 @@ from .http_smuggling_prompts import (
     HTTP_SMUGGLING_EXPECT_STEP,
     HTTP_SMUGGLING_MUTATION_FUZZING_STEP,
     HTTP_SMUGGLING_H2_STEP,
+    HTTP_SMUGGLING_CLIENT_SIDE_STEP,
 )
 
 # Re-export from XML External Entity (XXE) injection prompts
@@ -390,6 +391,13 @@ def build_builtin_skill_workflow(
         # check -- the prompt renders in the agent image but h2 installs in
         # kali-sandbox, so the agent process cannot see kali's h2 (plan 9.2/10.2 c3).
         parts.append(HTTP_SMUGGLING_H2_STEP)
+        # Client-side desync is browser-driven and REQUIRES capture off (the capture
+        # proxy re-originates connections and destroys the reuse the attack is). Gate
+        # in-branch on execute_playwright + capture disabled (get_setting resolves per
+        # run via ContextVar; CAPTURE_PROXY_ENABLED defaults False).
+        if ("execute_playwright" in allowed_tools
+                and get_setting('CAPTURE_PROXY_ENABLED', True) is False):
+            parts.append(HTTP_SMUGGLING_CLIENT_SIDE_STEP)
         return parts
     elif (attack_path_type == "xxe"
             and "xxe" in enabled_builtins
@@ -674,6 +682,7 @@ __all__ = [
     "HTTP_SMUGGLING_EXPECT_STEP",
     "HTTP_SMUGGLING_MUTATION_FUZZING_STEP",
     "HTTP_SMUGGLING_H2_STEP",
+    "HTTP_SMUGGLING_CLIENT_SIDE_STEP",
     # XML External Entity (XXE) injection
     "XXE_TOOLS",
     "CRYPTO_ATTACK_TOOLS",

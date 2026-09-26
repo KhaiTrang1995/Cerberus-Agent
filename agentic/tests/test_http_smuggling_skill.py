@@ -66,7 +66,7 @@ import project_settings as ps  # noqa: E402
 from prompts import (  # noqa: E402
     build_builtin_skill_workflow, HTTP_SMUGGLING_TOOLS, HTTP_SMUGGLING_ZERO_CL_STEP,
     HTTP_SMUGGLING_EXPECT_STEP, HTTP_SMUGGLING_MUTATION_FUZZING_STEP,
-    HTTP_SMUGGLING_H2_STEP,
+    HTTP_SMUGGLING_H2_STEP, HTTP_SMUGGLING_CLIENT_SIDE_STEP,
 )
 from prompts.base import build_attack_path_behavior  # noqa: E402
 from prompts.classification import (  # noqa: E402
@@ -308,6 +308,51 @@ class TestHrsH2Step(unittest.TestCase):
         self.assertIn("HTTP/2 DOWNGRADE SMUGGLING", sysprompt)
 
 
+class TestHrsClientSideStep(unittest.TestCase):
+    """Class 4: the client-side desync step. Gated in-branch on execute_playwright AND
+    capture OFF (the capture proxy re-originates connections and kills the reuse)."""
+
+    def _cap(self, off):
+        # get_setting('CAPTURE_PROXY_ENABLED', True) -> False means capture is off
+        return lambda k, d=None: (False if off else True) if k == "CAPTURE_PROXY_ENABLED" else d
+
+    def test_injected_when_playwright_and_capture_off(self):
+        with patch("project_settings.get_enabled_builtin_skills", return_value={CLS}), \
+             patch("prompts.get_setting", side_effect=self._cap(off=True)):
+            wf = build_builtin_skill_workflow(CLS, {"execute_code", "execute_playwright"})
+        self.assertIn(HTTP_SMUGGLING_CLIENT_SIDE_STEP, wf)
+
+    def test_suppressed_when_capture_on(self):
+        with patch("project_settings.get_enabled_builtin_skills", return_value={CLS}), \
+             patch("prompts.get_setting", side_effect=self._cap(off=False)):
+            wf = build_builtin_skill_workflow(CLS, {"execute_code", "execute_playwright"})
+        self.assertNotIn(HTTP_SMUGGLING_CLIENT_SIDE_STEP, wf)
+        # the base workflow is still present (only the client-side step is gated off)
+        self.assertIn(HTTP_SMUGGLING_TOOLS, wf)
+
+    def test_suppressed_without_playwright(self):
+        with patch("project_settings.get_enabled_builtin_skills", return_value={CLS}), \
+             patch("prompts.get_setting", side_effect=self._cap(off=True)):
+            wf = build_builtin_skill_workflow(CLS, {"execute_code"})
+        self.assertNotIn(HTTP_SMUGGLING_CLIENT_SIDE_STEP, wf)
+
+    def test_client_side_content(self):
+        s = HTTP_SMUGGLING_CLIENT_SIDE_STEP
+        low = s.lower()
+        for token in ("execute_playwright", "capture must be off", "connection reuse",
+                      "browser-legal", "new_cdp_session", "cl.0",
+                      "async-guard", ".then("):
+            self.assertIn(token, low, token)
+        # must steer away from redamon.browser and stay sync
+        self.assertIn("redamon.browser", low)     # named as what NOT to use
+        self.assertIn("sync", low)
+
+    def test_no_em_dash(self):
+        # NOTE: this step is appended verbatim (never .format'd), so the JS example it
+        # contains may include braces; only the em-dash house-style rule applies.
+        self.assertNotIn("—", HTTP_SMUGGLING_CLIENT_SIDE_STEP)
+
+
 class TestHrsNoUninstalledTools(unittest.TestCase):
     """Every tool the skill NAMES AS RUNNABLE must exist. Guards against telling the
     agent to run a binary the kali-sandbox image does not have (the proxy_brain
@@ -316,7 +361,7 @@ class TestHrsNoUninstalledTools(unittest.TestCase):
     ALL_STEPS = "\n".join([
         HTTP_SMUGGLING_TOOLS, HTTP_SMUGGLING_ZERO_CL_STEP,
         HTTP_SMUGGLING_EXPECT_STEP, HTTP_SMUGGLING_MUTATION_FUZZING_STEP,
-        HTTP_SMUGGLING_H2_STEP,
+        HTTP_SMUGGLING_H2_STEP, HTTP_SMUGGLING_CLIENT_SIDE_STEP,
     ])
 
     def test_registry_tools_only(self):

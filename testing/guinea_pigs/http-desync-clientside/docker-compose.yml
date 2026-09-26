@@ -1,0 +1,21 @@
+# Single-tier CL.0 target for the CLIENT-SIDE desync leg of the RedAmon
+# http_request_smuggling agent skill (class 4). The browser reuses one keep-alive
+# connection, so a request smuggled in a POST /beacon body (which the server answers
+# without reading) poisons the browser's own next navigation.
+#
+#   docker compose up -d --build
+#   open http://localhost:9100/attack   (browser manual repro; ends on /admin)
+services:
+  server:
+    build: ./server
+    container_name: cs-guinea-server
+    environment:
+      - PORT=5000
+      - HRS_FLAG=REDAMON_HRS{client_side_desync_browser_conn_reuse}
+    ports:
+      - "9100:5000"
+    networks:
+      - cs
+networks:
+  cs:
+    name: cs-guinea-net
