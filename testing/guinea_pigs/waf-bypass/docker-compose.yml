@@ -1,0 +1,35 @@
+# WAF-bypass guinea pig (taxonomy class 13): a signature WAF edge in front of an
+# origin that is ALSO reachable directly by IP. A probe the edge blocks but the origin
+# serves proves the WAF is bypassable via direct origin access.
+#
+#   docker compose up -d --build
+#
+# Fixed IPs on redamon-network so a recon run / probe can be pinned to stable
+# addresses (auto-assigned IPs drift on restart). Both serve HTTPS with a baked
+# self-signed cert (the recon check uses verify=False).
+
+services:
+  origin:
+    build: .
+    container_name: waf-guinea-origin
+    volumes:
+      - ./origin.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      redamon:
+        ipv4_address: 172.25.0.92
+
+  edge:
+    build: .
+    container_name: waf-guinea-edge
+    depends_on:
+      - origin
+    volumes:
+      - ./edge.conf:/etc/nginx/conf.d/default.conf:ro
+    networks:
+      redamon:
+        ipv4_address: 172.25.0.91
+
+networks:
+  redamon:
+    external: true
+    name: redamon-network
