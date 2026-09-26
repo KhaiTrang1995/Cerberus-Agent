@@ -65,6 +65,7 @@ sys.modules['langgraph.graph.message'].add_messages = _fake_add_messages
 import project_settings as ps  # noqa: E402
 from prompts import (  # noqa: E402
     build_builtin_skill_workflow, HTTP_SMUGGLING_TOOLS, HTTP_SMUGGLING_ZERO_CL_STEP,
+    HTTP_SMUGGLING_EXPECT_STEP, HTTP_SMUGGLING_MUTATION_FUZZING_STEP,
 )
 from prompts.base import build_attack_path_behavior  # noqa: E402
 from prompts.classification import (  # noqa: E402
@@ -227,6 +228,75 @@ class TestHrsZeroClStep(unittest.TestCase):
         with patch("project_settings.get_enabled_builtin_skills", return_value={CLS}):
             sysprompt = get_phase_tools(phase="exploitation", attack_path_type=CLS)
         self.assertIn("CL.0 / 0.CL DESYNC", sysprompt)
+
+
+class TestHrsExpectAndFuzzingStep(unittest.TestCase):
+    """Class 5: the Expect/100-continue + byte-mutation fuzzing steps (X4 + content)."""
+
+    def test_both_steps_injected_when_enabled(self):
+        with patch("project_settings.get_enabled_builtin_skills", return_value={CLS}):
+            wf = build_builtin_skill_workflow(CLS, {"execute_code"})
+        self.assertIn(HTTP_SMUGGLING_EXPECT_STEP, wf)
+        self.assertIn(HTTP_SMUGGLING_MUTATION_FUZZING_STEP, wf)
+
+    def test_expect_content(self):
+        s = HTTP_SMUGGLING_EXPECT_STEP
+        for token in ("Expect: 100-continue", "0.CL"):
+            self.assertIn(token, s, token)
+        low = s.lower()
+        # must reuse the CL.0 oracle, not build a new one
+        self.assertIn("do not build a second oracle", low)
+        self.assertIn("separate connection", low)
+
+    def test_fuzzing_content(self):
+        s = HTTP_SMUGGLING_MUTATION_FUZZING_STEP
+        low = s.lower()
+        for token in ("mutate one byte", "baseline", "stateless", "chunk",
+                      "per-mutation socket", "separate", "uuid"):
+            self.assertIn(token, low, token)
+        # must point back to Step 2's obfuscation list rather than restating it
+        self.assertIn("step 2", low)
+
+    def test_no_em_dash_no_braces(self):
+        for s in (HTTP_SMUGGLING_EXPECT_STEP, HTTP_SMUGGLING_MUTATION_FUZZING_STEP):
+            self.assertNotIn("—", s)
+            self.assertEqual(s.count("{"), 0)
+            self.assertEqual(s.count("}"), 0)
+
+    def test_full_system_prompt_includes_both(self):
+        from prompts import get_phase_tools
+        with patch("project_settings.get_enabled_builtin_skills", return_value={CLS}):
+            sysprompt = get_phase_tools(phase="exploitation", attack_path_type=CLS)
+        self.assertIn("EXPECT / 100-CONTINUE DESYNC", sysprompt)
+        self.assertIn("BYTE-MUTATION FUZZING", sysprompt)
+
+
+class TestHrsNoUninstalledTools(unittest.TestCase):
+    """Every tool the skill NAMES AS RUNNABLE must exist. Guards against telling the
+    agent to run a binary the kali-sandbox image does not have (the proxy_brain
+    'smuggler' lesson)."""
+
+    ALL_STEPS = "\n".join([
+        HTTP_SMUGGLING_TOOLS, HTTP_SMUGGLING_ZERO_CL_STEP,
+        HTTP_SMUGGLING_EXPECT_STEP, HTTP_SMUGGLING_MUTATION_FUZZING_STEP,
+    ])
+
+    def test_registry_tools_only(self):
+        import re as _re
+        from prompts.tool_registry import TOOL_REGISTRY
+        referenced = set(_re.findall(
+            r"\b(query_graph|kali_shell|metasploit_console|execute_[a-z_]+|"
+            r"proxy_[a-z_]+|fs_[a-z_]+|job_[a-z_]+)\b", self.ALL_STEPS))
+        bad = sorted(t for t in referenced if t not in TOOL_REGISTRY)
+        self.assertEqual(bad, [], f"skill references non-registry tools: {bad}")
+
+    def test_no_uninstalled_binary_named(self):
+        low = self.ALL_STEPS.lower()
+        # tools that live in Burp / external repos and are NOT in the kali image;
+        # the skill must teach the raw-socket path instead of naming these.
+        for banned in ("smuggler", "http2smugl", "h2csmuggler", "turbo intruder",
+                       "turbointruder", "t-reqs", "treqs", "nghttp2", "param miner"):
+            self.assertNotIn(banned, low, f"names an uninstalled tool: {banned}")
 
 
 class TestHrsDisabledSwitchIsGraceful(unittest.TestCase):

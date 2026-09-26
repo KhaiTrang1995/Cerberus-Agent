@@ -177,3 +177,80 @@ smuggled response on a SEPARATE connection sharing the poisoned front->back sock
 (exactly as Step 4 requires). Report the endpoint that desynced, the smuggled
 request, and the separate-connection response that proves it.
 """
+
+
+HTTP_SMUGGLING_EXPECT_STEP = """
+## EXPECT / 100-CONTINUE DESYNC (a first-class 0.CL trigger, not just obfuscation)
+
+`Expect: 100-continue` splits a request into two parts (the headers, then the body
+that is only meant to be sent AFTER a `100 Continue`). On a broken chain that split
+is itself a desync: the front tier forwards the headers, the back-end answers with
+something other than `100`, and the front gets confused and FORGETS it still owes a
+body -- so the body bytes become the next request on the connection. Sending a
+plain, VALID `Expect: 100-continue` is enough to desync numerous servers, so treat
+it as a primary 0.CL probe, not a footnote to the obfuscation list.
+
+- Add `Expect: 100-continue` to an otherwise normal `POST` (with a real
+  `Content-Length` body) and classify what the chain does: does it return `100
+  Continue` and then read the body (correct)? does it HANG waiting for a body the
+  other tier already accounted for? does it answer the request and then get
+  confused by the trailing body bytes (they surface as the next request)?
+- OBSERVE THIS WITH THE CL.0 / 0.CL ORACLE ABOVE -- do NOT build a second oracle.
+  The paused / partial-request send and the connection-state tracking from the
+  "CL.0 / 0.CL DESYNC" step are exactly what reveal whether the body was dropped or
+  double-counted across the `Expect` boundary. Reuse that helper (raw sockets via
+  `execute_code`).
+- Then COMBINE `Expect` with a length ambiguity: an `Expect` header plus a
+  Content-Length / Transfer-Encoding disagreement often desyncs a tier that handles
+  either one alone correctly.
+- Same discipline as the other steps: an explicit per-socket read timeout is the
+  "waited" threshold; a probe that hits that timeout or the tool wall clock is
+  INCONCLUSIVE, never a desync. Confirm any hit on a SEPARATE connection to rule out
+  pipelining before reporting.
+"""
+
+
+HTTP_SMUGGLING_MUTATION_FUZZING_STEP = """
+## BYTE-MUTATION FUZZING OF THE FRAMING HEADERS (fuzzing beats intuition here)
+
+Step 2 already lists the known `Transfer-Encoding` obfuscations (`xchunked`, leading
+space/tab, duplicated TE, odd casing, CR/LF tricks). Do NOT restate or re-send that
+list blindly. This step GENERALISES it: nobody guesses in advance that a vertical
+tab or a specific stray byte flips one parser and not the other, so the deliverable
+is a LOOP, not a fixed payload set.
+
+Method (a single-target baseline-diff loop, run via `execute_code` raw sockets):
+1. CAPTURE A FRESH BASELINE in the SAME `execute_code` call as the mutations.
+   `execute_code` is STATELESS between calls, so a diff against a baseline captured
+   in a previous call is invalid and produces phantom candidates -- always
+   re-capture the unmutated request's status code, response timing, and whether the
+   connection was closed, at the top of every chunk.
+2. MUTATE ONE BYTE OF ONE FRAMING HEADER AT A TIME (the `Content-Length` /
+   `Transfer-Encoding` / `Expect` header names, their separators, and their values):
+   flip case, insert a tab / space / vertical-tab / form-feed, duplicate the header,
+   split it across a fold, and so on -- one axis per attempt.
+3. DIFF each mutated response against the baseline on three axes: status code,
+   response timing, and connection-close. A mutation that changes ANY of the three
+   is a parser-disagreement CANDIDATE (the V-visible-to-one / H-hidden-from-the-other
+   model), because it means the two tiers stopped agreeing on the framing.
+4. CONFIRM every candidate with the separate-connection differential (Step 4 /
+   the CL.0 step): reproduce the effect on a SECOND, fresh connection. A change that
+   appears only on your reused socket is pipelining, NOT a desync -- discard it.
+
+Budget and safety (the binding constraints here):
+- Set a bounded PER-MUTATION socket read timeout (a few seconds). A mutation that
+  hits that timeout OR the 120s `execute_code` wall clock is INCONCLUSIVE, never a
+  connection-close positive (fail closed).
+- CHUNK the sweep: cap the number of mutations per target per `execute_code` call so
+  one call cannot hit the wall mid-sweep, and iterate across calls. Keep each chunk's
+  request volume modest so the sweep is not a denial-of-service-shaped burst on a
+  path that has no rate guard.
+- A WIDER sweep MAY instead run in one `kali_shell` call (longer wall clock) with the
+  SAME per-mutation socket timeout and the SAME per-chunk cap.
+- Use a per-invocation unique `filename=` (e.g. suffix it with a uuid) so concurrent
+  runs in the shared sandbox do not clobber each other's script.
+
+Use only `execute_code` (raw Python sockets) or `kali_shell` for this loop; there is
+no dedicated smuggling/fuzzing binary in the sandbox, so write the socket loop
+yourself.
+"""

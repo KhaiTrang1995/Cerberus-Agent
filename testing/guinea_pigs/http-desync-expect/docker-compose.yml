@@ -1,0 +1,40 @@
+# Self-contained vulnerable target for end-to-end validation of the Expect /
+# obfuscation desync leg of the RedAmon http_request_smuggling agent skill (class 5).
+# A strict-canonical-TE edge in front of a backend that honors Transfer-Encoding
+# liberally and mishandles Expect: 100-continue (CL.0). An obfuscated Transfer-Encoding
+# OR an Expect header desyncs the pair; /admin is blocked at the edge and only reachable
+# by smuggling.
+#
+#   docker compose up -d --build
+#   python3 tests/verify_expect.py
+#
+# Port 9097 exposes the backend directly so recon can see the distinct backend.
+services:
+  backend:
+    build: ./backend
+    container_name: exp-guinea-backend
+    environment:
+      - BACKEND_PORT=5000
+      - HRS_FLAG=REDAMON_HRS{expect_or_obfuscated_te_flips_the_parser}
+    expose:
+      - "5000"
+    ports:
+      - "9097:5000"
+    networks:
+      - exp
+  edge:
+    build: ./frontend
+    container_name: exp-guinea-edge
+    depends_on:
+      - backend
+    environment:
+      - FRONT_PORT=80
+      - BACKEND_HOST=backend
+      - BACKEND_PORT=5000
+    ports:
+      - "9096:80"
+    networks:
+      - exp
+networks:
+  exp:
+    name: exp-guinea-net

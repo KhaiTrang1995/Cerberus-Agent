@@ -111,7 +111,12 @@ from .path_traversal_prompts import (
 )
 
 # Re-export from HTTP request smuggling prompts
-from .http_smuggling_prompts import HTTP_SMUGGLING_TOOLS, HTTP_SMUGGLING_ZERO_CL_STEP
+from .http_smuggling_prompts import (
+    HTTP_SMUGGLING_TOOLS,
+    HTTP_SMUGGLING_ZERO_CL_STEP,
+    HTTP_SMUGGLING_EXPECT_STEP,
+    HTTP_SMUGGLING_MUTATION_FUZZING_STEP,
+)
 
 # Re-export from XML External Entity (XXE) injection prompts
 from .xxe_prompts import XXE_TOOLS
@@ -375,6 +380,11 @@ def build_builtin_skill_workflow(
         # CL.0 / 0.CL is the 2025 desync shape with no TE header to probe; it rides
         # the same raw-socket execute_code path, so append it unconditionally here.
         parts.append(HTTP_SMUGGLING_ZERO_CL_STEP)
+        # Expect/100-continue is observed with the CL.0 oracle; the mutation-fuzzing
+        # loop generalises Step 2's obfuscation list. Both ride the same execute_code
+        # raw-socket path.
+        parts.append(HTTP_SMUGGLING_EXPECT_STEP)
+        parts.append(HTTP_SMUGGLING_MUTATION_FUZZING_STEP)
         return parts
     elif (attack_path_type == "xxe"
             and "xxe" in enabled_builtins
@@ -656,6 +666,8 @@ __all__ = [
     "ACCESS_CONTROL_TOOLS",
     "HTTP_SMUGGLING_TOOLS",
     "HTTP_SMUGGLING_ZERO_CL_STEP",
+    "HTTP_SMUGGLING_EXPECT_STEP",
+    "HTTP_SMUGGLING_MUTATION_FUZZING_STEP",
     # XML External Entity (XXE) injection
     "XXE_TOOLS",
     "CRYPTO_ATTACK_TOOLS",
