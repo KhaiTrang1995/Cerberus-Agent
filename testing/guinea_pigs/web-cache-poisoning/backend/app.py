@@ -451,6 +451,25 @@ def p_fat_get() -> Response:
     return cacheable(Response(f"<html><body>results for: {q}</body></html>", mimetype="text/html"))
 
 
+def _menu_view(**_kw) -> Response:
+    # Reads a ;matrix path-parameter (;utm_source=) out of the raw path and reflects it.
+    # The nginx /normalize/ cache key strips ;params, so a poisoned ;utm_source= value
+    # is cached under the clean /normalize/menu key and served to victims (class 9,
+    # cache-key normalization abuse).
+    import re
+    m = re.search(r";utm_source=([^;/?]*)", request.path)
+    src = m.group(1) if m else "direct"
+    return cacheable(Response(f"<html><body>menu source: {src}</body></html>", mimetype="text/html"))
+
+
+page("/normalize/menu", "9 · Normalization -> reflected",
+     "reflects a ;utm_source matrix path-param; the /normalize/ cache key strips ;params")(_menu_view)
+# Werkzeug routes /normalize/menu;utm_source=x as a distinct literal path, so add a
+# catch rule (unique endpoint) that funnels the matrix variant to the same view.
+app.add_url_rule("/normalize/<path:_matrix>", endpoint="normalize_matrix",
+                 view_func=_menu_view, methods=["GET"])
+
+
 # =========================================================================== #
 # NEGATIVE CONTROLS — must be REJECTED by scoring (prove low false-positive rate)
 # =========================================================================== #

@@ -30,6 +30,16 @@ def add_cache_buster(url: str, param: str, value: str) -> str:
     return urlunparse(parts._replace(query=new_query))
 
 
+def add_path_param(url: str, name: str, value: str) -> str:
+    """Append a matrix / path parameter (``;name=value``) to the path, keeping the
+    query. Cache-key normalization abuse: a cache that strips ``;`` path-params from
+    its key (but whose origin still reads them) serves the poisoned response to a
+    victim who requests the clean path.
+    """
+    parts = urlparse(url)
+    return urlunparse(parts._replace(path=f"{parts.path};{name}={value}"))
+
+
 def add_path_segment(url: str, segment: str) -> str:
     """Append a path segment BEFORE the query string, preserving the query.
 

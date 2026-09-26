@@ -43,7 +43,7 @@ from urllib.parse import urlencode
 
 import requests
 
-from recon.cache_scan.buster import add_cache_buster, add_path_segment
+from recon.cache_scan.buster import add_cache_buster, add_path_param, add_path_segment
 from recon.cache_scan.oracle import response_cache_state
 from recon.cache_scan.safety import (
     new_canary_token, canary_host, canary_value, new_cache_buster_value,
@@ -140,6 +140,12 @@ def _apply_vector(url: str, vector_type: str, vector_name: str, payload: str):
         return url, {vector_name: payload}, None
     if vector_type == "param":
         return add_cache_buster(url, vector_name, payload), {}, None
+    if vector_type == "path_param":
+        # Cache-key normalization abuse: the payload rides as a matrix/path parameter
+        # (…;name=value) on the path. A cache that strips ;params from its key serves
+        # the poisoned response to a victim requesting the clean path; the confirm flow
+        # then sees the canary persist on the clean (…;-free) follow-up.
+        return add_path_param(url, vector_name, payload), {}, None
     if vector_type == "fat_get":
         # Fat GET: the param rides in the GET request BODY, never in the URL. A cache
         # keys on the URL and so never sees it; an origin that merges GET body params

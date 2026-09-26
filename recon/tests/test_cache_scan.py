@@ -207,6 +207,35 @@ class FatGetCacheSession:
         return FakeResponse("<p>results for </p>", {"x-cache": "miss"})
 
 
+class MatrixParamCacheSession:
+    """Models cache-key normalization abuse: the cache STRIPS a ;matrix path-param from
+    its key while the origin still reads and reflects it. A poisoned ;utm_source= value
+    is stored under the clean-path key and served to a victim requesting the clean path."""
+
+    def __init__(self, param="utm_source"):
+        self.param = param
+        self.store = {}
+
+    def get(self, url, headers=None, timeout=10, verify=True, allow_redirects=False, **kwargs):
+        # Parse the RAW url: urlparse() would hoist ;params into its .params field and
+        # drop them from .path. Split on '#', then '?', then ';' by hand.
+        no_frag = url.split("#", 1)[0]
+        path_part, _, query_part = no_frag.partition("?")
+        clean_path = path_part.split(";", 1)[0]
+        matrix = ""
+        for seg in path_part.split(";")[1:]:
+            if seg.startswith(self.param + "="):
+                matrix = seg.split("=", 1)[1]
+        key = clean_path + ("?" + query_part if query_part else "")  # ;params stripped
+        if matrix:
+            body = f"<body>menu source: {matrix}</body>"
+            self.store[key] = body
+            return FakeResponse(body, {"x-cache": "miss"})
+        if key in self.store:
+            return FakeResponse(self.store[key], {"x-cache": "hit", "age": "7"})
+        return FakeResponse("<body>menu source: direct</body>", {"x-cache": "miss"})
+
+
 class TestWcvsParser(unittest.TestCase):
     """The WCVS JSON report parser (pkg/report.go schema)."""
 
@@ -939,6 +968,26 @@ class TestConfirm(unittest.TestCase):
         self.assertEqual(body, "q=rdmncanary")          # param in the body
         self.assertEqual(hdrs.get("Content-Type"), "application/x-www-form-urlencoded")
 
+    def test_apply_vector_path_param_matrix_before_query(self):
+        # Normalization vector: the payload rides as a ;matrix path-param, appended to
+        # the PATH before the query (a cache that strips ;params from its key is then
+        # poisonable). No headers, no body.
+        url, hdrs, body = confirm._apply_vector(
+            "https://x/normalize/menu?rdmncb=abc", "path_param", "utm_source", "rdmnwin")
+        self.assertEqual(url, "https://x/normalize/menu;utm_source=rdmnwin?rdmncb=abc")
+        self.assertEqual(hdrs, {})
+        self.assertIsNone(body)
+
+    def test_path_param_confirmation_reflected_and_cached(self):
+        # Confirmation against a fake cache that strips ;params from the key while the
+        # origin reads them: the ;-param canary is served from cache to the clean victim.
+        vec = {"url": "https://shop/normalize/menu", "vector_type": "path_param",
+               "vector_name": "utm_source", "payload_kind": "value", "impact_hint": "reflected"}
+        rec = confirm.confirm_vector(vec, {"param": "rdmncb"}, MatrixParamCacheSession("utm_source"), {})
+        self.assertTrue(rec["reflected_in_baseline"])
+        self.assertTrue(rec["persisted_on_clean"])
+        self.assertTrue(rec["cache_hit_on_clean"])
+
     def test_fat_get_confirmation_reflected_and_cached(self):
         # End-to-end confirmation against a fat-GET-vulnerable fake cache: the canary
         # sent in the GET body is reflected, then served from cache to the body-less
@@ -1023,6 +1072,12 @@ class TestWcvsVectorMapping(unittest.TestCase):
         self.assertEqual(v["vector_type"], "fat_get")
         self.assertEqual(v["technique"], "fat_get")
         self.assertEqual(v["payload_kind"], "value")
+
+    def test_normalization_vector_maps_to_path_param(self):
+        v = scanner._wcvs_vector("https://x/", {"technique": "Path normalization",
+                                                "vector_name": "utm_source"})
+        self.assertEqual(v["vector_type"], "path_param")
+        self.assertEqual(v["technique"], "normalization")
 
 
 class TestScannerTargets(unittest.TestCase):

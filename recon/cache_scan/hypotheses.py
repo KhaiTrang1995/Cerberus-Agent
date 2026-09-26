@@ -80,6 +80,13 @@ _FAT_GET_PARAMS = [
     ("utm_source", "reflected"),
 ]
 
+# Cache-key normalization abuse: names tried as MATRIX / path parameters (…;name=value).
+# A cache that strips ;params from its key (but whose origin reads them) is poisonable.
+_PATH_PARAM_NAMES = [
+    ("utm_source", "reflected"),
+    ("v", "reflected"),
+]
+
 # Framework packs keyed by a technology-name substring (matched case-insensitively
 # against the recon technology fingerprint).
 _FRAMEWORK_PACKS = {
@@ -186,6 +193,19 @@ def generate_hypotheses(url: str, combined_result: dict, settings: dict,
             "url": url,
             "technique": "fat_get",
             "vector_type": "fat_get",
+            "vector_name": name,
+            "payload_kind": "value",
+            "impact_hint": impact,
+            "source": "hypothesis",
+        })
+
+    # Cache-key normalization abuse (matrix / path parameter). Distinct location from
+    # the query and body sweeps, so always emitted.
+    for name, impact in _PATH_PARAM_NAMES:
+        hypotheses.append({
+            "url": url,
+            "technique": "normalization",
+            "vector_type": "path_param",
             "vector_name": name,
             "payload_kind": "value",
             "impact_hint": impact,

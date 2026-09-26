@@ -236,6 +236,8 @@ def _wcvs_technique(raw: str) -> str:
         return "cache_deception"
     if "param" in low or "cloak" in low or "pollution" in low:
         return "unkeyed_param"
+    if "normal" in low or "path segment" in low or "delimiter" in low:
+        return "normalization"
     if "fatget" in low:
         return "fat_get"
     if "smuggl" in low:
@@ -257,6 +259,9 @@ def _wcvs_vector(url: str, candidate: dict) -> dict:
         # Body-borne param: re-test as a fat GET, NOT a header (the old default),
         # so the native confirmation matches the transport WCVS actually exercised.
         vector_type, payload_kind, impact = "fat_get", "value", "reflected"
+    elif technique == "normalization":
+        # Cache-key normalization abuse: re-test as a matrix/path parameter.
+        vector_type, payload_kind, impact = "path_param", "value", "reflected"
     else:
         # Header vector: host-style headers carry a hostname payload (open
         # redirect / host-header abuse); other headers carry a plain value.
