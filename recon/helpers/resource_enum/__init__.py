@@ -55,6 +55,7 @@ from .katana_helpers import (
 
 # Hakrawler helpers
 from .hakrawler_helpers import (
+    hakrawler_job_budget,
     run_hakrawler_crawler,
     pull_hakrawler_docker_image,
     merge_hakrawler_into_by_base_url,
@@ -134,6 +135,7 @@ __all__ = [
     "fetch_forms_from_urls",
     "pull_katana_docker_image",
     # Hakrawler
+    "hakrawler_job_budget",
     "run_hakrawler_crawler",
     "pull_hakrawler_docker_image",
     "merge_hakrawler_into_by_base_url",

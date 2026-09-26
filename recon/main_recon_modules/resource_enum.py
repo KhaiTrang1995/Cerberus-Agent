@@ -65,6 +65,7 @@ from recon.helpers.resource_enum import (
     run_katana_crawler,
     pull_katana_docker_image,
     # Hakrawler helpers
+    hakrawler_job_budget,
     run_hakrawler_crawler,
     pull_hakrawler_docker_image,
     merge_hakrawler_into_by_base_url,
@@ -812,7 +813,10 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
                     katana_urls, katana_meta = future.result(timeout=KATANA_TIMEOUT + 120)
                     print(f"\n[+][Katana] Completed: {len(katana_urls)} URLs")
                 elif name == 'hakrawler':
-                    hakrawler_urls, hakrawler_meta = future.result(timeout=HAKRAWLER_TIMEOUT * 2 + 120)
+                    # HAKRAWLER_TIMEOUT is per URL; the crawl covers every seed.
+                    hakrawler_wait = hakrawler_job_budget(
+                        target_urls, HAKRAWLER_TIMEOUT, HAKRAWLER_PARALLELISM) + 120
+                    hakrawler_urls, hakrawler_meta = future.result(timeout=hakrawler_wait)
                     print(f"[+][Hakrawler] Completed: {len(hakrawler_urls)} URLs")
                 elif name == 'gau':
                     gau_workers = min(5, len(target_domains))
@@ -824,7 +828,10 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
                     paramspider_urls, paramspider_urls_by_domain = future.result(timeout=PARAMSPIDER_TIMEOUT * len(target_domains) + 120)
                     print(f"[+][ParamSpider] Completed: {len(paramspider_urls)} parameterized URLs")
             except Exception as e:
-                print(f"[!][ResourceEnum] {name} failed: {e}")
+                # A timed-out wait stringifies to "", so the type is what tells
+                # the operator what happened; and the result is now incomplete.
+                print(f"[!][ResourceEnum] {name} failed ({type(e).__name__}: {str(e) or 'no detail'}); "
+                      f"continuing WITHOUT its URLs, so this run's URL coverage has a gap")
 
     # Run Kiterunner in parallel for each wordlist
     if KITERUNNER_ENABLED and target_urls and kr_binary_path and KITERUNNER_WORDLISTS:

@@ -4,12 +4,42 @@ RedAmon - Hakrawler Crawler Helpers for Resource Enumeration
 Active URL discovery using Hakrawler web crawler (Docker-in-Docker).
 """
 
+import math
 import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple
 from urllib.parse import urlparse
+
+
+def per_url_budget(timeout: int) -> int:
+    """Seconds one URL may run before its container is killed.
+
+    hakrawler's own -timeout caps the crawl of each URL; the doubling and the
+    extra minute absorb container start-up and a slow final flush.
+    """
+    return timeout * 2 + 60
+
+
+def _crawlable_urls(target_urls: List[str]) -> List[str]:
+    return [u for u in target_urls if u.startswith(('http://', 'https://'))]
+
+
+def hakrawler_job_budget(target_urls: List[str], timeout: int, parallelism: int) -> int:
+    """Worst-case seconds for run_hakrawler_crawler over these seeds.
+
+    A caller waiting on the crawler must size its wait from THIS, not from the
+    per-URL timeout. The crawler works through every seed, `parallelism` at a
+    time, so a wait sized for one URL expires minutes into a large run. The
+    caller then discards every URL found, yet still blocks in the executor's
+    shutdown until the crawl finishes: all of the time, none of the output.
+    """
+    urls = _crawlable_urls(target_urls)
+    if not urls:
+        return 0
+    workers = max(1, min(parallelism, len(urls)))
+    return math.ceil(len(urls) / workers) * per_url_budget(timeout)
 
 
 def _crawl_single_url(
@@ -81,7 +111,7 @@ def _crawl_single_url(
         # while the subprocess is silent. Defined outside the inner try
         # so the finally always sees a valid thread reference.
         start_time = time.time()
-        overall_timeout = timeout * 2 + 60
+        overall_timeout = per_url_budget(timeout)
         heartbeat_stop = threading.Event()
 
         def _hb():
@@ -98,16 +128,23 @@ def _crawl_single_url(
         heartbeat_thread = threading.Thread(target=_hb, daemon=True)
         heartbeat_thread.start()
 
+        # A timer, not a check in the read loop: readline() blocks for as long
+        # as hakrawler stays silent, so a loop check never fires on the host
+        # that hangs. hakrawler_job_budget() relies on this bound being real.
+        def _overrun():
+            if process.poll() is None:
+                print(f"[!][Hakrawler] Overall timeout for {base_url}", flush=True)
+                process.kill()
+
+        watchdog = threading.Timer(overall_timeout, _overrun)
+        watchdog.daemon = True
+        watchdog.start()
+
         try:
             process.stdin.write(base_url + "\n")
             process.stdin.close()
 
             while True:
-                if time.time() - start_time > overall_timeout:
-                    print(f"[!][Hakrawler] Overall timeout for {base_url}")
-                    process.kill()
-                    break
-
                 # Check if global max_urls already reached by other workers
                 with urls_lock:
                     if len(shared_urls) >= max_urls:
@@ -149,6 +186,7 @@ def _crawl_single_url(
                         break
 
         finally:
+            watchdog.cancel()
             heartbeat_stop.set()
             if process.poll() is None:
                 process.kill()
@@ -213,7 +251,7 @@ def run_hakrawler_crawler(
     external_domain_entries = []
     urls_lock = threading.Lock()
 
-    valid_urls = [u for u in target_urls if u.startswith(('http://', 'https://'))]
+    valid_urls = _crawlable_urls(target_urls)
     if not valid_urls:
         return [], {"external_domains": []}
 
