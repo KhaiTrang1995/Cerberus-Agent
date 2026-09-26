@@ -116,6 +116,7 @@ from .http_smuggling_prompts import (
     HTTP_SMUGGLING_ZERO_CL_STEP,
     HTTP_SMUGGLING_EXPECT_STEP,
     HTTP_SMUGGLING_MUTATION_FUZZING_STEP,
+    HTTP_SMUGGLING_H2_STEP,
 )
 
 # Re-export from XML External Entity (XXE) injection prompts
@@ -385,6 +386,10 @@ def build_builtin_skill_workflow(
         # raw-socket path.
         parts.append(HTTP_SMUGGLING_EXPECT_STEP)
         parts.append(HTTP_SMUGGLING_MUTATION_FUZZING_STEP)
+        # H2 downgrade: gated by a prompt runtime-capability note, NOT an injection
+        # check -- the prompt renders in the agent image but h2 installs in
+        # kali-sandbox, so the agent process cannot see kali's h2 (plan 9.2/10.2 c3).
+        parts.append(HTTP_SMUGGLING_H2_STEP)
         return parts
     elif (attack_path_type == "xxe"
             and "xxe" in enabled_builtins
@@ -668,6 +673,7 @@ __all__ = [
     "HTTP_SMUGGLING_ZERO_CL_STEP",
     "HTTP_SMUGGLING_EXPECT_STEP",
     "HTTP_SMUGGLING_MUTATION_FUZZING_STEP",
+    "HTTP_SMUGGLING_H2_STEP",
     # XML External Entity (XXE) injection
     "XXE_TOOLS",
     "CRYPTO_ATTACK_TOOLS",

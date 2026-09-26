@@ -254,3 +254,51 @@ Use only `execute_code` (raw Python sockets) or `kali_shell` for this loop; ther
 no dedicated smuggling/fuzzing binary in the sandbox, so write the socket loop
 yourself.
 """
+
+
+HTTP_SMUGGLING_H2_STEP = """
+## HTTP/2 DOWNGRADE SMUGGLING (the edge rewrites h2 into h1)
+
+Most deployments speak HTTP/2 at the edge and HTTP/1.1 upstream, so the edge
+REWRITES every h2 request into h1. That rewrite is where injection lives, and it
+re-opens desync on stacks that fixed the h1-only variants.
+
+### Precondition: confirm h2-to-you, h1-upstream
+Only worth probing if the edge speaks h2 to you AND the origin is h1 (so a rewrite
+exists). Check the edge's ALPN with `openssl s_client -alpn h2 -connect host:443`
+(via `kali_shell`) or `curl --http2` / `curl --http2-prior-knowledge` (curl in the
+image is built with http2). If the edge is h2 and the backend is h1, the rewrite is
+present.
+
+### The two probes
+- H2.CL / H2.TE (frame-length disagreement): in HTTP/2 the real body length is in
+  the binary DATA framing, so a `content-length` (or `transfer-encoding`) header that
+  DISAGREES with the framed body length is legal to send but, if the edge copies it
+  verbatim into the h1 request, desyncs the back-end. Send a `content-length` that
+  lies about the DATA you send and watch for the differential.
+- CRLF / pseudo-header injection: h2 header VALUES are binary and can carry `\\r\\n`;
+  h1 headers are newline-delimited text. If the edge copies a value across without
+  escaping, an embedded `\\r\\n` creates new h1 headers, including a new
+  `Host` / `:authority`. Put a `\\r\\n`-carrying value in a header or a pseudo-header
+  (`:method` / `:path` / `:authority`) and prove it with an OUT-OF-BAND callback:
+  does an injected `Host` reach a different back-end?
+
+### Tooling (what actually exists here)
+Normal clients refuse to emit malformed h2 (a lying `content-length`, a `\\r\\n` in a
+value), which is exactly why this row pays. Send it yourself from `execute_code` using
+the Python `h2` library with OUTBOUND HEADER VALIDATION DISABLED
+(`h2.config.H2Configuration(client_side=True, validate_outbound_headers=False,
+normalize_outbound_headers=False)`), or build frames with `hyperframe` directly. The
+`h2` capability ships in the kali-sandbox image (httpx[http2] / h2); there is NO
+dedicated HTTP/2 smuggling or downgrade binary in the image, so do not call one. For
+the OOB proof use the house convention: run `interactsh-client` via `kali_shell`,
+capture the domain, and inject it as the `Host` / authority.
+
+### Detection contract (differential, not timing)
+Decide "vulnerable candidate" by DIFFERENTIAL RESPONSE ANALYSIS: a pair of
+valid/invalid requests whose responses are separable by (1) non-overlapping
+response-code sets or (2) separable response-length sets, TREATING A TIMEOUT AS ITS
+OWN STATUS. Do not rely on timing. Known false-positive stacks (ELB, Apache Traffic
+Server, IIS, some WAFs) can flag on the differential alone, so treat any h2-downgrade
+hit as a CANDIDATE and confirm it with the OOB `Host` proof before reporting.
+"""

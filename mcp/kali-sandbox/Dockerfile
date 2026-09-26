@@ -488,6 +488,12 @@ RUN python3 -c "from fastmcp import FastMCP" \
        done \
     && echo "[smoke] all MCP server modules import cleanly"
 
+# HTTP/2 capability smoke test: the http_request_smuggling skill's H2-downgrade step
+# needs httpx[http2] (the h2 package). A pip constraint could silently drop the extra
+# and still exit 0, so fail the build here if h2 is missing (issue #181 pattern).
+RUN . /opt/venv/bin/activate 2>/dev/null || true ; \
+    python3 -c "import h2, hpack, hyperframe; import httpx; httpx.Client(http2=True); print('[smoke] h2 / httpx[http2] OK')"
+
 # Install ngrok (for optional single-port TCP tunneling of reverse shells)
 RUN ARCH=$(dpkg --print-architecture) && \
     retry curl -sSLf "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-${ARCH}.tgz" \

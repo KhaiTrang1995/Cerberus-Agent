@@ -66,6 +66,7 @@ import project_settings as ps  # noqa: E402
 from prompts import (  # noqa: E402
     build_builtin_skill_workflow, HTTP_SMUGGLING_TOOLS, HTTP_SMUGGLING_ZERO_CL_STEP,
     HTTP_SMUGGLING_EXPECT_STEP, HTTP_SMUGGLING_MUTATION_FUZZING_STEP,
+    HTTP_SMUGGLING_H2_STEP,
 )
 from prompts.base import build_attack_path_behavior  # noqa: E402
 from prompts.classification import (  # noqa: E402
@@ -271,6 +272,42 @@ class TestHrsExpectAndFuzzingStep(unittest.TestCase):
         self.assertIn("BYTE-MUTATION FUZZING", sysprompt)
 
 
+class TestHrsH2Step(unittest.TestCase):
+    """Class 3: the HTTP/2 downgrade step (X4 + content). The h2 gate is prompt-only
+    (h2 lives in kali-sandbox, the prompt renders in the agent image), so it is
+    appended unconditionally and there is NO injection-branch h2 check."""
+
+    def test_step_injected_when_enabled(self):
+        with patch("project_settings.get_enabled_builtin_skills", return_value={CLS}):
+            wf = build_builtin_skill_workflow(CLS, {"execute_code"})
+        self.assertIn(HTTP_SMUGGLING_H2_STEP, wf)
+
+    def test_h2_content(self):
+        s = HTTP_SMUGGLING_H2_STEP
+        for token in ("HTTP/2", "H2.CL", "content-length"):
+            self.assertIn(token, s, token)
+        low = s.lower()
+        for token in ("alpn", "pseudo-header", "out-of-band", "differential",
+                      "timeout", "hyperframe", "interactsh"):
+            self.assertIn(token, low, token)
+
+    def test_h2_uses_python_h2_not_a_binary(self):
+        # must steer to the python h2 lib via execute_code, not a CLI smuggling tool
+        self.assertIn("execute_code", HTTP_SMUGGLING_H2_STEP)
+        self.assertIn("h2.config.H2Configuration", HTTP_SMUGGLING_H2_STEP)
+
+    def test_no_em_dash_no_braces(self):
+        self.assertNotIn("—", HTTP_SMUGGLING_H2_STEP)
+        self.assertEqual(HTTP_SMUGGLING_H2_STEP.count("{"), 0)
+        self.assertEqual(HTTP_SMUGGLING_H2_STEP.count("}"), 0)
+
+    def test_full_system_prompt_includes_h2(self):
+        from prompts import get_phase_tools
+        with patch("project_settings.get_enabled_builtin_skills", return_value={CLS}):
+            sysprompt = get_phase_tools(phase="exploitation", attack_path_type=CLS)
+        self.assertIn("HTTP/2 DOWNGRADE SMUGGLING", sysprompt)
+
+
 class TestHrsNoUninstalledTools(unittest.TestCase):
     """Every tool the skill NAMES AS RUNNABLE must exist. Guards against telling the
     agent to run a binary the kali-sandbox image does not have (the proxy_brain
@@ -279,6 +316,7 @@ class TestHrsNoUninstalledTools(unittest.TestCase):
     ALL_STEPS = "\n".join([
         HTTP_SMUGGLING_TOOLS, HTTP_SMUGGLING_ZERO_CL_STEP,
         HTTP_SMUGGLING_EXPECT_STEP, HTTP_SMUGGLING_MUTATION_FUZZING_STEP,
+        HTTP_SMUGGLING_H2_STEP,
     ])
 
     def test_registry_tools_only(self):

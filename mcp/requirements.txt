@@ -17,7 +17,7 @@ mcp==1.29.0
 
 # Async support
 anyio>=4.0.0
-httpx>=0.25.0
+httpx[http2]>=0.25.0
 
 # SSE transport support
 sse-starlette>=1.6.0
