@@ -1,0 +1,110 @@
+"""
+Cache Poisoning Scanner - Web Cache Deception probe (taxonomy class 10).
+
+Deception needs an AUTHENTICATED page. An attacker crafts a static-looking URL
+(``/account/x.css``) that the origin serves as the sensitive page -- it ignores the
+appended segment -- but the shared cache stores as a static asset, then reads the
+victim's data from the cache with NO session. So this probe only runs when the project
+has an auth profile in scope: it fetches the page authenticated, proves it is
+personalised, then proves a crafted static-suffix URL is (a) served the sensitive
+content by the origin and (b) returned FROM CACHE to an unauthenticated request.
+
+Without the auth half a "deception" verdict is only WCVS's opinion wearing a native
+label; this is the native, auth-aware confirmation the taxonomy asks for.
+"""
+import uuid
+from urllib.parse import urlparse, urlunparse
+
+from recon.cache_scan.buster import add_cache_buster
+from recon.cache_scan.oracle import response_cache_state
+from recon.helpers.auth_profile import auth_header_lines, profile_from_settings
+
+# Static suffixes a cache commonly treats as a cacheable asset while the origin may
+# route them to the base page (path confusion). Both the "/" and ";" delimiters are
+# tried because caches and origins disagree on which starts the "static file".
+_DECEPTION_SUFFIXES = (".css", ".js", ".jpg")
+
+
+def _auth_headers_for(url: str, settings: dict) -> dict:
+    """The in-scope auth headers for this URL's host, or {} when none apply."""
+    profile = profile_from_settings(settings)
+    if not profile:
+        return {}
+    host = urlparse(url).hostname or ""
+    headers = {}
+    for line in auth_header_lines(profile, host, settings):
+        name, _, value = line.partition(":")
+        if name.strip():
+            headers[name.strip()] = value.strip()
+    return headers
+
+
+def _deception_urls(url: str, marker: str):
+    p = urlparse(url)
+    base_path = p.path.rstrip("/") or ""
+    for suffix in _DECEPTION_SUFFIXES:
+        seg = f"{marker}{suffix}"
+        yield urlunparse(p._replace(path=f"{base_path}/{seg}"))   # /account/x.css
+        yield urlunparse(p._replace(path=f"{base_path};{seg}"))   # /account;x.css
+
+
+def deception_probe(url: str, oracle_info: dict, session, settings: dict,
+                    timeout: int = 10, verify_ssl: bool = True):
+    """Return a web-cache-deception finding dict (build_finding shape) or None.
+
+    Runs only with an in-scope auth profile: deception is a leak of AUTHENTICATED
+    content, so a native verdict is impossible without a session to plant it.
+    """
+    auth = _auth_headers_for(url, settings)
+    if not auth:
+        return None
+
+    def _get(u, headers=None):
+        return session.get(u, headers=headers or None, timeout=timeout,
+                           verify=verify_ssl, allow_redirects=False)
+
+    try:
+        # 1. The page must be personalised: authed content differs from anonymous.
+        authed = _get(add_cache_buster(url, "rdmncb", uuid.uuid4().hex[:8]), auth)
+        anon = _get(add_cache_buster(url, "rdmncb", uuid.uuid4().hex[:8]))
+        authed_body = authed.text or ""
+        if authed.status_code >= 400 or not authed_body or authed_body == (anon.text or ""):
+            return None
+
+        marker = "rdmn" + uuid.uuid4().hex[:6]
+        for dec_url in _deception_urls(url, marker):
+            cb = uuid.uuid4().hex[:8]
+            # Plant: authed request to the static-looking URL. Vulnerable when the
+            # origin ignores the suffix and serves the SAME sensitive page.
+            plant = _get(add_cache_buster(dec_url, "rdmncb", cb), auth)
+            if plant.status_code >= 400 or (plant.text or "") != authed_body:
+                continue
+            # Retrieve: SAME URL with NO session. A cache HIT that still returns the
+            # sensitive body is the leak -> confirmed deception.
+            victim = _get(add_cache_buster(dec_url, "rdmncb", cb))
+            if (victim.text or "") == authed_body and response_cache_state(victim) == "hit":
+                return {
+                    "endpoint_url": dec_url,
+                    "technique": "cache_deception",
+                    "vector_type": "path",
+                    "cache_header": "",
+                    "cache_param": "static-suffix",
+                    "impact": "deception",
+                    "confidence": 0.95,
+                    "confidence_tier": "Confirmed",
+                    "severity": "high",
+                    "cvss_score": 7.5,
+                    "cache_signals": oracle_info.get("signals", []),
+                    "cache_buster": cb,
+                    "source_engine": "hypothesis",
+                    "detection_mode": "deception",
+                    "evidence": {
+                        "poc_link": dec_url,
+                        "curl_verify": f"curl -s '{dec_url}'  # no session -> sensitive body",
+                        "differential_change": "authenticated body served from cache to an "
+                                               "unauthenticated request via a static-suffix URL",
+                    },
+                }
+    except Exception:  # noqa: BLE001 - a probe must never break the scan
+        return None
+    return None

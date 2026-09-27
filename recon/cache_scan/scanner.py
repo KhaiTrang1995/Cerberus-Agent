@@ -22,7 +22,10 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from recon.cache_scan import wcvs_runner, oracle, buster, hypotheses, confirm, scoring, normalizers
+from recon.cache_scan import (
+    wcvs_runner, oracle, buster, hypotheses, confirm, scoring, normalizers,
+    safety, deception,
+)
 
 # Hard caps so a huge recon surface can't turn into a runaway active scan.
 _MAX_URLS = 200
@@ -221,6 +224,15 @@ def _scan_one_url(url, wcvs_by_url, combined_result, settings, min_conf,
             )
             finding["cross_vantage"] = cross_vantage
             target_entry["findings"].append(finding)
+
+        # Web cache deception (class 10): auth-aware, so it runs after the vector loop
+        # and only when a session is in scope. A static-suffix URL that serves the
+        # authenticated page from cache to an anonymous request is the leak.
+        if safety.is_deception_allowed(settings):
+            dec = deception.deception_probe(url, oracle_info, session, settings, timeout, verify_ssl)
+            if dec:
+                dec["cross_vantage"] = cross_vantage
+                target_entry["findings"].append(dec)
         return url, target_entry, 1
     finally:
         try:

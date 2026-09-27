@@ -451,6 +451,26 @@ def p_fat_get() -> Response:
     return cacheable(Response(f"<html><body>results for: {q}</body></html>", mimetype="text/html"))
 
 
+def _account_view(**_kw) -> Response:
+    # Web cache deception (class 10): returns SENSITIVE content when a session cookie is
+    # present, generic content otherwise. The path-confusion route below serves this same
+    # view for /account/<anything>.css, so a cache that stores by extension (URL-keyed,
+    # no Cookie in the key) caches the authenticated body and serves it to anon victims.
+    if request.cookies.get("session"):
+        body = "SENSITIVE account for user: alice (balance 1000)"
+    else:
+        body = "public: please log in"
+    return cacheable(Response(f"<html><body>{body}</body></html>", mimetype="text/html"))
+
+
+page("/account", "10 · Deception -> sensitive",
+     "sensitive when a session cookie is present; /account/x.css path-confuses to it")(_account_view)
+# Path confusion: the origin ignores a trailing static-looking segment and serves the
+# account page, so /account/<marker>.css returns the sensitive body (a distinct endpoint).
+app.add_url_rule("/account/<path:_deco>", endpoint="account_deco",
+                 view_func=_account_view, methods=["GET"])
+
+
 def _menu_view(**_kw) -> Response:
     # Reads a ;matrix path-parameter (;utm_source=) out of the raw path and reflects it.
     # The nginx /normalize/ cache key strips ;params, so a poisoned ;utm_source= value
