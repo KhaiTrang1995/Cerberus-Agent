@@ -85,8 +85,12 @@ class TestSettingsPageUI(unittest.TestCase):
         self.assertIn("wpscanApiToken: ''", self.content)
 
     def test_tool_name_map_has_entry(self):
-        """TOOL_NAME_MAP must map wpscanApiToken to 'wpscan'."""
-        self.assertIn("wpscanApiToken: 'wpscan'", self.content)
+        """The shared rotation list (rotationTools.ts) must map wpscanApiToken to 'wpscan'."""
+        path = os.path.join(BASE_DIR, 'webapp', 'src', 'lib', 'rotationTools.ts')
+        with open(path) as f:
+            rotation = f.read()
+        self.assertIn("{ tool: 'wpscan', field: 'wpscanApiToken'", rotation)
+        self.assertIn("from '@/lib/rotationTools'", self.content)
 
     def test_fetch_settings_has_field(self):
         """fetchSettings response handler must include wpscanApiToken."""

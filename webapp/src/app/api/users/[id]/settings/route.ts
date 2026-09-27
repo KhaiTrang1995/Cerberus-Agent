@@ -4,6 +4,7 @@ import { getSession, isInternalRequest, isScannerRequest, requireUserAccess } fr
 import { orchestratorFetch } from '@/lib/orchestrator'
 import { sanitizeBodyRules } from '@/lib/captureBodyRules'
 import { isValidGithubHost } from '@/lib/github/ownerTarget'
+import { ROTATION_TOOL_NAMES } from '@/lib/rotationTools'
 
 interface RouteParams {
   params: Promise<{ id: string }>
@@ -16,7 +17,6 @@ function maskSecret(value: string): string {
 }
 
 const TUNNEL_FIELDS = ['ngrokAuthtoken', 'chiselServerUrl', 'chiselAuth'] as const
-const TOOL_NAMES = ['tavily', 'shodan', 'serp', 'nvd', 'vulners', 'urlscan', 'censys', 'fofa', 'otx', 'netlas', 'virustotal', 'zoomeye', 'criminalip', 'quake', 'hunter', 'publicwww', 'hunterhow', 'onyphe', 'driftnet', 'pdcp'] as const
 
 // GET /api/users/[id]/settings
 export async function GET(request: NextRequest, { params }: RouteParams) {
@@ -416,7 +416,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     // Handle rotation configs if provided
     const rotationConfigs: Record<string, { extraKeys?: string[]; extraKeyCount: number; rotateEveryN: number }> = {}
     if (body.rotationConfigs && typeof body.rotationConfigs === 'object') {
-      for (const toolName of TOOL_NAMES) {
+      for (const toolName of ROTATION_TOOL_NAMES) {
         const cfg = body.rotationConfigs[toolName]
         if (!cfg) continue
 

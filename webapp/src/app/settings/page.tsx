@@ -24,6 +24,7 @@ import { TrafficMindProjectMatrix } from '@/components/traffic/TrafficMindProjec
 import styles from '@/components/settings/Settings.module.css'
 import { buildTemplate, templateToJson, validateAndParse, isValidationError } from '@/lib/apiKeysTemplate'
 import type { ParsedImport } from '@/lib/apiKeysTemplate'
+import { ROTATION_TOOL_BY_FIELD, ROTATION_TOOL_NAMES } from '@/lib/rotationTools'
 
 interface UserSettings {
   githubAccessToken: string
@@ -149,32 +150,6 @@ const EMPTY_SETTINGS: UserSettings = {
 interface RotationInfo {
   extraKeyCount: number
   rotateEveryN: number
-}
-
-/** Maps settings field name → rotation tool name */
-const TOOL_NAME_MAP: Record<string, string> = {
-  tavilyApiKey: 'tavily',
-  shodanApiKey: 'shodan',
-  serpApiKey: 'serp',
-  nvdApiKey: 'nvd',
-  vulnersApiKey: 'vulners',
-  urlscanApiKey: 'urlscan',
-  fofaApiKey: 'fofa',
-  otxApiKey: 'otx',
-  netlasApiKey: 'netlas',
-  virusTotalApiKey: 'virustotal',
-  zoomEyeApiKey: 'zoomeye',
-  criminalIpApiKey: 'criminalip',
-  securitytrailsApiKey: 'securitytrails',
-  viewdnsApiKey: 'viewdns',
-  quakeApiKey: 'quake',
-  hunterApiKey: 'hunter',
-  publicWwwApiKey: 'publicwww',
-  hunterHowApiKey: 'hunterhow',
-  onypheApiKey: 'onyphe',
-  driftnetApiKey: 'driftnet',
-  wpscanApiToken: 'wpscan',
-  pdcpApiKey: 'pdcp',
 }
 
 function getProviderIconComponent(providerType: string) {
@@ -677,7 +652,7 @@ export default function SettingsPage() {
     try {
       // Build rotation configs payload from pending state
       const rotPayload: Record<string, { extraKeys: string; rotateEveryN: number }> = {}
-      for (const [, toolName] of Object.entries(TOOL_NAME_MAP)) {
+      for (const toolName of ROTATION_TOOL_NAMES) {
         const info = rotationConfigs[toolName]
         if (info && (info as RotationInfo & { _extraKeys?: string })._extraKeys !== undefined) {
           // New keys were set via the modal - send them
@@ -789,7 +764,7 @@ export default function SettingsPage() {
   }, [])
 
   const openRotationModal = useCallback((settingsField: string) => {
-    const toolName = TOOL_NAME_MAP[settingsField]
+    const toolName = ROTATION_TOOL_BY_FIELD[settingsField]
     if (!toolName) return
     const existing = rotationConfigs[toolName]
     setRotationModal(toolName)
