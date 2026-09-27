@@ -1600,7 +1600,7 @@ In addition to Nuclei templates, RedAmon includes custom Python-based security c
 
 | Check Type | Nuclei Coverage | Custom Check Adds |
 |------------|-----------------|-------------------|
-| **Direct IP Access** | No | Detects WAF bypass via IP |
+| **Direct IP Access** | No | WAF bypass via IP (blocked-vs-allowed payload differential) + unauthenticated `PURGE`/`BAN` cache endpoint |
 | **TLS Expiry** | No | Warns before cert expires |
 | **DNS Security** | No | SPF, DMARC, DNSSEC, Zone Transfer |
 | **Rate Limiting** | No | Brute-force protection detection |

@@ -145,8 +145,9 @@ changes require `docker compose --profile tools build recon`.
 | `wcvs_runner.py` | **Phase 1** - build WCVS docker command, run it, parse the JSON report into candidates |
 | `oracle.py` | **Phase 1b** - cache detection (hit/miss signal) |
 | `buster.py` | **Phase 2** - find a safe, isolated cache-buster location |
-| `hypotheses.py` | **Phase 3** - generate native test vectors (generic + framework packs) |
-| `confirm.py` | **Phase 4** - the baseline→poison→clean→persistence sequence |
+| `hypotheses.py` | **Phase 3** - generate native test vectors (generic headers, unkeyed params, **fat GET** body params, **matrix cache-key normalization**, framework packs) |
+| `confirm.py` | **Phase 4** - the baseline→poison→clean→persistence sequence (header / param / fat_get / path_param vectors) |
+| `deception.py` | **Phase 4b** - auth-aware web cache deception: plants an authenticated page at a static-suffix URL and confirms it is served from cache to an anonymous request |
 | `scoring.py` | **Phase 5** - confidence tiers + severity/CVSS mapping |
 | `safety.py` | benign canaries, isolated-bucket helpers, CPDoS/deception gating |
 | `normalizers.py` | shape findings into the `cache_scan` output structure |
