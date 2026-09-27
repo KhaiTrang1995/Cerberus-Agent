@@ -184,6 +184,8 @@ def run_vhost_sni_enrichment(
         "info_severity": 0,
     }
 
+    from recon.helpers import circuit_breaker as _cb
+    vhost_scope = _cb.scope((), label="VhostSni", unit="port(s)")
     print(f"[*][VhostSni] Probing {len(ip_port_map)} IP target(s) with concurrency={concurrency}")
     for ip, ports in ip_port_map.items():
         try:
@@ -206,6 +208,8 @@ def run_vhost_sni_enrichment(
             continue
 
         by_ip[ip] = ip_result
+        for dead in ip_result.get("unreachable_ports", []):
+            vhost_scope.note_host_skipped(dead)
         summary_counts["ips_tested"] += 1
         summary_counts["candidates_total"] += ip_result.get("candidates_tested", 0)
 
@@ -258,6 +262,8 @@ def run_vhost_sni_enrichment(
         },
     }
 
+    # IP:ports that died mid-run: the prune keeps their previous findings.
+    vhost_scope.finish("vhost_sni_enum", host_source="vhost_sni_enum", payload=result)
     combined_result["vhost_sni"] = result
 
     print(
@@ -318,10 +324,19 @@ def _probe_single_ip(
     anomalies: list[dict] = []
     is_permissive_frontend = False
     suppressed_by_control_total = 0
+    dead_ports: list[str] = []
 
     for port_info in ports:
         port = int(port_info.get("port", 443))
         scheme = port_info.get("scheme") or _scheme_for_port(port)
+
+        # A port a requests-based module already proved unreachable is skipped.
+        # curl's own silence cannot prove a host dead, so it never marks one.
+        port_key = _port_key(ip, port)
+        if _known_down(f"{scheme}://{port_key}"):
+            dead_ports.append(port_key)
+            print(f"[!][VhostSni] IP {port_key} ({scheme}) is unreachable this run -- skipping port")
+            continue
 
         baseline = _curl_probe(
             scheme=scheme,
@@ -360,6 +375,7 @@ def _probe_single_ip(
                     futures[pool.submit(_curl_probe, scheme, hostname, None, ip, port, timeout)] = (hostname, "L7")
                 if test_l4 and scheme == "https":
                     futures[pool.submit(_curl_probe, scheme, hostname, hostname, ip, port, timeout)] = (hostname, "L4")
+            none_streak = 0
             for fut in as_completed(futures):
                 hostname, layer = futures[fut]
                 try:
@@ -367,7 +383,22 @@ def _probe_single_ip(
                 except Exception:
                     res = None
                 if res is None:
+                    none_streak += 1
+                    # A run of silent candidates may just be a quiet vhost set;
+                    # re-asking the baseline tells a dead target apart. Only a
+                    # dead baseline stops the port (never on a streak alone).
+                    if none_streak >= _DEAD_STREAK and _breakers_on():
+                        if _curl_probe(scheme=scheme, host_header=None, sni_hostname=None,
+                                       target=ip, port=port, timeout=timeout) is None:
+                            for pending in futures:
+                                pending.cancel()
+                            dead_ports.append(port_key)
+                            print(f"[!][VhostSni] IP {port_key} ({scheme}) stopped answering "
+                                  f"mid-run -- skipping its remaining candidates")
+                            break
+                        none_streak = 0
                     continue
+                none_streak = 0
                 per_candidate_results.setdefault(hostname, {})[layer] = res
 
         # Per-port collection so the noisy-frontend guard can scope its decision
@@ -458,12 +489,39 @@ def _probe_single_ip(
         "is_permissive_frontend": is_permissive_frontend,
         "suppressed_by_control": suppressed_by_control_total,
         "hosts_hidden_vhosts": len(anomalies) > 0,
+        **({"unreachable_ports": dead_ports} if dead_ports else {}),
     }
 
 
 # =============================================================================
 # Curl wrapper
 # =============================================================================
+# Consecutive silent candidate probes on one port before its baseline is asked
+# again. High enough that a quiet vhost list never triggers it on a live port.
+_DEAD_STREAK = 10
+
+
+def _port_key(ip: str, port: int) -> str:
+    """``ip:port`` in HostHealth's key form (an IPv6 address is bracketed)."""
+    return f"[{ip}]:{port}" if ":" in ip else f"{ip}:{port}"
+
+
+def _breakers_on() -> bool:
+    try:
+        from recon.helpers import circuit_breaker as cb
+        return cb.enabled()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _known_down(target: str) -> bool:
+    try:
+        from recon.helpers import circuit_breaker as cb
+        return cb.host_health.is_down(target)
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _curl_probe(
     scheme: str,
     host_header: Optional[str],

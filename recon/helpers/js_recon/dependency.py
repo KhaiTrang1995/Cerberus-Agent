@@ -44,19 +44,31 @@ def _check_npm_registry(package_name: str, timeout: int = 10) -> bool:
         if package_name in _npm_cache:
             return _npm_cache[package_name]
 
-    try:
-        resp = requests.get(
-            f'https://registry.npmjs.org/{package_name}',
-            timeout=timeout,
-            headers={'Accept': 'application/json'},
-        )
-        exists = resp.status_code == 200
-        with _npm_cache_lock:
-            _npm_cache[package_name] = exists
-        return exists
-    except requests.RequestException:
-        # On error, assume it exists (conservative -- don't flag as confusion)
+    from recon.helpers import circuit_breaker as cb
+    breaker = cb.get_breaker("npm", label="npm", threshold=cb.INTERNAL_THRESHOLD)
+    # A skipped call is treated as "exists": the dependency-confusion check only
+    # flags a 404, so an unreachable registry never invents a finding. The whole
+    # registry being down is recorded once, via the breaker, instead of costing
+    # 10s per package.
+    if not breaker.allow():
         return True
+
+    def classify(resp):
+        # 404 is a real answer ("not published"), not a failure.
+        return cb.json_result(resp, keyed=False, no_data=(404,))
+
+    res = cb.guarded_call(
+        breaker,
+        lambda: requests.get(f'https://registry.npmjs.org/{package_name}', timeout=timeout,
+                             headers={'Accept': 'application/json'}),
+        classify)
+    if not res.answered:
+        # A failure is not cached: a later package retries once the breaker heals.
+        return True
+    exists = res.ok
+    with _npm_cache_lock:
+        _npm_cache[package_name] = exists
+    return exists
 
 
 def extract_scoped_packages(content: str) -> list:

@@ -28,20 +28,41 @@ def _get_service_lock(service: str) -> threading.Lock:
         return _service_locks[service]
 
 
+def _skipped_result(detail: str) -> dict:
+    return {'valid': False, 'scope': '', 'info': '', 'error': f'skipped ({detail})'}
+
+
 def _rate_limited_request(service: str, func, timeout: int = 5):
-    """Execute a request with per-service rate limiting (1 req/sec)."""
+    """Execute a request with per-service rate limiting (1 req/sec).
+
+    Each service has its own breaker: after a few unreachable calls in a row
+    the rest are skipped (a validator serialises at 1 req/s, so a dead service
+    otherwise costs 5s + 1s for every discovered key of that kind). A skip
+    returns the same shape a real failure returns, so js_recon is unchanged. A
+    key that is simply invalid is an HTTP answer, never a breaker failure.
+    """
+    from recon.helpers import circuit_breaker as cb
+    breaker = cb.get_breaker(f"secretval:{service}", label="SecretValidator",
+                             threshold=cb.INTERNAL_THRESHOLD)
+    if not breaker.allow():
+        return _skipped_result(breaker.detail)
     lock = _get_service_lock(service)
     with lock:
+        epoch = breaker.epoch()
         try:
             result = func(timeout)
+            breaker.record(cb.Outcome.OK, epoch=epoch)
             time.sleep(1)  # 1 req/sec per service
             return result
         except requests.Timeout:
+            breaker.record(cb.Outcome.TRANSIENT, "Timeout", epoch=epoch)
             return {'valid': False, 'scope': '', 'info': '', 'error': 'timeout'}
         except requests.RequestException as e:
-            return {'valid': False, 'scope': '', 'info': '', 'error': str(e)}
+            breaker.record(cb.Outcome.TRANSIENT, type(e).__name__, epoch=epoch)
+            return {'valid': False, 'scope': '', 'info': '', 'error': type(e).__name__}
         except Exception as e:
-            return {'valid': False, 'scope': '', 'info': '', 'error': str(e)}
+            breaker.record(cb.Outcome.TRANSIENT, type(e).__name__, epoch=epoch)
+            return {'valid': False, 'scope': '', 'info': '', 'error': type(e).__name__}
 
 
 def validate_aws(matched_text: str, timeout: int = 5) -> dict:

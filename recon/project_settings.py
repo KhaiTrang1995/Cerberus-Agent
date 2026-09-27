@@ -187,6 +187,8 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'NUCLEI_CONCURRENCY': 25,
     'NUCLEI_TIMEOUT': 10,
     'NUCLEI_RETRIES': 1,
+    'NUCLEI_MAX_RUNTIME': 86400,
+    'NUCLEI_MAX_HOST_ERROR': 30,
     'NUCLEI_TAGS': ['cve', 'xss', 'sqli', 'rce', 'lfi', 'ssrf', 'xxe', 'ssti'],
     'NUCLEI_EXCLUDE_TAGS': ['dos', 'fuzz'],
     'NUCLEI_DAST_MODE': False,
@@ -1365,6 +1367,8 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['NUCLEI_CONCURRENCY'] = project.get('nucleiConcurrency', DEFAULT_SETTINGS['NUCLEI_CONCURRENCY'])
     settings['NUCLEI_TIMEOUT'] = project.get('nucleiTimeout', DEFAULT_SETTINGS['NUCLEI_TIMEOUT'])
     settings['NUCLEI_RETRIES'] = project.get('nucleiRetries', DEFAULT_SETTINGS['NUCLEI_RETRIES'])
+    settings['NUCLEI_MAX_RUNTIME'] = project.get('nucleiMaxRuntime', DEFAULT_SETTINGS['NUCLEI_MAX_RUNTIME'])
+    settings['NUCLEI_MAX_HOST_ERROR'] = project.get('nucleiMaxHostError', DEFAULT_SETTINGS['NUCLEI_MAX_HOST_ERROR'])
     settings['NUCLEI_TAGS'] = project.get('nucleiTags', DEFAULT_SETTINGS['NUCLEI_TAGS'])
     settings['NUCLEI_EXCLUDE_TAGS'] = project.get('nucleiExcludeTags', DEFAULT_SETTINGS['NUCLEI_EXCLUDE_TAGS'])
     settings['NUCLEI_DAST_MODE'] = project.get('nucleiDastMode', DEFAULT_SETTINGS['NUCLEI_DAST_MODE'])

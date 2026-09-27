@@ -1571,7 +1571,7 @@
    "unit": "seconds"
   },
   "attackSkillConfig": {
-   "default": "{\"builtIn\":{\"cve_exploit\":true,\"brute_force_credential_guess\":true,\"phishing_social_engineering\":true,\"denial_of_service\":true,\"sql_injection\":true,\"xss\":true,\"ssrf\":true,\"rce\":true,\"path_traversal\":true,\"access_control\":true,\"xxe\":true,\"crypto_attack\":true},\"user\":{}}",
+   "default": "{\"builtIn\":{\"cve_exploit\":true,\"brute_force_credential_guess\":true,\"phishing_social_engineering\":true,\"denial_of_service\":true,\"sql_injection\":true,\"xss\":true,\"ssrf\":true,\"rce\":true,\"path_traversal\":true,\"access_control\":true,\"http_request_smuggling\":false,\"xxe\":true,\"crypto_attack\":true},\"user\":{}}",
    "form_section": "AttackSkillsSection",
    "group": "agent",
    "has_default": true,
@@ -8252,6 +8252,26 @@
    "type": "boolean",
    "unit": "none"
   },
+  "nucleiMaxHostError": {
+   "bounds": {
+    "min": 1,
+    "max": 10000
+   },
+   "default": 30,
+   "form_section": "NucleiSection",
+   "has_default": true,
+   "mcp": "settable",
+   "meaning": "How many errors nuclei tolerates from one host before it stops probing that host (nuclei's -mhe), so one dead host in a large target list cannot soak the whole pass in timeouts.",
+   "optional": false,
+   "phase": "vuln_scan",
+   "prisma_type": "Int",
+   "roe_capped": false,
+   "runtime_key": "NUCLEI_MAX_HOST_ERROR",
+   "tool": "nuclei",
+   "traffic": "active",
+   "type": "int",
+   "unit": "count"
+  },
   "nucleiMaxRedirects": {
    "bounds": {
     "min": 0,
@@ -8271,6 +8291,26 @@
    "traffic": "active",
    "type": "int",
    "unit": "count"
+  },
+  "nucleiMaxRuntime": {
+   "bounds": {
+    "min": 600,
+    "max": 604800
+   },
+   "default": 86400,
+   "form_section": "NucleiSection",
+   "has_default": true,
+   "mcp": "settable",
+   "meaning": "Wall-clock ceiling for a single nuclei pass, in seconds (default 24h). A pass that reaches it is stopped, its partial findings are kept, and the run is recorded as truncated. Not a rate and has no unlimited value; raise it (up to 7 days) rather than disabling it.",
+   "optional": false,
+   "phase": "vuln_scan",
+   "prisma_type": "Int",
+   "roe_capped": false,
+   "runtime_key": "NUCLEI_MAX_RUNTIME",
+   "tool": "nuclei",
+   "traffic": "active",
+   "type": "int",
+   "unit": "seconds"
   },
   "nucleiNewTemplatesOnly": {
    "default": false,
@@ -8510,7 +8550,7 @@
    "group": "unbounded",
    "has_default": true,
    "mcp": "settable",
-   "meaning": "How long nuclei may spend before it is abandoned, in seconds. A run that hits it contributes whatever it found so far rather than failing the scan.",
+   "meaning": "Per-request timeout, in seconds: how long nuclei waits for one template's HTTP request (nuclei's -timeout), NOT a cap on the whole run. The wall-clock ceiling for a pass is nucleiMaxRuntime.",
    "optional": false,
    "phase": "vuln_scan",
    "prisma_type": "Int",

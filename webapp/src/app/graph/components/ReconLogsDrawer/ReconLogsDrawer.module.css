@@ -254,6 +254,17 @@
   color: #ef4444;
 }
 
+/* Circuit breakers: a source or host could not be fully re-checked this run. */
+.logDegraded {
+  background: rgba(245, 158, 11, 0.08);
+  border-left: 3px solid rgba(245, 158, 11, 0.6);
+  padding-left: calc(var(--space-2) - 3px);
+  font-weight: 500;
+}
+.logDegraded .logMessage {
+  color: #f59e0b;
+}
+
 /* Node filters: what the end-of-scan sweep muted, per kind and rule. */
 .logNodeFilter {
   margin: 2px 0;

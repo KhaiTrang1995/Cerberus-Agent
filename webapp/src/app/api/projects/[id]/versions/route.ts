@@ -46,12 +46,19 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
       link_count: number | null
       created_at: Date
       snapshot_bytes: number | null
+      degraded_sources: number | null
     }>>`
-      SELECT id, seq, label, is_current, pinned, node_count, link_count, created_at,
-             octet_length(snapshot) AS snapshot_bytes
-      FROM scan_versions
-      WHERE project_id = ${id}
-      ORDER BY seq DESC
+      SELECT sv.id, sv.seq, sv.label, sv.is_current, sv.pinned, sv.node_count,
+             sv.link_count, sv.created_at,
+             octet_length(sv.snapshot) AS snapshot_bytes,
+             (SELECT sj.degraded_sources
+                FROM scan_jobs sj
+               WHERE sj.version_id = sv.id AND sj.kind = 'full_recon'
+               ORDER BY sj.created_at DESC
+               LIMIT 1) AS degraded_sources
+      FROM scan_versions sv
+      WHERE sv.project_id = ${id}
+      ORDER BY sv.seq DESC
     `
 
     return NextResponse.json({
@@ -65,6 +72,9 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
         linkCount: r.link_count,
         createdAt: r.created_at,
         snapshotBytes: r.snapshot_bytes ?? 0,
+        // Finding sources the run behind this version could not fully re-check
+        // (circuit breakers). null = unknown/complete, N>0 = partial.
+        degradedSources: r.degraded_sources,
         // A version with no bytes cannot be restored into Neo4j (4A.6). The
         // current version is the live graph, so it is never "activatable".
         activatable: !r.is_current && (r.snapshot_bytes ?? 0) > 0,

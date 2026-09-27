@@ -218,22 +218,45 @@ class _RunCtx:
     def cached(self, source: str, key: str, producer) -> List[str]:
         """Memoize a per-domain search by (source, key) for the whole run (G3).
 
-        Only NON-EMPTY results are cached. A source that returns nothing is often
-        a transient failure (a producer swallows a 429/timeout and returns []); if
-        that empty were cached, every later host sharing the key would inherit the
-        blackout silently. Not caching empties costs a re-query for a genuinely
-        empty source (bounded by the rate limiter and the keyed-search budget) and
-        eliminates the poisoning.
+        A keyed producer returns a typed CallResult: any ANSWER - hits, or a
+        genuine "nothing found" (NO_DATA) - is cached for every later host that
+        shares the key, and a failure (timeout, 5xx, refused key, a paused
+        source, an exhausted budget) never is, so a transient error cannot
+        black out the key for the rest of the run. A keyless producer returns a
+        plain list, which cannot tell "none" from "failed", so only a non-empty
+        one is cached.
         """
+        from recon.helpers.circuit_breaker import CallResult
         ck = (source, key)
         with self._cache_lock:
             if ck in self._cache:
                 return self._cache[ck]
-        result = producer() or []
-        if result:
+        result = producer()
+        if isinstance(result, CallResult):
+            ips = list(result.data or [])
+            if result.answered:
+                with self._cache_lock:
+                    self._cache[ck] = ips
+            return ips
+        ips = list(result or [])
+        if ips:
             with self._cache_lock:
-                self._cache[ck] = result
-        return result
+                self._cache[ck] = ips
+        return ips
+
+    def admit(self, breaker):
+        """None when a keyed search may go out; else the typed skip to return.
+
+        The breaker is checked BEFORE the budget, so a paused or refused source
+        never draws the keyed-search budget down.
+        """
+        from recon.helpers.circuit_breaker import CallResult, Outcome
+        if not breaker.allow():
+            return CallResult([], Outcome.SKIPPED, breaker.detail)
+        if not self.budget.take():
+            breaker._release_probe()
+            return CallResult([], Outcome.SKIPPED, "search budget exhausted")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +521,14 @@ def _discover_via_crtsh(domain: str, ctx: _RunCtx) -> List[str]:
 # Keyed scanner sources (reuse RedAmon clients/keys)
 # ---------------------------------------------------------------------------
 
+def _typed_ips(res, ips):
+    """The IPs as a CallResult with the call's outcome (OK only when non-empty)."""
+    from recon.helpers.circuit_breaker import CallResult, Outcome
+    if res.ok:
+        return CallResult(ips, Outcome.OK if ips else Outcome.NO_DATA, res.detail)
+    return CallResult([], res.outcome, res.detail)
+
+
 def _discover_via_shodan(host: str, favicon_hash: Optional[int], ctx: _RunCtx) -> List[str]:
     """Shodan /shodan/host/search on cert-CN, hostname and favicon (unwaf)."""
     key = (ctx.settings.get("SHODAN_API_KEY") or "").strip()
@@ -505,35 +536,40 @@ def _discover_via_shodan(host: str, favicon_hash: Optional[int], ctx: _RunCtx) -
     if not key and not (rotator and getattr(rotator, "has_keys", False)):
         return []
     try:
-        from recon.main_recon_modules.shodan_enrich import _shodan_get
+        from recon.main_recon_modules.shodan_enrich import (
+            ShodanApiKeyError, _shodan_breaker, _shodan_call,
+        )
+        from recon.helpers import circuit_breaker as cb
     except Exception:
         return []
-    try:
-        from recon.main_recon_modules.shodan_enrich import ShodanApiKeyError
-    except Exception:  # pragma: no cover
-        ShodanApiKeyError = ()  # nothing to catch-and-reraise
+    keys = cb.KeyPool(rotator, key, label="Shodan")
+    breaker = _shodan_breaker("search")
     queries = [f"ssl.cert.subject.cn:{host}", f"hostname:{host}"]
     if favicon_hash not in (None, "", 0):
         queries.append(f"http.favicon.hash:{favicon_hash}")
     ips: Set[str] = set()
     for q in queries:
         def _producer(q=q):
-            if not ctx.budget.take():
-                return []
-            try:
-                data = _shodan_get("/shodan/host/search", key, {"query": q, "minify": "true"}, rotator)
-            except ShodanApiKeyError:
-                raise  # surface an invalid/paid-only key to the caller -> meta + log
-            except Exception:
-                return []
-            out = []
-            for m in (data or {}).get("matches", []) or []:
-                ip = m.get("ip_str")
-                if ip:
-                    out.append(ip)
-            return out
+            skip = ctx.admit(breaker)
+            if skip is not None:
+                return skip
+            res = _shodan_call("/shodan/host/search", keys, {"query": q, "minify": "true"},
+                               admitted=True)
+            if res.outcome is cb.Outcome.FATAL:
+                # surface an invalid/paid-only key to the caller -> meta + log, once:
+                # later searches find the breaker open and skip quietly.
+                raise ShodanApiKeyError(f"Shodan search refused ({res.detail})",
+                                        local=res.local, detail=res.detail)
+            found = [m.get("ip_str") for m in ((res.data or {}).get("matches") or [])
+                     if isinstance(m, dict) and m.get("ip_str")] if res.ok else []
+            return _typed_ips(res, found)
         ips.update(ctx.cached("shodan", q, _producer))
     return list(ips)
+
+
+def _censys_search_breaker():
+    from recon.helpers import circuit_breaker as cb
+    return cb.get_breaker("censys:search", label="Censys", parent="censys")
 
 
 def _discover_via_censys(host: str, ctx: _RunCtx) -> List[str]:
@@ -542,10 +578,13 @@ def _discover_via_censys(host: str, ctx: _RunCtx) -> List[str]:
     org = (ctx.settings.get("CENSYS_ORG_ID") or "").strip()
     if not token:
         return []
+    from recon.helpers import circuit_breaker as cb
+    breaker = _censys_search_breaker()
 
     def _producer():
-        if not ctx.budget.take():
-            return []
+        skip = ctx.admit(breaker)
+        if skip is not None:
+            return skip
         url = "https://api.platform.censys.io/v3/global/search/query"
         if org:
             url += "?organization_id=" + quote_plus(org)
@@ -554,25 +593,23 @@ def _discover_via_censys(host: str, ctx: _RunCtx) -> List[str]:
         if org:
             headers["X-Organization-ID"] = org
         body = {"query": f"cert.names: {host}", "page_size": 50}
-        try:
-            ctx.rate.wait()
-            resp = requests.post(url, json=body, headers=headers, timeout=ctx.timeout)
-            if resp.status_code in (401, 403):
-                # surface an invalid / unauthorized Censys token -> meta + log
-                raise ValueError(f"Censys auth failed (HTTP {resp.status_code})")
-            if resp.status_code != 200:
-                return []
-            hits = (resp.json().get("result") or {}).get("hits", []) or []
-        except requests.RequestException:
-            return []
+        ctx.rate.wait()
+        res = cb.guarded_call(
+            breaker, lambda: requests.post(url, json=body, headers=headers, timeout=ctx.timeout),
+            lambda resp: cb.json_result(resp, keyed=True), admitted=True)
+        if res.outcome is cb.Outcome.FATAL:
+            # surface an invalid / unauthorized Censys token -> meta + log, once
+            raise ValueError(f"Censys auth failed ({res.detail})")
         out = []
-        for hit in hits:
-            if hit.get("ip") and not _ip_in_cdn_ranges(hit["ip"]):
-                out.append(hit["ip"])
-            for svc in hit.get("services", []) or []:
-                if svc.get("ip") and not _ip_in_cdn_ranges(svc["ip"]):
-                    out.append(svc["ip"])
-        return out
+        if res.ok:
+            hits = ((res.data or {}).get("result") or {}).get("hits", []) or []
+            for hit in hits:
+                if hit.get("ip") and not _ip_in_cdn_ranges(hit["ip"]):
+                    out.append(hit["ip"])
+                for svc in hit.get("services", []) or []:
+                    if svc.get("ip") and not _ip_in_cdn_ranges(svc["ip"]):
+                        out.append(svc["ip"])
+        return _typed_ips(res, out)
 
     return ctx.cached("censys", host, _producer)
 
@@ -585,32 +622,32 @@ def _discover_via_fofa(host: str, favicon_hash: Optional[int], ctx: _RunCtx) -> 
         return []
     try:
         from recon.main_recon_modules.fofa_enrich import (
-            _fofa_search, _fofa_effective_key, _parse_fofa_rows,
+            _fofa_breaker, _fofa_effective_key, _fofa_query, _parse_fofa_rows,
         )
+        from recon.helpers import circuit_breaker as cb
     except Exception:
         return []
-    eff = _fofa_effective_key(ctx.settings, rotator)
-    if not eff:
+    if not _fofa_effective_key(ctx.settings, rotator):
         return []
+    keys = cb.KeyPool(rotator, key, label="FOFA")
+    breaker = _fofa_breaker()
     clauses = [f'cert="{host}"']
     if favicon_hash not in (None, "", 0):
         clauses.append(f'icon_hash="{favicon_hash}"')
     ips: Set[str] = set()
     for clause in clauses:
         def _producer(clause=clause):
-            if not ctx.budget.take():
-                return []
-            try:
-                data = _fofa_search(clause, eff, 100, rotator)
-                rows, _ = _parse_fofa_rows(data or {})
-            except Exception:
-                return []
-            out = []
-            for row in rows:
-                ip = row.get("ip") if isinstance(row, dict) else None
-                if ip and not _ip_in_cdn_ranges(ip):
-                    out.append(ip)
-            return out
+            skip = ctx.admit(breaker)
+            if skip is not None:
+                return skip
+            res = _fofa_query(clause, keys, 100, admitted=True)
+            rows, _ = _parse_fofa_rows(res.data or {}) if res.answered else ([], 0)
+            found = [row.get("ip") for row in rows
+                     if isinstance(row, dict) and row.get("ip")
+                     and not _ip_in_cdn_ranges(row.get("ip"))]
+            if res.answered:
+                return _typed_ips(cb.CallResult(res.data, cb.Outcome.OK), found)
+            return _typed_ips(res, found)
         ips.update(ctx.cached("fofa", clause, _producer))
     return list(ips)
 
@@ -622,80 +659,92 @@ def _discover_via_zoomeye(host: str, favicon_hash: Optional[int], ctx: _RunCtx) 
     if not key and not (rotator and getattr(rotator, "has_keys", False)):
         return []
     try:
-        from recon.main_recon_modules.zoomeye_enrich import _zoomeye_search
+        from recon.main_recon_modules.zoomeye_enrich import _zoomeye_breaker, _zoomeye_query
+        from recon.helpers import circuit_breaker as cb
     except Exception:
         return []
+    keys = cb.KeyPool(rotator, key, label="ZoomEye")
+    breaker = _zoomeye_breaker()
     queries = [f'ssl.cert.subject.cn="{host}"']
     if favicon_hash not in (None, "", 0):
         queries.append(f'iconhash="{favicon_hash}"')
     ips: Set[str] = set()
     for q in queries:
         def _producer(q=q):
-            if not ctx.budget.take():
-                return []
-            try:
-                rows, _ = _zoomeye_search(q, key, rotator, 100, timeout=ctx.timeout)
-            except Exception:
-                return []
-            out = []
-            for row in (rows or []):
-                ip = row.get("ip") if isinstance(row, dict) else None
-                if ip and not _ip_in_cdn_ranges(ip):
-                    out.append(ip)
-            return out
+            skip = ctx.admit(breaker)
+            if skip is not None:
+                return skip
+            res = _zoomeye_query(q, keys, 100, timeout=ctx.timeout, admitted=True)
+            rows = (res.data or ([], 0))[0]
+            found = [row.get("ip") for row in rows
+                     if isinstance(row, dict) and row.get("ip")
+                     and not _ip_in_cdn_ranges(row.get("ip"))]
+            if res.answered:
+                return _typed_ips(cb.CallResult(rows, cb.Outcome.OK), found)
+            return _typed_ips(res, found)
         ips.update(ctx.cached("zoomeye", q, _producer))
     return list(ips)
 
 
 def _discover_via_otx(domain: str, ctx: _RunCtx) -> List[str]:
     """AlienVault OTX passive DNS A/AAAA records (unwaf fetchIPsFromOTX)."""
-    from recon.main_recon_modules.virustotal_enrich import _effective_key
-    key = _effective_key(ctx.settings.get("OTX_API_KEY", ""), ctx.settings.get("OTX_KEY_ROTATOR"))
+    from recon.helpers import circuit_breaker as cb
+    from recon.main_recon_modules.otx_enrich import _otx_breaker
+    keys = cb.KeyPool(ctx.settings.get("OTX_KEY_ROTATOR"), ctx.settings.get("OTX_API_KEY", "") or "",
+                      label="OTX")
+    breaker = _otx_breaker("passive_dns")
 
     def _producer():
+        if not breaker.allow():
+            return cb.CallResult([], cb.Outcome.SKIPPED, breaker.detail)
         url = f"https://otx.alienvault.com/api/v1/indicators/domain/{domain}/passive_dns"
-        headers = {"User-Agent": _UA}
-        if key:
-            headers["X-OTX-API-KEY"] = key
-        try:
-            resp = requests.get(url, headers=headers, timeout=ctx.timeout)
-            if resp.status_code != 200:
-                return []
-            records = resp.json().get("passive_dns", []) or []
-        except (requests.RequestException, ValueError):
-            return []
+
+        def send(key):
+            headers = {"User-Agent": _UA}
+            if key:
+                headers["X-OTX-API-KEY"] = key
+            return requests.get(url, headers=headers, timeout=ctx.timeout), bool(key)
+
+        def classify(sent):
+            resp, keyed = sent
+            return cb.json_result(resp, keyed=keyed)
+
+        res = cb.guarded_call(breaker, send, classify, keys=keys, admitted=True)
         out = []
-        for rec in records:
-            if rec.get("record_type") in ("A", "AAAA"):
-                ip = rec.get("address")
-                if ip and _is_ip(ip):
-                    out.append(ip)
-        return out
+        if res.ok:
+            for rec in (res.data or {}).get("passive_dns", []) or []:
+                if rec.get("record_type") in ("A", "AAAA"):
+                    ip = rec.get("address")
+                    if ip and _is_ip(ip):
+                        out.append(ip)
+        return _typed_ips(res, out)
 
     return ctx.cached("otx", domain, _producer)
 
 
 def _discover_via_virustotal(domain: str, ctx: _RunCtx) -> List[str]:
     """VirusTotal passive DNS (RedAmon addition; reuses the VT resolutions client)."""
-    from recon.main_recon_modules.virustotal_enrich import _effective_key, _vt_get
+    from recon.helpers import circuit_breaker as cb
+    from recon.main_recon_modules.virustotal_enrich import _effective_key, _vt_breaker, _vt_call
     key = _effective_key(ctx.settings.get("VIRUSTOTAL_API_KEY", ""), ctx.settings.get("VIRUSTOTAL_KEY_ROTATOR"))
     if not key:
         return []
+    keys = cb.KeyPool(ctx.settings.get("VIRUSTOTAL_KEY_ROTATOR"),
+                      (ctx.settings.get("VIRUSTOTAL_API_KEY", "") or "").strip(), label="VirusTotal")
+    breaker = _vt_breaker()
 
     def _producer():
-        try:
-            data = _vt_get(f"domains/{domain}/resolutions?limit=40",
-                           ctx.settings.get("VIRUSTOTAL_API_KEY", ""),
-                           ctx.settings.get("VIRUSTOTAL_KEY_ROTATOR"),
-                           timeout=ctx.timeout)
-        except Exception:
-            return []
+        if not breaker.allow():
+            return cb.CallResult([], cb.Outcome.SKIPPED, breaker.detail)
+        res = _vt_call(f"domains/{domain}/resolutions?limit=40", keys, timeout=ctx.timeout,
+                       admitted=True)
         out = []
-        for item in (data or {}).get("data", []) or []:
-            ip = (item.get("attributes") or {}).get("ip_address")
-            if ip and _is_ip(ip):
-                out.append(ip)
-        return out
+        if res.ok:
+            for item in (res.data or {}).get("data", []) or []:
+                ip = (item.get("attributes") or {}).get("ip_address")
+                if ip and _is_ip(ip):
+                    out.append(ip)
+        return _typed_ips(res, out)
 
     return ctx.cached("virustotal", domain, _producer)
 
@@ -704,60 +753,94 @@ def _discover_via_virustotal(domain: str, ctx: _RunCtx) -> List[str]:
 # Passive-DNS sources (new keys)
 # ---------------------------------------------------------------------------
 
+def _passive_dns_breaker(provider: str, endpoint: str):
+    from recon.helpers import circuit_breaker as cb
+    label = {"securitytrails": "SecurityTrails", "viewdns": "ViewDNS"}.get(provider, provider)
+    return cb.get_breaker(f"{provider}:{endpoint}", label=label, parent=provider)
+
+
 def _discover_via_securitytrails(domain: str, ctx: _RunCtx) -> List[str]:
     """SecurityTrails DNS-A history (unwaf fetchIPsFromSecurityTrails)."""
+    from recon.helpers import circuit_breaker as cb
     from recon.main_recon_modules.virustotal_enrich import _effective_key
     key = _effective_key(ctx.settings.get("SECURITYTRAILS_API_KEY", ""),
                          ctx.settings.get("SECURITYTRAILS_KEY_ROTATOR"))
     if not key:
         return []
+    keys = cb.KeyPool(ctx.settings.get("SECURITYTRAILS_KEY_ROTATOR"),
+                      (ctx.settings.get("SECURITYTRAILS_API_KEY", "") or "").strip(),
+                      label="SecurityTrails")
+    breaker = _passive_dns_breaker("securitytrails", "history")
 
     def _producer():
+        if not breaker.allow():
+            return cb.CallResult([], cb.Outcome.SKIPPED, breaker.detail)
         # Key rides in the APIKEY header — never in the URL, so error logs are safe.
         url = f"https://api.securitytrails.com/v1/history/{domain}/dns/a"
-        try:
-            resp = requests.get(url, headers={"APIKEY": key, "Accept": "application/json"},
-                                timeout=ctx.timeout)
-            if resp.status_code != 200:
-                return []
-            records = resp.json().get("records", []) or []
-        except (requests.RequestException, ValueError):
-            return []
+        res = cb.guarded_call(
+            breaker,
+            lambda k: requests.get(url, headers={"APIKEY": k, "Accept": "application/json"},
+                                   timeout=ctx.timeout),
+            lambda resp: cb.json_result(resp, keyed=True), keys=keys, admitted=True)
         out = []
-        for rec in records:
-            for val in rec.get("values", []) or []:
-                ip = val.get("ip")
-                if ip and _is_ip(ip):
-                    out.append(ip)
-        return out
+        if res.ok:
+            for rec in (res.data or {}).get("records", []) or []:
+                for val in rec.get("values", []) or []:
+                    ip = val.get("ip")
+                    if ip and _is_ip(ip):
+                        out.append(ip)
+        return _typed_ips(res, out)
 
     return ctx.cached("securitytrails", domain, _producer)
 
 
+def _viewdns_classify(resp):
+    """ViewDNS reports errors inside a 200 body. Read only to classify."""
+    from recon.helpers import circuit_breaker as cb
+    res = cb.json_result(resp, keyed=True)
+    if not res.ok:
+        return res
+    response = (res.data or {}).get("response") if isinstance(res.data, dict) else None
+    if isinstance(response, dict) and response.get("error") and not response.get("records"):
+        text = str(response.get("error")).lower()
+        if "key" in text or "credit" in text or "quota" in text:
+            return cb.CallResult(None, cb.Outcome.FATAL, "key or quota refused")
+        return cb.CallResult(None, cb.Outcome.TRANSIENT, "ViewDNS error body")
+    return res
+
+
 def _discover_via_viewdns(domain: str, ctx: _RunCtx) -> List[str]:
     """ViewDNS IP-history (unwaf fetchIPsFromViewDNS). Key is in the query string."""
+    from recon.helpers import circuit_breaker as cb
     from recon.main_recon_modules.virustotal_enrich import _effective_key
     key = _effective_key(ctx.settings.get("VIEWDNS_API_KEY", ""),
                          ctx.settings.get("VIEWDNS_KEY_ROTATOR"))
     if not key:
         return []
+    keys = cb.KeyPool(ctx.settings.get("VIEWDNS_KEY_ROTATOR"),
+                      (ctx.settings.get("VIEWDNS_API_KEY", "") or "").strip(), label="ViewDNS")
+    breaker = _passive_dns_breaker("viewdns", "iphistory")
 
     def _producer():
-        url = f"https://api.viewdns.info/iphistory/?domain={quote_plus(domain)}&apikey={quote_plus(key)}&output=json"
-        try:
-            resp = requests.get(url, timeout=ctx.timeout, headers={"User-Agent": _UA})
-            if resp.status_code != 200:
-                # ViewDNS puts the key in the URL — never log resp.url / the URL.
-                return []
-            records = ((resp.json().get("response") or {}).get("records") or [])
-        except (requests.RequestException, ValueError):
-            return []
+        if not breaker.allow():
+            return cb.CallResult([], cb.Outcome.SKIPPED, breaker.detail)
+
+        def send(k):
+            # ViewDNS puts the key in the URL: only a status or an exception
+            # class name ever reaches a detail, never the URL.
+            url = (f"https://api.viewdns.info/iphistory/?domain={quote_plus(domain)}"
+                   f"&apikey={quote_plus(k)}&output=json")
+            return requests.get(url, timeout=ctx.timeout, headers={"User-Agent": _UA})
+
+        res = cb.guarded_call(breaker, send, _viewdns_classify, keys=keys, admitted=True)
         out = []
-        for rec in records:
-            ip = rec.get("ip")
-            if ip and _is_ip(ip):
-                out.append(ip)
-        return out
+        if res.ok:
+            records = ((res.data or {}).get("response") or {}).get("records") or []
+            for rec in records:
+                ip = rec.get("ip")
+                if ip and _is_ip(ip):
+                    out.append(ip)
+        return _typed_ips(res, out)
 
     return ctx.cached("viewdns", domain, _producer)
 
@@ -1160,6 +1243,8 @@ def run_origin_discovery_enrichment(combined_result: dict, settings: dict) -> di
     if not fronted:
         _log("-", "no CDN-fronted hosts in http_probe — nothing to unmask")
         return combined_result
+    from recon.helpers import circuit_breaker as cb
+    od_scope = cb.scope(_KEYED_PROVIDERS, label="Origin", unit="search(es)")
 
     _log("*", f"selecting {len(fronted)} CDN-fronted host(s); "
               f"threshold={ctx.threshold:.0f}% budget={ctx.budget.remaining} search calls")
@@ -1179,7 +1264,14 @@ def run_origin_discovery_enrichment(combined_result: dict, settings: dict) -> di
     _log("*" if all_confirmed else "-",
          f"origin discovery complete: {len(all_confirmed)} confirmed origin(s) "
          f"across {len(fronted)} fronted host(s)")
+    # A provider it could not ask cuts its own findings: keep the previous ones.
+    od_scope.finish("origin_discovery", sources=["origin_discovery"], payload=payload)
     return combined_result
+
+
+# Every keyed provider origin discovery asks, by breaker key prefix.
+_KEYED_PROVIDERS = ("shodan", "censys", "fofa", "zoomeye", "otx", "virustotal",
+                    "securitytrails", "viewdns")
 
 
 def run_origin_discovery_enrichment_isolated(combined_result: dict, settings: dict) -> dict:

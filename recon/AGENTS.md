@@ -62,3 +62,4 @@ tests/                     pytest (redamon-recon image; sections `recon` + `root
 - [ ] New tool/feature works in BOTH the full pipeline AND partial recon.
 - [ ] Mirrored an existing module's pattern rather than inventing a new one.
 - [ ] AI-enrichment paths never raise (fall back to the user's current value).
+- [ ] A new external call (API, DNS, or a per-host loop) goes through `recon/helpers/circuit_breaker.py` (breaker + `KeyPool` for keys, `HostHealth` for hosts), declares what it cut via a `scope.finish(...)`, and never logs a key or response body (see the `recon-tool-integration` skill).

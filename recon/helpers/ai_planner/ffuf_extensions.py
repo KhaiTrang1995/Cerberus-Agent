@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 
 import requests
 
-from recon.helpers.ai_planner import internal_key_headers
+from recon.helpers.ai_planner import agent_llm_gate, internal_key_headers
 
 SAFE_FALLBACK = ['.bak', '.old', '.config', '.zip']
 EXT_REGEX = re.compile(r'^\.[a-z0-9]{1,8}$')
@@ -105,12 +105,18 @@ def get_ai_extensions(
     endpoint = f"{agent_api_url}/llm/ffuf-extensions"
     print(f"[*][FFuf-AI] Calling agent {endpoint} with model={model}")
 
+    gate = agent_llm_gate()
+    if not gate.allowed:
+        print(f"[!][FFuf-AI] Agent LLM paused (breaker open) - using the fallback.")
+        return SAFE_FALLBACK[:max_extensions]
     try:
         resp = requests.post(endpoint, json=payload, headers=internal_key_headers(), timeout=LLM_TIMEOUT)
     except requests.RequestException as e:
+        gate.record(exc=e)
         print(f"[!][FFuf-AI] Agent request failed: {e}. Using safe fallback.")
         return SAFE_FALLBACK[:max_extensions]
 
+    gate.record(resp=resp)
     if resp.status_code != 200:
         print(f"[!][FFuf-AI] Agent returned HTTP {resp.status_code}: {resp.text[:200]}. Using safe fallback.")
         return SAFE_FALLBACK[:max_extensions]

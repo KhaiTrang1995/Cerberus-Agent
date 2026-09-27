@@ -721,9 +721,21 @@ def run_ai_surface_recon(combined_result: dict, output_file: Path = None,
             _log(f"{base_url}: {e}", "!")
         return base_url, rec, local_findings
 
+    # Phase 4.5 runs after http_probe/security_checks, so a host they already
+    # found unreachable is skipped instead of re-probed with a dozen AI paths.
+    # ai_surface findings carry no host field, so the skip is reported at the
+    # source level (host_field=False): the prune then keeps them all.
+    from recon.helpers import circuit_breaker as _cb
+    ais_scope = _cb.scope((), label="AISurfaceRecon", unit="host(s)")
+
     if candidates:
         with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
-            futs = [ex.submit(_analyze, b, c) for b, c in candidates.items()]
+            futs = []
+            for b, c in candidates.items():
+                if ais_scope.skip_if_down(b):
+                    _log(f"{b}: host unreachable this run — skipping", "!")
+                    continue
+                futs.append(ex.submit(_analyze, b, c))
             for f in as_completed(futs):
                 base_url, rec, lf = f.result()
                 if rec:
@@ -748,7 +760,7 @@ def run_ai_surface_recon(combined_result: dict, output_file: Path = None,
                                   or r.get("julius", {}).get("model_family_guess")
                                   for r in by_url.values()} - {None}),
     }
-    combined_result["ai_surface_recon"] = {
+    ai_surface = {
         "scan_metadata": {
             "scan_timestamp": combined_result.get("metadata", {}).get("scan_timestamp"),
             "duration_s": round(time.monotonic() - t0, 1),
@@ -760,6 +772,9 @@ def run_ai_surface_recon(combined_result: dict, output_file: Path = None,
         "findings": findings,
         "summary": summary,
     }
+    ais_scope.finish("ai_surface_recon", host_source="ai_surface_recon",
+                     host_field=False, payload=ai_surface)
+    combined_result["ai_surface_recon"] = ai_surface
     _log(f"done in {round(time.monotonic() - t0, 1)}s — "
          f"{summary['mcp_servers']} MCP, {summary['chat_endpoints']} chat, "
          f"{summary['vector_dbs_confirmed']} vector-db, {len(findings)} findings", "+")

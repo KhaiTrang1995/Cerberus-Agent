@@ -18,6 +18,45 @@ from urllib.parse import urlparse, urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
+# Scan-target health (recon/helpers/circuit_breaker.py HostHealth). jsluice's
+# downloader was sequential urllib at 10s each, so one dead host stalled the
+# whole file list. It now skips a host another module already found down and
+# records what each fetch saw. Set for the duration of run_jsluice_analysis.
+_JSLUICE_SCOPE = None
+
+
+def _jsl_skip(url) -> bool:
+    try:
+        if _JSLUICE_SCOPE is not None:
+            return _JSLUICE_SCOPE.skip_if_down(url)
+        from recon.helpers import circuit_breaker as cb
+        return cb.host_health.is_down(url)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _jsl_alive(url) -> None:
+    try:
+        if _JSLUICE_SCOPE is not None:
+            _JSLUICE_SCOPE.host_alive(url)
+        else:
+            from recon.helpers import circuit_breaker as cb
+            cb.host_health.record_alive(url)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _jsl_failed(url, exc) -> None:
+    try:
+        if _JSLUICE_SCOPE is not None:
+            _JSLUICE_SCOPE.host_failed(url, exc)
+        else:
+            from recon.helpers import circuit_breaker as cb
+            cb.host_health.record_failure(url, exc)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 DEFAULT_JSLUICE_EXCLUDE_PATTERNS = [
     '/_next/image', '/_next/static', '/_next/data', '/__nextjs',
     '/_nuxt/', '/__nuxt',
@@ -136,6 +175,18 @@ def verify_jsluice_urls(
             candidates.append(url)
         else:
             stats["jsluice_skipped_blacklist"] += 1
+
+    # Drop candidates whose host is already known unreachable this run: httpx
+    # would spend its per-URL timeout on a dead host. is_down is inert under
+    # the off switch. (HostHealth, circuit_breaker.py)
+    try:
+        from recon.helpers import circuit_breaker as _cb
+        kept = [u for u in candidates if not _cb.host_health.is_down(u)]
+        if len(kept) != len(candidates):
+            stats["jsluice_skipped_unreachable"] = len(candidates) - len(kept)
+            candidates = kept
+    except Exception:  # noqa: BLE001 - a fault here verifies as today
+        pass
 
     stats["jsluice_verify_candidates"] = len(candidates)
     if not candidates:
@@ -307,8 +358,12 @@ def run_jsluice_analysis(
 
     result = {"urls": [], "secrets": [], "external_domains": []}
 
+    global _JSLUICE_SCOPE
+    from recon.helpers import circuit_breaker as _cb
+    _JSLUICE_SCOPE = _cb.scope((), label="jsluice", unit="host(s)")
+
     try:
-        downloaded = _download_js_files(js_urls, work_dir)
+        downloaded = _download_js_files(js_urls, work_dir, parallelism=parallelism)
         if not downloaded:
             print("[-][jsluice] No JS files downloaded successfully")
             return result
@@ -376,6 +431,13 @@ def run_jsluice_analysis(
         result["external_domains"] = external_domains
 
     finally:
+        # Hosts skipped as unreachable: jsluice findings carry base_url/
+        # source_url, so the prune keeps a dead host's findings.
+        try:
+            _JSLUICE_SCOPE.finish("resource_enum", host_source="jsluice", payload=result)
+        except Exception:  # noqa: BLE001
+            pass
+        _JSLUICE_SCOPE = None
         if work_dir.exists():
             shutil.rmtree(work_dir, ignore_errors=True)
 
@@ -501,8 +563,14 @@ def _is_js_url(url: str) -> bool:
 def _download_js_files(
     js_urls: List[str],
     work_dir: Path,
+    parallelism: int = 5,
 ) -> Dict[str, str]:
-    """Download JavaScript files to a local directory."""
+    """Download JavaScript files to a local directory.
+
+    Parallel (a dead host used to serialise 10s timeouts across the whole list)
+    and host-gated: a host HostHealth already marked down is skipped, and each
+    fetch records what it saw so a host that dies mid-download stops early.
+    """
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
     ssl_context.verify_mode = ssl.CERT_NONE
@@ -511,8 +579,10 @@ def _download_js_files(
         urllib.request.HTTPSHandler(context=ssl_context)
     )
 
-    downloaded = {}
-    for i, url in enumerate(js_urls):
+    def _fetch_one(item):
+        i, url = item
+        if _jsl_skip(url):
+            return None
         try:
             request = urllib.request.Request(
                 url,
@@ -522,30 +592,39 @@ def _download_js_files(
                 }
             )
             response = opener.open(request, timeout=10)
+            _jsl_alive(url)  # any response is life
 
             # Skip non-200 responses (redirects, 404s, etc.)
             if response.status != 200:
                 print(f"[-][jsluice] Skipping {url}: HTTP {response.status}")
-                continue
+                return None
 
             # Verify response is actually JavaScript, not an HTML error page
             content_type = response.headers.get('Content-Type', '').lower()
             if 'html' in content_type and 'javascript' not in content_type:
                 print(f"[-][jsluice] Skipping {url}: Content-Type is {content_type} (not JS)")
-                continue
+                return None
 
             content = response.read()
 
             if len(content) > 10 * 1024 * 1024:
-                continue
+                return None
 
             filepath = str(work_dir / f"js_{i}.js")
             with open(filepath, 'wb') as f:
                 f.write(content)
-            downloaded[url] = filepath
+            return (url, filepath)
         except Exception as e:
+            _jsl_failed(url, e)
             print(f"[!][jsluice] Failed to download {url}: {e}")
-            continue
+            return None
+
+    downloaded = {}
+    workers = max(1, min(parallelism, len(js_urls) or 1))
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for res in ex.map(_fetch_one, enumerate(js_urls)):
+            if res:
+                downloaded[res[0]] = res[1]
 
     return downloaded
 

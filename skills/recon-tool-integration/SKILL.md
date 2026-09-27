@@ -56,6 +56,23 @@ For the graph write, use `graph-db-writes`. For the settings, use
   the correct execution group in [recon/main.py](../../recon/main.py); never
   parallelize across a dependency boundary (a tool needing live URLs cannot run
   before GROUP 4).
+- **ALWAYS route a new external call through
+  [recon/helpers/circuit_breaker.py](../../recon/helpers/circuit_breaker.py).** An
+  API endpoint goes through a `Breaker` (`guarded_call`, or a `provider:endpoint`
+  breaker with `record(classify_http(...))`); its keys go through a `KeyPool`, not
+  a raw main-key read. A loop over scan hosts (HTTP or a Docker tool) gates each
+  host with `host_health.allow(url)` / `scope.skip_if_down(url)` and records the
+  outcome with `host_alive` / `host_failed` — any HTTP response is life, only a
+  connection failure counts. Never log a key or a response body: breaker messages
+  carry the provider, endpoint and a refused key's 1-based rotation position only.
+- **ALWAYS declare what the tool cut to the coverage accumulator.** Open a
+  `scope = circuit_breaker.scope((), label="Tool", unit="host(s)")` at the tool's
+  start and call `scope.finish("<phase>", sources=[...], host_source="<graph
+  source>", payload=result)` at its end — so the end-of-run prune KEEPS a paused
+  source's or a skipped host's prior findings instead of deleting them as "gone",
+  and the run shows `partial — N sources skipped`. `host_source` must equal the
+  `source` value the tool writes to the graph. A tool whose findings carry no host
+  field passes `host_field=False` (the skip is reported at the source level).
 - **A new tool setting FAILS THE BUILD until it is in the registry.** Every
   parameter is described once in
   [recon_settings/registry.yaml](../../recon_settings/registry.yaml),

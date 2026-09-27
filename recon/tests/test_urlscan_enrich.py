@@ -619,5 +619,51 @@ class TestEdgeCases(unittest.TestCase):
         self.assertEqual(result["urlscan"]["entries"][0]["status"], "")
 
 
+class TestUrlscanCircuitBreaker(unittest.TestCase):
+    def _resp(self, status, results=None):
+        r = MagicMock()
+        r.status_code = status
+        r.headers = {}
+        r.json.return_value = {"results": results or []}
+        r.text = "secret body"
+        return r
+
+    @patch("urlscan_enrich.requests.get")
+    def test_a_refused_key_is_not_a_rate_limit(self, mock_get):
+        from urlscan_enrich import _urlscan_search, RateLimitedResults
+        mock_get.return_value = self._resp(401)
+        got = _urlscan_search("example.com", "bad-key", 10)
+        self.assertEqual(got, [])
+        self.assertNotIsInstance(got, RateLimitedResults)
+        self.assertEqual(mock_get.call_count, 1)
+        # Stopped for the run: the next root is not even asked.
+        self.assertEqual(_urlscan_search("example.org", "bad-key", 10), [])
+        self.assertEqual(mock_get.call_count, 1)
+
+    @patch("recon.helpers.circuit_breaker._sleep", lambda s: None)
+    @patch("urlscan_enrich.requests.get")
+    def test_a_root_skipped_during_a_rate_limit_pause_is_still_marked(self, mock_get):
+        from urlscan_enrich import _urlscan_search, RateLimitedResults
+        mock_get.return_value = self._resp(429)
+        self.assertIsInstance(_urlscan_search("example.com", "", 10), RateLimitedResults)
+        calls = mock_get.call_count
+        again = _urlscan_search("example.org", "", 10)
+        self.assertIsInstance(again, RateLimitedResults)
+        self.assertEqual(mock_get.call_count, calls)
+
+    @patch("urlscan_enrich.requests.get")
+    def test_a_failed_search_tags_the_payload(self, mock_get):
+        import requests as req_lib
+        mock_get.side_effect = req_lib.exceptions.ConnectTimeout("x")
+        from recon.helpers import circuit_breaker as cb
+        for _ in range(4):  # earlier roots of the same run
+            cb.get_breaker("urlscan:search", label="URLScan", parent="urlscan").record(
+                cb.Outcome.TRANSIENT, "ConnectTimeout")
+        result = run_urlscan_enrichment(_make_combined_result(), _enabled_settings())
+        (entry,) = result["urlscan"]["degraded"]
+        self.assertEqual(entry["source"], "urlscan:search")
+        self.assertEqual(entry["outcome"], "transient")
+
+
 if __name__ == "__main__":
     unittest.main()

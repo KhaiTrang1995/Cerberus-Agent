@@ -61,12 +61,6 @@ def _extract_ips_from_recon(combined_result: dict) -> list[str]:
     return sorted(ips)
 
 
-def _effective_key(api_key: str, key_rotator) -> str:
-    if key_rotator and getattr(key_rotator, "has_keys", False):
-        return (key_rotator.current_key or "").strip()
-    return (api_key or "").strip()
-
-
 def _geoinfo_country(geoinfo) -> str:
     if not geoinfo or not isinstance(geoinfo, dict):
         return ""
@@ -122,57 +116,59 @@ def _geoinfo_isp(geoinfo) -> str:
     return str(geoinfo.get("isp") or geoinfo.get("organization") or geoinfo.get("aso") or "")
 
 
-def _zoomeye_search(
-    query: str,
-    api_key: str,
-    key_rotator,
-    max_results: int,
-    timeout: int = 30,
-) -> tuple[list[dict], int]:
-    """
-    Paginate host/search until max_results rows or no more pages.
-    Returns (flattened result rows, total from API if given).
-    """
-    eff = _effective_key(api_key, key_rotator)
-    if not eff:
-        return [], 0
+def _zoomeye_breaker():
+    from recon.helpers import circuit_breaker as cb
+    return cb.get_breaker("zoomeye:search", label="ZoomEye", parent="zoomeye")
 
+
+def _zoomeye_classify(resp):
+    """Status first (401/403 refuse the key, 402 = no credit, 429 = rate
+    limit); then an error reported inside a 200 body. The body is read only
+    to classify."""
+    from recon.helpers import circuit_breaker as cb
+    res = cb.json_result(resp, keyed=True)
+    if not res.ok:
+        return res
+    body = res.data if isinstance(res.data, dict) else {}
+    err = body.get("error")
+    if err and not body.get("matches"):
+        text = f"{err} {body.get('message') or ''}".lower()
+        if any(m in text for m in ("credit", "insufficient", "quota")):
+            return cb.CallResult(None, cb.Outcome.FATAL, "credit exhausted")
+        if any(m in text for m in ("login", "token", "key", "auth", "forbidden")):
+            return cb.CallResult(None, cb.Outcome.FATAL, "key rejected")
+        return cb.CallResult(None, cb.Outcome.TRANSIENT, "ZoomEye error body")
+    return cb.CallResult(body, cb.Outcome.OK, res.detail)
+
+
+def _zoomeye_query(query: str, keys, max_results: int, timeout: int = 30, *,
+                   admitted: bool = False):
+    """Paginate host/search until max_results rows or no more pages.
+
+    Every page goes through the ZoomEye breaker, so a provider that stops
+    answering mid-way ends the query with what it already returned. Returns a
+    CallResult whose data is (rows, total): OK with rows, NO_DATA when the
+    search matched nothing, else the failure of the page that ended it.
+    """
+    from recon.helpers import circuit_breaker as cb
+    breaker = _zoomeye_breaker()
     url = f"{ZOOMEYE_API_BASE.rstrip('/')}/host/search"
-    headers = {"API-KEY": eff}
     out: list[dict] = []
     total = 0
     page = 1
+    last = None
 
     while len(out) < max_results:
         params = {"query": query, "page": page}
-        last_body = None
-        for attempt in range(2):
-            try:
-                resp = requests.get(
-                    url, headers=headers, params=params, timeout=timeout
-                )
-                if key_rotator:
-                    key_rotator.tick()
-                if resp.status_code == 200:
-                    last_body = resp.json()
-                    break
-                if resp.status_code == 429:
-                    logger.warning("ZoomEye rate limit (429), sleeping and retrying once")
-                    if attempt == 0:
-                        time.sleep(2)
-                        continue
-                    return out, total
-                logger.warning(
-                    f"ZoomEye {resp.status_code} page={page}: {resp.text[:200]}"
-                )
-                return out, total
-            except requests.RequestException as e:
-                logger.warning(f"ZoomEye request failed page={page}: {e}")
-                return out, total
 
-        if not last_body:
+        def send(key, params=params):
+            return requests.get(url, headers={"API-KEY": key}, params=params, timeout=timeout)
+
+        last = cb.guarded_call(breaker, send, _zoomeye_classify, keys=keys,
+                               admitted=admitted and page == 1)
+        if not last.ok:
             break
-
+        last_body = last.data
         matches = last_body.get("matches") or []
         if not matches:
             break
@@ -225,12 +221,32 @@ def _zoomeye_search(
                 }
             )
 
-        if len(matches) < 1:
-            break
         page += 1
         time.sleep(1)
 
-    return out, total
+    if out:
+        return cb.CallResult((out, total), cb.Outcome.OK)
+    if last is None or last.ok or last.answered:
+        return cb.CallResult(([], total), cb.Outcome.NO_DATA)
+    return cb.CallResult(([], 0), last.outcome, last.detail)
+
+
+def _zoomeye_search(
+    query: str,
+    api_key: str,
+    key_rotator,
+    max_results: int,
+    timeout: int = 30,
+) -> tuple[list[dict], int]:
+    """
+    Paginate host/search until max_results rows or no more pages.
+    Returns (flattened result rows, total from API if given).
+    """
+    from recon.helpers import circuit_breaker as cb
+    keys = cb.KeyPool(key_rotator, (api_key or "").strip(), label="ZoomEye")
+    if not keys.has_key:
+        return [], 0
+    return _zoomeye_query(query, keys, max_results, timeout).data
 
 
 def run_zoomeye_enrichment(combined_result: dict, settings: dict) -> dict:
@@ -255,12 +271,13 @@ def run_zoomeye_enrichment(combined_result: dict, settings: dict) -> dict:
         ],
     )
 
-    api_key = settings.get("ZOOMEYE_API_KEY", "")
-    key_rotator = settings.get("ZOOMEYE_KEY_ROTATOR")
+    from recon.helpers import circuit_breaker as cb
+    keys = cb.KeyPool(settings.get("ZOOMEYE_KEY_ROTATOR"),
+                      (settings.get("ZOOMEYE_API_KEY", "") or "").strip(), label="ZoomEye")
     max_results = int(settings.get("ZOOMEYE_MAX_RESULTS", 1000) or 1000)
     max_results = max(1, max_results)
 
-    if not _effective_key(api_key, key_rotator):
+    if not keys.has_key:
         print(f"[!][ZoomEye] No API key configured — skipping")
         return combined_result
 
@@ -272,6 +289,8 @@ def run_zoomeye_enrichment(combined_result: dict, settings: dict) -> dict:
     print(f"[*][ZoomEye] Starting OSINT enrichment")
 
     ze_data: dict = {"results": [], "total": 0}
+    ze_scope = cb.scope("zoomeye", label="ZoomEye", unit="query(ies)")
+    breaker = _zoomeye_breaker()
 
     try:
         if is_ip_mode:
@@ -279,14 +298,12 @@ def run_zoomeye_enrichment(combined_result: dict, settings: dict) -> dict:
             grand_total = 0
 
             def _enrich_single_ip_zoomeye(ip, rate_limiter):
+                # Before the wait: the limiter reserves a slot before sleeping.
+                if not breaker.allow():
+                    return ip, [], 0
                 rate_limiter.wait()
                 print(f"[*][ZoomEye] Searching ip:{ip}...")
-                rows, t = _zoomeye_search(
-                    f"ip:{ip}",
-                    api_key,
-                    key_rotator,
-                    max_results,
-                )
+                rows, t = _zoomeye_query(f"ip:{ip}", keys, max_results, admitted=True).data
                 print(f"[+][ZoomEye] ip:{ip} -- {len(rows)} row(s)")
                 return ip, rows, t
 
@@ -303,8 +320,7 @@ def run_zoomeye_enrichment(combined_result: dict, settings: dict) -> dict:
                         ip_results.append((_ip, rows, t))
                         grand_total = max(grand_total, t, len(rows))
                     except Exception as e:
-                        ip = futures[fut]
-                        logger.warning(f"ZoomEye worker error for {ip}: {e}")
+                        logger.warning(f"ZoomEye worker error: {type(e).__name__}")
             # Preserve original IP ordering
             ip_order = {ip: i for i, ip in enumerate(ips)}
             ip_results.sort(key=lambda r: ip_order.get(r[0], 0))
@@ -317,22 +333,18 @@ def run_zoomeye_enrichment(combined_result: dict, settings: dict) -> dict:
                 combined_result["zoomeye"] = ze_data
                 return combined_result
             print(f"[*][ZoomEye] Searching hostname:{domain}...")
-            rows, t = _zoomeye_search(
-                f"hostname:{domain}",
-                api_key,
-                key_rotator,
-                max_results,
-            )
+            rows, t = _zoomeye_query(f"hostname:{domain}", keys, max_results).data
             ze_data["results"] = rows
             ze_data["total"] = t or len(rows)
             print(f"[+][ZoomEye] hostname:{domain} — {len(rows)} row(s), total≈{ze_data['total']}")
 
         print(f"[+][ZoomEye] Enrichment complete: {len(ze_data['results'])} results")
     except Exception as e:
-        logger.error(f"ZoomEye enrichment failed: {e}")
-        print(f"[!][ZoomEye] Enrichment error: {e}")
+        logger.error(f"ZoomEye enrichment failed: {type(e).__name__}")
+        print(f"[!][ZoomEye] Enrichment error: {type(e).__name__}")
         print(f"[!][ZoomEye] Pipeline continues without full ZoomEye data")
 
+    ze_scope.finish("zoomeye_enrich", payload=ze_data)
     combined_result["zoomeye"] = ze_data
     return combined_result
 

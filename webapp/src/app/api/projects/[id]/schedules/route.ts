@@ -79,6 +79,7 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
       createdAt: q.enqueuedAt,
       nodeCount: null,
       ramReason: q.error || q.blockedReason || null,
+      degradedSources: null,
       scheduleId: q.scheduleId,
       version: null,
     }))
@@ -104,6 +105,7 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
             createdAt: j.createdAt,
             nodeCount: j.nodeCount,
             ramReason: j.ramReason,
+            degradedSources: j.degradedSources,
             scheduleId: j.scheduleId,
             version: j.version ? { seq: j.version.seq, label: j.version.label } : null,
           })),

@@ -42,6 +42,50 @@ except ImportError:  # spawned-container path where CWD is on sys.path
     from ip_filter import is_url_safe_to_probe
 
 
+# =============================================================================
+# Scan-target health (recon/helpers/circuit_breaker.py HostHealth)
+# =============================================================================
+# JS lives on the target host and on third-party CDNs. A host another module
+# (http_probe, security_checks) already found unreachable is skipped here, and
+# every fetch RECORDS what it saw so a host that dies mid-phase stops costing
+# ~8 guessed source-map paths + one validation probe per endpoint. Set for the
+# duration of run_js_recon (one scan per process); None-safe everywhere else.
+_JS_SCOPE = None
+
+
+def _js_skip(url) -> bool:
+    """True when `url`'s host is already known unreachable this run."""
+    try:
+        if _JS_SCOPE is not None:
+            return _JS_SCOPE.skip_if_down(url)
+        from recon.helpers import circuit_breaker as cb
+        return cb.host_health.is_down(url)
+    except Exception:  # noqa: BLE001 - a fault here scans as today
+        return False
+
+
+def _js_alive(url) -> None:
+    try:
+        if _JS_SCOPE is not None:
+            _JS_SCOPE.host_alive(url)
+        else:
+            from recon.helpers import circuit_breaker as cb
+            cb.host_health.record_alive(url)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _js_failed(url, exc) -> None:
+    try:
+        if _JS_SCOPE is not None:
+            _JS_SCOPE.host_failed(url, exc)
+        else:
+            from recon.helpers import circuit_breaker as cb
+            cb.host_health.record_failure(url, exc)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _safe_redirect_get(url, *, timeout, headers, max_redirects=5):
     """GET that validates the SSRF guard on every hop (STRIDE I14).
 
@@ -328,6 +372,8 @@ def _download_js_files(
 
     def fetch_one(idx_url):
         idx, url = idx_url
+        if _js_skip(url):
+            return None
         try:
             # STRIDE I14: JS URLs are target-derived; validate every redirect hop
             # (rather than disabling redirects, so legit CDN-hosted JS still loads).
@@ -338,6 +384,7 @@ def _download_js_files(
             )
             if resp is None:
                 return None
+            _js_alive(url)
             if resp.status_code != 200:
                 print(f"[!][JsRecon] {url} -- HTTP {resp.status_code}")
                 return None
@@ -363,6 +410,7 @@ def _download_js_files(
                 'size': len(content),
             }
         except Exception as e:
+            _js_failed(url, e)
             print(f"[!][JsRecon] {url} -- {type(e).__name__}: {e}")
             return None
 
@@ -739,6 +787,10 @@ def _validate_extracted_endpoints(endpoints: list, settings: dict, request_func=
             return
 
         endpoint['resolved_url'] = resolved_url
+        if _js_skip(resolved_url):
+            endpoint['validation_status'] = 'unvalidated'
+            endpoint['validation_error'] = 'host_unreachable'
+            return
         # STRIDE I14: endpoints come from the target's JavaScript and are
         # attacker-influenced. Refuse to probe URLs that resolve to cloud
         # metadata / loopback / RFC-1918 / link-local — otherwise the recon
@@ -760,15 +812,18 @@ def _validate_extracted_endpoints(endpoints: list, settings: dict, request_func=
                 allow_redirects=False,
             )
             status_code = int(getattr(response, 'status_code', 0))
+            _js_alive(resolved_url)  # any response is life
             endpoint['status_code'] = status_code
             endpoint['validation_status'] = (
                 'hittable' if status_code in accepted_statuses else 'not_hittable'
             )
             endpoint['validation_error'] = ''
-        except requests.Timeout:
+        except requests.Timeout as exc:
+            _js_failed(resolved_url, exc)
             endpoint['validation_status'] = 'not_hittable'
             endpoint['validation_error'] = 'timeout'
         except Exception as exc:
+            _js_failed(resolved_url, exc)
             endpoint['validation_status'] = 'not_hittable'
             endpoint['validation_error'] = type(exc).__name__
 
@@ -912,6 +967,10 @@ def run_js_recon(combined_result: dict, settings: dict) -> dict:
     start_time = time.time()
     pid = os.getpid()
     work_dir = Path(f'/tmp/redamon/js_recon_{pid}')
+
+    global _JS_SCOPE
+    from recon.helpers import circuit_breaker as _cb
+    _JS_SCOPE = _cb.scope((), label="JsRecon", unit="host(s)")
 
     print("\n" + "=" * 60)
     print("[*][JsRecon] JS Recon Scanner -- Starting")
@@ -1110,6 +1169,14 @@ def run_js_recon(combined_result: dict, settings: dict) -> dict:
             'secrets': [], 'endpoints': [], 'summary': {},
         })
     finally:
+        # Hosts skipped as unreachable: js_recon findings carry a host field
+        # (source_url/base_url), so the prune keeps a dead host's findings.
+        try:
+            _JS_SCOPE.finish("js_recon", host_source="js_recon",
+                             payload=combined_result.get("js_recon"))
+        except Exception:  # noqa: BLE001
+            pass
+        _JS_SCOPE = None
         # Cleanup temp files. NOT when supply-chain recon is enabled: GROUP 5.5
         # runs after us and needs these exact bytes for the retire.js pass (it
         # must never re-fetch - that would add target traffic and an SSRF

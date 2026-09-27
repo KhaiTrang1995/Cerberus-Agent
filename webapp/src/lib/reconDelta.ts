@@ -70,6 +70,12 @@ export const VOLATILE_PROPERTIES = new Set([
   'recon_run_id',
   'scan_time',
   'scanned_at',
+  // Coverage record (circuit breakers): metadata about what a run could not
+  // re-check, refreshed every run. It must not make a Domain read as "changed".
+  'recon_coverage_at',
+  'recon_coverage_gaps',
+  'recon_skipped_hosts',
+  'recon_nuclei_truncated',
 ])
 
 function stableString(value: unknown): string {
@@ -170,6 +176,17 @@ export interface SecurityLenses {
   newParameters: DeltaNode[]
 }
 
+/**
+ * What the newer version's run could not fully re-check (circuit breakers), read
+ * from its `Domain` coverage record. `null` when no coverage was recorded or the
+ * record could not be trusted (fail closed).
+ */
+export interface ReconCoverage {
+  sources: string[]
+  skippedHosts: number
+  nucleiTruncated: boolean
+}
+
 export interface ReconDelta {
   addedNodes: DeltaNode[]
   removedNodes: DeltaNode[]
@@ -188,6 +205,52 @@ export interface ReconDelta {
     removedLinks: number
   }
   lenses: SecurityLenses
+  coverage: ReconCoverage | null
+}
+
+/**
+ * Aggregate the coverage record across the newer graph's `Domain` nodes.
+ *
+ * Returns `null` when no `Domain` carries `recon_coverage_gaps`, or when any of
+ * them is not a JSON array of objects with a `source` string of <=64 chars -- an
+ * imported snapshot is untrusted, so anything malformed fails closed rather than
+ * being trusted.
+ */
+export function extractReconCoverage(to: FormattedGraphData): ReconCoverage | null {
+  const domains = (to.nodes || []).filter(n => n.type === 'Domain')
+  let sawRecord = false
+  const sources = new Set<string>()
+  const hosts = new Set<string>()
+  let nucleiTruncated = false
+
+  for (const d of domains) {
+    const raw = (d.properties || {})['recon_coverage_gaps']
+    if (raw === undefined || raw === null) continue
+    sawRecord = true
+    let parsed: unknown = raw
+    if (typeof parsed === 'string') {
+      try {
+        parsed = JSON.parse(parsed)
+      } catch {
+        return null
+      }
+    }
+    if (!Array.isArray(parsed)) return null
+    for (const entry of parsed) {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
+      const source = (entry as { source?: unknown }).source
+      if (typeof source !== 'string' || source.length === 0 || source.length > 64) return null
+      sources.add(source)
+    }
+    const skipped = (d.properties || {})['recon_skipped_hosts']
+    if (Array.isArray(skipped)) {
+      for (const h of skipped) if (typeof h === 'string') hosts.add(h)
+    }
+    if ((d.properties || {})['recon_nuclei_truncated'] === true) nucleiTruncated = true
+  }
+
+  if (!sawRecord) return null
+  return { sources: [...sources].sort(), skippedHosts: hosts.size, nucleiTruncated }
 }
 
 function toDeltaNode(node: FormattedNode, key: string): DeltaNode {
@@ -354,6 +417,7 @@ export function computeReconDelta(
       removedLinks: removedLinks.length,
     },
     lenses,
+    coverage: extractReconCoverage(to),
   }
 }
 

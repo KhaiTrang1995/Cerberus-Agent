@@ -283,3 +283,54 @@ describe('a muted finding is not reported as fixed', () => {
     expect(delta.lenses.resolvedVulnerabilities).toHaveLength(1)
   })
 })
+
+describe('recon coverage (circuit breakers)', () => {
+  const domain = (props: Record<string, unknown>): FormattedNode =>
+    node('d1', 'Domain', { name: 'example.test', ...props }, 'example.test')
+
+  test('is null when no Domain carries a coverage record', () => {
+    const delta = computeReconDelta(graph([]), graph([node('1', 'IP', { address: '10.0.0.1' })]))
+    expect(delta.coverage).toBeNull()
+  })
+
+  test('aggregates distinct sources, skipped hosts and truncation from the newer side', () => {
+    const to = graph([
+      domain({
+        recon_coverage_gaps: JSON.stringify([
+          { source: 'shodan', reason: 'x' },
+          { source: 'nuclei', reason: 'y' },
+        ]),
+        recon_skipped_hosts: ['a.example.test:443', 'b.example.test:443'],
+        recon_nuclei_truncated: true,
+      }),
+    ])
+    const delta = computeReconDelta(graph([]), to)
+    expect(delta.coverage).toEqual({
+      sources: ['nuclei', 'shodan'],
+      skippedHosts: 2,
+      nucleiTruncated: true,
+    })
+  })
+
+  test('a malformed gaps value fails closed (null), never a partial read', () => {
+    const to = graph([domain({ recon_coverage_gaps: '{not json' })])
+    expect(computeReconDelta(graph([]), to).coverage).toBeNull()
+  })
+
+  test('rejects a gap whose source is over 64 chars (untrusted import)', () => {
+    const to = graph([domain({ recon_coverage_gaps: JSON.stringify([{ source: 'x'.repeat(65) }]) })])
+    expect(computeReconDelta(graph([]), to).coverage).toBeNull()
+  })
+
+  test('the coverage record never makes a Domain read as changed', () => {
+    const before = graph([domain({ recon_coverage_gaps: '[]', recon_coverage_at: '2026-01-01' })])
+    const after = graph([domain({
+      recon_coverage_gaps: JSON.stringify([{ source: 'shodan' }]),
+      recon_coverage_at: '2026-02-02',
+      recon_skipped_hosts: ['a:443'],
+      recon_nuclei_truncated: true,
+    })])
+    const delta = computeReconDelta(before, after)
+    expect(delta.changedNodes).toHaveLength(0)
+  })
+})

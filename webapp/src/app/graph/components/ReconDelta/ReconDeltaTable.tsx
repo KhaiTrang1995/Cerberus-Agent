@@ -46,6 +46,11 @@ export interface ReconDeltaResponse {
     certificateChanges: DeltaNode[]
     newParameters: DeltaNode[]
   }
+  coverage?: {
+    sources: string[]
+    skippedHosts: number
+    nucleiTruncated: boolean
+  } | null
 }
 
 interface OverlayPayload {
@@ -251,6 +256,13 @@ export function ReconDeltaTable({ projectId, versions, isDark = true }: ReconDel
 
       {from === to && <div className={styles.note}>Pick two different versions to compare.</div>}
       {error && <div className={styles.error}>{error}</div>}
+
+      {data && data.coverage && data.coverage.sources.length > 0 && (
+        <div className={styles.coverageBanner}>
+          Coverage was partial in the newer version: {data.coverage.sources.join(', ')};
+          removed counts may include skipped work.
+        </div>
+      )}
 
       {data && (
         <>

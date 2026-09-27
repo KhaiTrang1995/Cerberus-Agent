@@ -113,6 +113,20 @@
   color: #ef4444;
 }
 
+/* Circuit breakers: the newer run could not fully re-check some sources. */
+.coverageBanner {
+  margin: var(--space-2) var(--space-3) 0;
+  padding: var(--space-2) var(--space-3);
+  font-size: var(--text-xs);
+  color: #b45309;
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.4);
+  border-radius: var(--radius-sm, 4px);
+}
+:global([data-theme='dark']) .coverageBanner {
+  color: #fbbf24;
+}
+
 .empty {
   padding: var(--space-6, var(--space-4));
   text-align: center;

@@ -483,6 +483,18 @@ def merge_group_hosts(recon_result, target_info: dict, root_domain: str,
     }
 
 
+def _whois_scope():
+    """A report scope over the WHOIS breaker for one group's single lookup."""
+    from recon.helpers import circuit_breaker
+    return circuit_breaker.scope("whois", label="WHOIS", unit="lookup(s)")
+
+
+def _breaker_mode() -> str:
+    """"on" or "off" for metadata.circuit_breakers (RECON_CIRCUIT_BREAKERS)."""
+    from recon.helpers import circuit_breaker
+    return circuit_breaker.mode()
+
+
 def build_scan_type() -> str:
     """Build dynamic scan type based on enabled modules."""
     modules = []
@@ -559,6 +571,7 @@ def _maybe_run_cert_hygiene(result: dict, settings: dict, output_file: Path) -> 
     except Exception as e:
         print(f"[!][Pipeline] certificate hygiene checks failed: {e}")
         result.setdefault("metadata", {}).setdefault("phase_errors", {})["cert_hygiene"] = str(e)
+        _note_phase_error("cert_hygiene")
     return result
 
 
@@ -581,6 +594,7 @@ def _maybe_run_ai_surface(result: dict, settings: dict, output_file: Path) -> di
     except Exception as e:
         print(f"[!][AISurfaceRecon] failed: {e}")
         result.setdefault("metadata", {}).setdefault("phase_errors", {})["ai_surface_recon"] = str(e)
+        _note_phase_error("ai_surface_recon")
         try:
             save_recon_file(result, output_file)
         except Exception:
@@ -777,8 +791,28 @@ def run_ip_recon(target_ips: list, settings: dict) -> dict:
         print(f"\n[*][DNS] PHASE 1: Reverse DNS Lookup")
         print("-" * 40)
 
+        # Parallel PTR lookups: one IP at a time serialised the whole /24 sweep.
+        # A per-/24 reverse-zone breaker inside reverse_dns_lookup skips a zone
+        # whose PTR authority stopped answering (and the resolver breaker skips
+        # everything if the resolver itself is down), so a dead range no longer
+        # costs one timeout per IP.
+        _rdns_retries = settings.get('DNS_MAX_RETRIES', 3)
+        _rdns_workers = max(1, min(int(settings.get('DNS_MAX_WORKERS', 80)), len(expanded_ips) or 1))
+        _rdns_results = {}
+        with ThreadPoolExecutor(max_workers=_rdns_workers, thread_name_prefix="rdns") as _rdns_pool:
+            _rdns_futs = {
+                _rdns_pool.submit(reverse_dns_lookup, ip, _rdns_retries): ip
+                for ip in expanded_ips
+            }
+            for _fut in as_completed(_rdns_futs):
+                _ip = _rdns_futs[_fut]
+                try:
+                    _rdns_results[_ip] = _fut.result()
+                except Exception:  # noqa: BLE001 - a lookup crash is a miss
+                    _rdns_results[_ip] = None
+        # Apply results in the original order for deterministic output.
         for ip in expanded_ips:
-            hostname = reverse_dns_lookup(ip, max_retries=settings.get('DNS_MAX_RETRIES', 3))
+            hostname = _rdns_results.get(ip)
             if hostname:
                 ip_to_hostname[ip] = hostname
                 all_hostnames.append(hostname)
@@ -846,7 +880,12 @@ def run_ip_recon(target_ips: list, settings: dict) -> dict:
         print(f"\n[*][WHOIS] PHASE 3: IP WHOIS Lookup")
         print("-" * 40)
         try:
-            from recon.main_recon_modules.whois_recon import whois_lookup as ip_whois_lookup
+            from recon.helpers import circuit_breaker
+            from recon.main_recon_modules.whois_recon import (
+                WhoisUnavailable, print_whois_settings, whois_lookup as ip_whois_lookup,
+            )
+            whois_scope = circuit_breaker.scope("whois", label="WHOIS", unit="IP block(s)")
+            print_whois_settings(settings)
             # WHOIS a sample of IPs (first one per /24 block to avoid flooding)
             seen_blocks = set()
             for ip in expanded_ips:
@@ -855,12 +894,16 @@ def run_ip_recon(target_ips: list, settings: dict) -> dict:
                     continue
                 seen_blocks.add(block)
                 try:
-                    result = ip_whois_lookup(ip, save_output=False, settings=settings)
+                    result = ip_whois_lookup(ip, save_output=False, settings=settings,
+                                             print_settings=False)
                     ip_whois[ip] = result.get("whois_data", {})
                     org = ip_whois[ip].get("org", "unknown")
                     print(f"[+][WHOIS] {ip}: org={org}")
+                except WhoisUnavailable:
+                    continue  # counted by the scope, summarised once below
                 except Exception as e:
                     print(f"[-][WHOIS] WHOIS for {ip} failed: {e}")
+            whois_scope.finish("whois")
         except Exception as e:
             print(f"[!][WHOIS] IP WHOIS module error: {e}")
     else:
@@ -889,6 +932,7 @@ def run_ip_recon(target_ips: list, settings: dict) -> dict:
             "anonymous_mode": False,
             "bruteforce_mode": False,
             "modules_executed": ["ip_recon", "reverse_dns"],
+            "circuit_breakers": _breaker_mode(),
         },
         "domain": mock_domain,
         "whois": {"ip_whois": ip_whois},
@@ -1098,6 +1142,7 @@ def run_ip_recon(target_ips: list, settings: dict) -> dict:
             except Exception as e:
                 print(f"[!][Pipeline] http_probe failed: {e}")
                 combined_result["metadata"].setdefault("phase_errors", {})["http_probe"] = str(e)
+                _note_phase_error("http_probe")
                 save_recon_file(combined_result, output_file)
 
     # Check if active scans should be skipped
@@ -1119,6 +1164,7 @@ def run_ip_recon(target_ips: list, settings: dict) -> dict:
             except Exception as e:
                 print(f"[!][Pipeline] resource_enum failed: {e}")
                 combined_result["metadata"].setdefault("phase_errors", {})["resource_enum"] = str(e)
+                _note_phase_error("resource_enum")
                 save_recon_file(combined_result, output_file)
 
     # GROUP 4.5 -- AI Surface Recon (runs after resource_enum)
@@ -1135,6 +1181,7 @@ def run_ip_recon(target_ips: list, settings: dict) -> dict:
             _graph_update_bg("update_graph_from_js_recon", combined_result, USER_ID, PROJECT_ID)
         except Exception as e:
             print(f"[!][JsRecon] Error: {e}")
+            _note_phase_error("js_recon")
 
     # GROUP 5.5 -- Supply-Chain Recon (L2): runs AFTER JS-recon (consumes its
     # source_maps + technologies). Black-box package harvest + offline OSV verdict.
@@ -1166,6 +1213,7 @@ def run_ip_recon(target_ips: list, settings: dict) -> dict:
             except Exception as e:
                 print(f"[!][Pipeline] vuln_scan failed: {e}")
                 combined_result["metadata"].setdefault("phase_errors", {})["vuln_scan"] = str(e)
+                _note_phase_error("vuln_scan")
                 save_recon_file(combined_result, output_file)
 
         # GROUP 6 Phase A (IP mode) — the remaining active vuln scanners. vuln_scan
@@ -1206,6 +1254,7 @@ def run_ip_recon(target_ips: list, settings: dict) -> dict:
                     except Exception as e:
                         print(f"[!][Pipeline] {key} failed: {e}")
                         combined_result["metadata"].setdefault("phase_errors", {})[key] = str(e)
+                        _note_phase_error(key)
                         save_recon_file(combined_result, output_file)
 
     # External Domains -- aggregate from all sources and persist
@@ -1338,7 +1387,8 @@ def run_domain_recon(target: str, bruteforce: bool = False,
             "subdomain_filter": full_subdomains if filtered_mode else [],
             "anonymous_mode": False,
             "bruteforce_mode": bruteforce if not filtered_mode else False,
-            "modules_executed": []
+            "modules_executed": [],
+            "circuit_breakers": _breaker_mode(),
         },
         "domain": root_domain,
         "whois": {},
@@ -1364,6 +1414,7 @@ def run_domain_recon(target: str, bruteforce: bool = False,
 
         print(f"\n[*][Pipeline] GROUP 1: WHOIS + URLScan (parallel)")
         print("-" * 40)
+        whois_scope = _whois_scope()
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="group1") as g1_exec:
             g1_futures = {}
             if _settings.get('WHOIS_ENABLED', True):
@@ -1382,7 +1433,10 @@ def run_domain_recon(target: str, bruteforce: bool = False,
                     if name == "whois":
                         combined_result["whois"] = result.get("whois_data", {})
                         combined_result["metadata"]["modules_executed"].append("whois")
-                        print(f"[+][WHOIS] Data retrieved successfully")
+                        if combined_result["whois"]:
+                            print(f"[+][WHOIS] Data retrieved successfully")
+                        else:
+                            print(f"[-][WHOIS] No WHOIS record for {root_domain}")
                     elif name == "urlscan":
                         if result:
                             combined_result["urlscan"] = result
@@ -1390,6 +1444,7 @@ def run_domain_recon(target: str, bruteforce: bool = False,
                             print(f"[+][URLScan] Discovery complete")
                 except Exception as e:
                     print(f"[!][{name}] Failed: {e}")
+        whois_scope.finish("whois")
 
         if not _settings.get('WHOIS_ENABLED', True):
             combined_result["whois"] = {"skipped": True}
@@ -1419,6 +1474,7 @@ def run_domain_recon(target: str, bruteforce: bool = False,
         # FULL DISCOVERY MODE: WHOIS + Discovery + URLScan all in parallel
         print(f"\n[*][Pipeline] GROUP 1: WHOIS + Subdomain Discovery + URLScan (parallel fan-out)")
         print("-" * 40)
+        whois_scope = _whois_scope()
 
         with ThreadPoolExecutor(max_workers=3, thread_name_prefix="group1") as g1_exec:
             g1_futures = {}
@@ -1451,6 +1507,8 @@ def run_domain_recon(target: str, bruteforce: bool = False,
                     print(f"[!][{name}] Failed: {e}")
                     g1_results[name] = None
 
+        whois_scope.finish("whois")
+
         # Fan-in: merge Group 1 results
         print(f"\n[*][Pipeline] Fan-in — merging parallel results")
 
@@ -1459,7 +1517,10 @@ def run_domain_recon(target: str, bruteforce: bool = False,
         if whois_data:
             combined_result["whois"] = whois_data.get("whois_data", {})
             combined_result["metadata"]["modules_executed"].append("whois")
-            print(f"[+][WHOIS] Data merged")
+            if combined_result["whois"]:
+                print(f"[+][WHOIS] Data merged")
+            else:
+                print(f"[-][WHOIS] No WHOIS record for {root_domain}")
         elif not _settings.get('WHOIS_ENABLED', True):
             combined_result["whois"] = {"skipped": True}
 
@@ -1731,6 +1792,7 @@ def run_domain_recon(target: str, bruteforce: bool = False,
             except Exception as e:
                 print(f"[!][Pipeline] http_probe failed: {e}")
                 combined_result["metadata"].setdefault("phase_errors", {})["http_probe"] = str(e)
+                _note_phase_error("http_probe")
                 save_recon_file(combined_result, output_file)
 
     # =====================================================================
@@ -1783,6 +1845,7 @@ def run_domain_recon(target: str, bruteforce: bool = False,
             except Exception as e:
                 print(f"[!][Pipeline] resource_enum failed: {e}")
                 combined_result["metadata"].setdefault("phase_errors", {})["resource_enum"] = str(e)
+                _note_phase_error("resource_enum")
                 save_recon_file(combined_result, output_file)
 
     # GROUP 4.5 — AI Surface Recon (runs after resource_enum)
@@ -1799,6 +1862,7 @@ def run_domain_recon(target: str, bruteforce: bool = False,
             _graph_update_bg("update_graph_from_js_recon", combined_result, USER_ID, PROJECT_ID)
         except Exception as e:
             print(f"[!][JsRecon] Error: {e}")
+            _note_phase_error("js_recon")
 
     if not skip_active_scans:
         # ================================================================
@@ -1845,6 +1909,7 @@ def run_domain_recon(target: str, bruteforce: bool = False,
                     except Exception as e:
                         print(f"[!][Pipeline] {key} failed: {e}")
                         combined_result["metadata"].setdefault("phase_errors", {})[key] = str(e)
+                        _note_phase_error(key)
                         save_recon_file(combined_result, output_file)
 
         # ================================================================
@@ -1999,6 +2064,48 @@ def _clear_recon_graph():
         print(f"[!][graph-db] Failed to clear previous graph data: {e}\n")
 
 
+#: Set when any `_write_coverage_record` of this run failed. The prune then
+#: cannot know what the run covered, so it does nothing (fail closed).
+_COVERAGE_WRITE_FAILED = False
+
+
+def _write_coverage_record(domain: str, group=None) -> bool:
+    """Stamp this run's coverage record on `domain`'s Domain node. Synchronous.
+
+    Written for every full-run group, clean or not (see update_graph_coverage).
+    Deliberately NOT through `_graph_update_bg`: by now `_graph_wait_all()` has
+    torn that executor down, and a late submit is silently dropped. Any failure
+    - no graph, no Domain node, an exception - marks the run's coverage unknown,
+    which blocks the finding prune. `group` is the batch group's GroupScope, so
+    the record carries only what that group cut.
+    """
+    global _COVERAGE_WRITE_FAILED
+    if not UPDATE_GRAPH_DB:
+        return True
+    try:
+        from recon.helpers import circuit_breaker
+        from graph_db import Neo4jClient
+        from graph_db.mixins.base_mixin import run_timestamp
+        report = group.report() if group is not None else circuit_breaker.coverage_report()
+        with Neo4jClient() as graph_client:
+            if not graph_client.verify_connection():
+                raise RuntimeError("Neo4j not reachable")
+            matched = graph_client.update_graph_coverage(USER_ID, PROJECT_ID, domain, {
+                "at": run_timestamp(),
+                "gaps_json": report.gaps_json(),
+                "skipped_hosts": report.stored_skipped_hosts(),
+                "nuclei_truncated": report.nuclei_truncated,
+            })
+        if not matched:
+            raise RuntimeError("no Domain node to stamp")
+        return True
+    except Exception as e:  # noqa: BLE001 - a housekeeping failure must not fail the scan
+        _COVERAGE_WRITE_FAILED = True
+        print(f"[!][graph-db] Coverage record not written ({type(e).__name__}) - "
+              f"the finding prune is skipped for this run")
+        return False
+
+
 def _prune_recon_findings():
     """Remove the findings this run stopped reporting. AFTER a successful run.
 
@@ -2010,20 +2117,70 @@ def _prune_recon_findings():
     rather than deleted, so an operator can see that a scanner stopped
     reporting something they had already suppressed. A node-filter rule's mute
     is not an operator's decision, so those are pruned like any other.
+
+    A degraded run never deletes what it did not re-check: a source whose
+    coverage was cut is left out of the prune, and every finding on a host the
+    run skipped as unreachable is kept. If the run's coverage cannot be
+    established at all, nothing is pruned (fail closed).
     """
     if not UPDATE_GRAPH_DB or not _RUN_STARTED_AT:
         return
+    if _COVERAGE_WRITE_FAILED:
+        print("[!][graph-db] Finding prune skipped: this run's coverage record was not written")
+        return
+    try:
+        from recon.helpers import circuit_breaker
+        report = circuit_breaker.coverage_report()
+    except Exception:  # noqa: BLE001 - unknown coverage means no prune
+        print("[!][graph-db] Finding prune skipped: this run's coverage is unknown")
+        return
+    sources = [s for s in RECON_FINDING_SOURCES if s not in report.degraded_sources]
+    keep_hosts = report.skipped_hostnames()
+    if report.degraded_sources or keep_hosts:
+        cut = sorted(report.degraded_sources)
+        print(f"[*][graph-db] Findings this run could not re-check are kept: "
+              f"{len(cut)} source(s) cut ({', '.join(cut) or 'none'}), "
+              f"findings on {len(keep_hosts)} unreachable host(s)")
     try:
         from graph_db import Neo4jClient
         with Neo4jClient() as graph_client:
             if graph_client.verify_connection():
                 graph_client.prune_unseen_findings(
-                    USER_ID, PROJECT_ID, list(RECON_FINDING_SOURCES),
-                    _RUN_STARTED_AT)
+                    USER_ID, PROJECT_ID, sources, _RUN_STARTED_AT,
+                    keep_hosts=keep_hosts)
     except Exception as e:
         # Never fail a completed scan over housekeeping: a finding that should
         # have been pruned is visible and wrong, which beats losing the run.
         print(f"[!][graph-db] Could not prune stale findings: {e}\n")
+
+
+# The finding sources each pipeline phase writes. A phase that raised
+# re-checked none of them, so its sources are left out of the prune.
+_PHASE_FINDING_SOURCES = {
+    "http_probe": ("http_probe",),
+    "resource_enum": ("resource_enum", "jsluice"),
+    "ai_surface_recon": ("ai_surface_recon",),
+    "js_recon": ("js_recon",),
+    "vuln_scan": ("nuclei", "security_check", "vuln_scan"),
+    "cert_hygiene": ("security_check",),
+    "graphql_scan": ("graphql_scan", "graphql_cop"),
+    "subdomain_takeover": ("takeover_scan",),
+    "vhost_sni": ("vhost_sni_enum",),
+    "cache_scan": ("cache_poisoning", "wcvs"),
+    "origin_discovery": ("origin_discovery",),
+}
+
+
+def _note_phase_error(phase: str) -> None:
+    """Record a crashed phase's finding sources as not re-checked. Never raises."""
+    sources = _PHASE_FINDING_SOURCES.get(phase)
+    if not sources:
+        return
+    try:
+        from recon.helpers import circuit_breaker
+        circuit_breaker.note_degraded(phase, sources=sources, reason="the phase failed")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _apply_node_filters():
@@ -2163,6 +2320,14 @@ def run_domain_batch(groups: list, start_time) -> int:
     print(f"[*][Batch] Total time: {duration}")
     print("═" * 63)
 
+    # ONCE per run, and never after a failed group: that group's previous
+    # findings were not re-checked, and a prune would delete them outright.
+    if failed:
+        print(f"[!][Batch] Finding prune skipped: {', '.join(failed)} did not complete, "
+              f"so no previous finding of this run is removed")
+    else:
+        _prune_recon_findings()
+
     # Only a batch where nothing succeeded is a failed run.
     return 1 if len(failed) == total else 0
 
@@ -2196,6 +2361,9 @@ def _run_pipeline():
     """
     start_time = datetime.now()
 
+    from recon.helpers import circuit_breaker
+    circuit_breaker.announce_mode()
+
     # IP Mode: skip domain verification and run IP-based recon instead
     if IP_MODE and TARGET_IPS:
         print(f"  [*][Pipeline] MODE:              IP-BASED TARGETING")
@@ -2208,8 +2376,9 @@ def _run_pipeline():
 
         _clear_recon_graph()
 
-        run_ip_recon(TARGET_IPS, _settings)
+        ip_result = run_ip_recon(TARGET_IPS, _settings)
 
+        _write_coverage_record((ip_result or {}).get("domain") or f"ip-targets.{PROJECT_ID}")
         _prune_recon_findings()
 
         end_time = datetime.now()
@@ -2234,7 +2403,10 @@ def _run_pipeline():
     if groups:
         return run_domain_batch(groups, start_time)
 
-    return run_domain_group(TARGET_DOMAIN, SUBDOMAIN_LIST, start_time=start_time)
+    rc = run_domain_group(TARGET_DOMAIN, SUBDOMAIN_LIST, start_time=start_time)
+    if rc == 0:
+        _prune_recon_findings()
+    return rc
 
 
 def run_domain_group(target_domain: str, subdomain_list: list, start_time=None) -> int:
@@ -2256,6 +2428,8 @@ def run_domain_group(target_domain: str, subdomain_list: list, start_time=None) 
     """
     if start_time is None:
         start_time = datetime.now()
+    from recon.helpers import circuit_breaker
+    coverage_group = circuit_breaker.group_scope()
 
     # Domain Ownership Verification (if enabled)
     # This MUST be the first check before any scanning to ensure we only
@@ -2534,6 +2708,7 @@ def run_domain_group(target_domain: str, subdomain_list: list, start_time=None) 
                         json.dump(domain_result, f, indent=2)
             except Exception as e:
                 print(f"[!][JsRecon] Error: {e}")
+                _note_phase_error("js_recon")
 
         if not skip_active_scans:
             # Run vuln_scan if in SCAN_MODULES (when domain_discovery is skipped)
@@ -2664,7 +2839,10 @@ def run_domain_group(target_domain: str, subdomain_list: list, start_time=None) 
     print("─" * 50)
     print()
 
-    _prune_recon_findings()
+    # The prune is run-level (see _run_pipeline / run_domain_batch): a batch
+    # group that pruned here would delete the later groups' findings before
+    # they were rescanned.
+    _write_coverage_record(root_domain, coverage_group)
 
     return 0
 

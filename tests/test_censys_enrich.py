@@ -150,5 +150,51 @@ class TestCensysEnrich(unittest.TestCase):
         self.assertNotIn("censys", combined)
 
 
+def _ips(n: int) -> dict:
+    return {"domain": "", "metadata": {"ip_mode": True,
+                                       "expanded_ips": [f"1.2.3.{i}" for i in range(1, n + 1)]},
+            "dns": {}}
+
+
+class TestCensysCircuitBreaker(unittest.TestCase):
+    def _settings(self, **overrides) -> dict:
+        base = {"CENSYS_ENABLED": True, "CENSYS_API_TOKEN": "token-test",
+                "CENSYS_ORG_ID": "org-test", "CENSYS_WORKERS": 1}
+        base.update(overrides)
+        return base
+
+    @patch("censys_enrich.time.sleep")
+    @patch("censys_enrich.requests.get")
+    def test_five_timeouts_mean_the_sixth_ip_is_never_requested(self, mock_get, _sleep):
+        """Timeouts and 5xx used to cost 30s per IP, for every IP."""
+        import requests as req_lib
+        mock_get.side_effect = req_lib.exceptions.ReadTimeout("read timeout=30")
+        out = run_censys_enrichment(_ips(10), self._settings())
+        self.assertEqual(mock_get.call_count, 5)
+        (entry,) = out["censys"]["degraded"]
+        self.assertEqual((entry["source"], entry["skipped"]), ("censys:host", 5))
+
+    @patch("censys_enrich.time.sleep")
+    @patch("censys_enrich.requests.get")
+    def test_ten_404s_never_trip_it(self, mock_get, _sleep):
+        mock_get.return_value = _mock_response(404, {})
+        out = run_censys_enrichment(_ips(10), self._settings())
+        self.assertEqual(mock_get.call_count, 10)
+        self.assertNotIn("degraded", out["censys"])
+
+    @patch("censys_enrich.time.sleep")
+    @patch("censys_enrich.requests.get")
+    def test_a_refused_token_means_exactly_one_call(self, mock_get, _sleep):
+        mock_get.return_value = _mock_response(401, {}, text="unauthorized")
+        with patch("builtins.print") as fake_print:
+            out = run_censys_enrichment(_ips(10), self._settings())
+        self.assertEqual(mock_get.call_count, 1)
+        printed = "\n".join(" ".join(map(str, c.args)) for c in fake_print.call_args_list)
+        self.assertIn("401 key rejected - stopped for the rest of this run", printed)
+        self.assertNotIn("token-test", printed)
+        (entry,) = out["censys"]["degraded"]
+        self.assertEqual((entry["source"], entry["outcome"], entry["skipped"]), ("censys", "fatal", 9))
+
+
 if __name__ == "__main__":
     unittest.main()

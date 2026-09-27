@@ -979,6 +979,9 @@ class ContainerManager:
                     # shipped-only allowlist). Server-controlled; forwarded to the
                     # recon pipeline so air-gapped/private-registry deployments work.
                     "RECON_EXTRA_ALLOWED_IMAGES": os.environ.get("RECON_EXTRA_ALLOWED_IMAGES", ""),
+                    # Operator off switch for the recon circuit breakers; only
+                    # the exact value "off" disables them (compose defaults "on").
+                    "RECON_CIRCUIT_BREAKERS": os.environ.get("RECON_CIRCUIT_BREAKERS", "on"),
                     "RECON_RUN_ID": recon_run_id,
                     # Scan Timeline telemetry only (see start_recon docstring).
                     "SCAN_MODE": scan_mode or "",
@@ -2024,6 +2027,7 @@ class ContainerManager:
                     "WEBAPP_API_URL": config.get("webapp_api_url", ""),
                     "PARTIAL_RECON_CONFIG": f"/tmp/redamon/partial_{project_id}_{run_id}.json",
                     "PARTIAL_RECON_RUN_ID": run_id,
+                    "RECON_CIRCUIT_BREAKERS": os.environ.get("RECON_CIRCUIT_BREAKERS", "on"),
                     "UPDATE_GRAPH_DB": "true",
                     "HOST_RECON_OUTPUT_PATH": f"{recon_path}/output",
                     # Required for nuclei custom-template support: build_nuclei_command

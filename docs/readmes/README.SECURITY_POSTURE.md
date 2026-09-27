@@ -268,6 +268,8 @@ Both guards resolve the host and then hand it to the HTTP client, which re-resol
 
 **Orchestrator input trust (`recon_orchestrator/api.py`).** The orchestrator no longer trusts a client-supplied `webapp_api_url`; all credentialed calls use server-controlled URLs, so a caller cannot redirect the internal key to an arbitrary host.
 
+**Provider keys never reach recon logs (`recon/helpers/circuit_breaker.py`).** Recon stdout streams into the webapp's log drawer, so the circuit breakers that pause a failing data provider are built to log the provider, endpoint and outcome only — never the API key and never a response body. A refused key is reported by its **1-based position** in the rotation, not its value; a provider whose error text can echo the submitted key (e.g. Netlas' `400 ... api key`, an NVD `message` header) is classified from the status and a fixed marker, with the body discarded. The key material stays in the scan container's environment and is never written to a finding, a log line or the graph.
+
 ---
 
 ## 13. Agent safety controls

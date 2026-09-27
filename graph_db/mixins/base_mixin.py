@@ -9,6 +9,7 @@ Provides:
 """
 
 import os
+import re
 from pathlib import Path
 
 from datetime import datetime, timezone
@@ -49,6 +50,44 @@ FINDING_LABELS = (
 )
 
 _FINDING_LABEL_PREDICATE = " OR ".join(f"n:`{label}`" for label in FINDING_LABELS)
+
+#: Every property a recon finding writer uses to say which host it is about.
+#: No field is shared: nuclei's `host` may be a bare host, host:port or a URL;
+#: security checks use `url`/`matched_at`/`hostname`; js_recon and jsluice
+#: `source_url`/`base_url`; graphql and cache poisoning `endpoint`; nmap_nse
+#: `ip_address`. ai_surface_recon stores none, so its skips are source-level.
+_KEEP_HOST_FIELDS = (
+    "host", "hostname", "ip", "ip_address", "matched_ip",
+    "url", "matched_at", "base_url", "source_url", "endpoint", "probe_url",
+)
+
+#: What a hostname in `keep_hosts` must look like before it is regex-escaped:
+#: a DNS name, or an IPv6 literal without brackets.
+_KEEP_HOST_CHARS = re.compile(r"^[a-z0-9.\-]+$|^[0-9a-f:]+$")
+
+#: Hosts per regex, so a run that skipped hundreds builds several short
+#: patterns rather than one enormous alternation.
+_KEEP_HOSTS_PER_PATTERN = 100
+
+
+def keep_host_patterns(keep_hosts) -> list:
+    """Anchored regexes matching a skipped host however a finding stores it.
+
+    Each matches the whole value when it is the bare host, host:port, or a
+    URL whose authority is the host (scheme and userinfo optional, IPv6
+    brackets allowed). Hostnames are validated against a strict character
+    set and `re.escape`d, and the patterns travel as query parameters - never
+    concatenated into the Cypher text.
+    """
+    names = sorted({str(h).strip().lower() for h in keep_hosts or ()
+                    if h and _KEEP_HOST_CHARS.match(str(h).strip().lower())})
+    patterns = []
+    for i in range(0, len(names), _KEEP_HOSTS_PER_PATTERN):
+        alternation = "|".join(re.escape(n) for n in names[i:i + _KEEP_HOSTS_PER_PATTERN])
+        patterns.append(
+            r"^(?:[a-z][a-z0-9+.\-]*://(?:[^/@]*@)?)?\[?(?:" + alternation
+            + r")\]?(?::[0-9]+)?(?:[/?#].*)?$")
+    return patterns
 
 
 def run_timestamp() -> str:
@@ -171,7 +210,7 @@ class BaseMixin:
         return stats
 
     def prune_unseen_findings(self, user_id: str, project_id: str,
-                              sources, run_started_at: str) -> dict:
+                              sources, run_started_at: str, keep_hosts=()) -> dict:
         """Ingest-then-prune: remove a source's findings it stopped reporting.
 
         WHY THIS REPLACED CLEAR-THEN-INGEST
@@ -200,17 +239,30 @@ class BaseMixin:
            reported nothing, and pruning on that would delete the entire
            project's findings. The caller owns that decision; this method
            cannot tell.
+
+        `keep_hosts` are hostnames a degraded run skipped as unreachable: every
+        finding about one of them is left exactly as it is (neither deleted
+        nor stamped stale), since the run never re-checked it. Per host rather
+        than per source, so one permanently dead host cannot keep a whole
+        source unpruned for ever. With it empty the query is unchanged.
         """
         sources = [s for s in (sources or []) if s]
         if not sources or not run_started_at:
             return {"pruned": 0, "stale": 0}
+
+        keep_patterns = keep_host_patterns(keep_hosts)
+        keep_clause = ""
+        if keep_patterns:
+            checks = " OR ".join(
+                f"coalesce(toLower(toStringOrNull(n.{f})), '') =~ rx" for f in _KEEP_HOST_FIELDS)
+            keep_clause = f"\n          AND NOT any(rx IN $keep_patterns WHERE {checks})"
 
         query = f"""
         MATCH (n)
         WHERE n.user_id = $uid AND n.project_id = $pid
           AND ({_FINDING_LABEL_PREDICATE})
           AND coalesce(n.source, '') IN $sources
-          AND (n.updated_at IS NULL OR n.updated_at < datetime($since))
+          AND (n.updated_at IS NULL OR n.updated_at < datetime($since)){keep_clause}
         WITH n,
              ((n:Muted AND NOT coalesce(n.muted_by, '') STARTS WITH 'rule:')
               OR coalesce(n.triage_source, '') = 'human') AS keep
@@ -245,10 +297,11 @@ class BaseMixin:
                 revive, uid=user_id, pid=project_id, sources=sources,
                 since=run_started_at,
             ).single()
-            record = session.run(
-                query, uid=user_id, pid=project_id, sources=sources,
-                since=run_started_at,
-            ).single()
+            params = {"uid": user_id, "pid": project_id, "sources": sources,
+                      "since": run_started_at}
+            if keep_patterns:
+                params["keep_patterns"] = keep_patterns
+            record = session.run(query, **params).single()
 
         stats = {
             "pruned": int((record["pruned"] if record else 0) or 0),

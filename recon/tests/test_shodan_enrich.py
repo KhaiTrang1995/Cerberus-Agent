@@ -634,15 +634,29 @@ class TestShodanGet(unittest.TestCase):
 
     @patch('shodan_enrich.time.sleep')
     @patch('shodan_enrich.requests.get')
-    def test_429_sleeps_and_returns_none(self, mock_get, mock_sleep):
+    def test_429_waits_out_retry_after_and_retries_once(self, mock_get, mock_sleep):
+        """A 429 used to sleep 2s and drop the IP's data; now it waits out
+        Retry-After (2s when absent) and sends the request once more."""
         from shodan_enrich import _shodan_get
-        mock_resp = MagicMock()
-        mock_resp.status_code = 429
-        mock_get.return_value = mock_resp
+        from recon.helpers import circuit_breaker as cb
+        cb.set_clock(now=lambda: 1000.0)  # a frozen clock: the pause is exactly 2s
+        limited = MagicMock(status_code=429, headers={})
+        answered = MagicMock(status_code=200, headers={})
+        answered.json.return_value = {"ok": True}
+        mock_get.side_effect = [limited, answered]
 
         result = _shodan_get("/test", "key123")
-        self.assertIsNone(result)
-        mock_sleep.assert_called_once_with(2)
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(mock_get.call_count, 2)
+        mock_sleep.assert_called_once_with(2.0)
+
+    @patch('shodan_enrich.time.sleep')
+    @patch('shodan_enrich.requests.get')
+    def test_two_429s_in_a_row_return_none(self, mock_get, mock_sleep):
+        from shodan_enrich import _shodan_get
+        mock_get.return_value = MagicMock(status_code=429, headers={})
+        self.assertIsNone(_shodan_get("/test", "key123"))
+        self.assertEqual(mock_get.call_count, 2)
 
     @patch('shodan_enrich.requests.get')
     def test_network_error_returns_none(self, mock_get):
@@ -770,7 +784,6 @@ class TestGracefulErrorHandling(unittest.TestCase):
     @patch('shodan_enrich._internetdb_get')
     @patch('shodan_enrich._shodan_get')
     @patch('shodan_enrich.time.sleep')
-    @pytest.mark.xfail(strict=True, reason="Part H triage (bucket-3): behavior/mapping/shape drifted from this assertion post-refactor; correctness unconfirmed - see green-up report")
     def test_401_on_first_ip_falls_back_to_internetdb(self, mock_sleep, mock_get, mock_idb):
         """401 on first IP falls back to InternetDB for remaining IPs."""
         from shodan_enrich import ShodanApiKeyError
@@ -787,6 +800,145 @@ class TestGracefulErrorHandling(unittest.TestCase):
         self.assertEqual(len(hosts), 3)
         for host in hosts:
             self.assertEqual(host["source"], "internetdb")
+
+
+class TestShodanCircuitBreaker(unittest.TestCase):
+    """recon/helpers/circuit_breaker.py wiring. The conftest resets the registry."""
+
+    def _host_body(self, ip):
+        return {"ports": [80], "vulns": [], "data": [], "ip_str": ip}
+
+    @patch('shodan_enrich.time.sleep')
+    @patch('shodan_enrich.requests.get')
+    def test_a_refused_key_costs_one_call_then_every_ip_uses_internetdb(self, mock_get, _sleep):
+        """Bug 1: the old fallback cancelled the queued futures and then read
+        them as done, so most IPs never reached InternetDB."""
+        def side_effect(url, **_kwargs):
+            if url.startswith("https://api.shodan.io"):
+                return MagicMock(status_code=401, headers={}, text="Unauthorized")
+            return MagicMock(status_code=200, headers={},
+                             json=MagicMock(return_value={"ports": [22], "vulns": [], "hostnames": []}))
+        mock_get.side_effect = side_effect
+        ips = [f"1.2.3.{i}" for i in range(1, 9)]
+        hosts = _run_host_lookup(ips, "bad-key", max_workers=5)
+        api_calls = [c for c in mock_get.call_args_list if c.args[0].startswith("https://api.shodan.io")]
+        self.assertEqual(len(api_calls), 1)
+        self.assertEqual(sorted(h["ip"] for h in hosts), ips)
+        self.assertTrue(all(h["source"] == "internetdb" for h in hosts))
+
+    @patch('shodan_enrich.time.sleep')
+    @patch('shodan_enrich._internetdb_get')
+    @patch('shodan_enrich._shodan_get')
+    def test_the_sequential_path_falls_back_too(self, mock_get, mock_idb, _sleep):
+        """One worker used to have no fallback at all: the error escaped."""
+        from shodan_enrich import ShodanApiKeyError
+        mock_get.side_effect = ShodanApiKeyError("401")
+        mock_idb.return_value = {"ports": [22], "vulns": []}
+        hosts = _run_host_lookup(["1.2.3.1", "1.2.3.2", "1.2.3.3"], "bad-key", max_workers=1)
+        self.assertEqual(mock_get.call_count, 1)
+        self.assertEqual(len(hosts), 3)
+
+    @patch('shodan_enrich.time.sleep')
+    @patch('shodan_enrich.requests.get')
+    def test_five_timeouts_move_the_rest_to_internetdb(self, mock_get, _sleep):
+        import requests as req_lib
+
+        def side_effect(url, **_kwargs):
+            if url.startswith("https://api.shodan.io"):
+                raise req_lib.exceptions.ReadTimeout("read timeout=30")
+            return MagicMock(status_code=200, headers={},
+                             json=MagicMock(return_value={"ports": [443], "vulns": []}))
+        mock_get.side_effect = side_effect
+        ips = [f"1.2.3.{i}" for i in range(1, 11)]
+        hosts = _run_host_lookup(ips, "key", max_workers=1)
+        api_calls = [c for c in mock_get.call_args_list if c.args[0].startswith("https://api.shodan.io")]
+        self.assertEqual(len(api_calls), 5)
+        self.assertEqual(len(hosts), 5)  # IPs 6..10 via InternetDB
+        self.assertTrue(all(h["source"] == "internetdb" for h in hosts))
+
+    @patch('shodan_enrich.time.sleep')
+    @patch('shodan_enrich.requests.get')
+    def test_a_plan_gated_403_stops_one_endpoint_not_the_key(self, mock_get, _sleep):
+        from shodan_enrich import _shodan_get, ShodanApiKeyError
+        from recon.helpers.key_rotation import KeyRotator
+        rotator = KeyRotator(["main", "extra"], rotate_every_n=100)
+
+        def side_effect(url, **_kwargs):
+            if "/dns/domain/" in url:
+                return MagicMock(status_code=403, headers={}, text="Requires membership")
+            ok = MagicMock(status_code=200, headers={})
+            ok.json.return_value = {"ports": [80]}
+            return ok
+        mock_get.side_effect = side_effect
+        with self.assertRaises(ShodanApiKeyError) as ctx:
+            _shodan_get("/dns/domain/example.com", "main", key_rotator=rotator)
+        self.assertTrue(ctx.exception.local)
+        self.assertEqual(rotator.keys, ["main", "extra"])  # no key was dropped
+        self.assertEqual(_shodan_get("/shodan/host/1.2.3.4", "main", key_rotator=rotator), {"ports": [80]})
+        with self.assertRaises(ShodanApiKeyError):  # still closed, without a new call
+            _shodan_get("/dns/domain/example.com", "main", key_rotator=rotator)
+        self.assertEqual(sum("/dns/domain/" in c.args[0] for c in mock_get.call_args_list), 1)
+
+    @patch('shodan_enrich.time.sleep')
+    @patch('shodan_enrich.requests.get')
+    def test_internetdb_answers_are_cached_for_the_run(self, mock_get, _sleep):
+        """InternetDB used to be asked up to three times per IP (host lookup,
+        reverse DNS, passive CVEs), 404s included."""
+        def side_effect(url, **_kwargs):
+            if url.endswith("/1.2.3.2"):
+                return MagicMock(status_code=404, headers={})
+            ok = MagicMock(status_code=200, headers={})
+            ok.json.return_value = {"ports": [22], "vulns": ["CVE-2021-0001"], "hostnames": ["h.example.com"]}
+            return ok
+        mock_get.side_effect = side_effect
+        result = _make_domain_combined_result()
+        result["dns"]["domain"]["ips"]["ipv4"] = ["1.2.3.1", "1.2.3.2"]
+        result["dns"]["subdomains"] = {}
+        settings = {"SHODAN_API_KEY": "", "SHODAN_HOST_LOOKUP": True, "SHODAN_REVERSE_DNS": True,
+                    "SHODAN_DOMAIN_DNS": False, "SHODAN_PASSIVE_CVES": True}
+        out = run_shodan_enrichment(result, settings)
+        self.assertEqual(mock_get.call_count, 2)
+        self.assertEqual(len(out["shodan"]["hosts"]), 1)
+        self.assertEqual(out["shodan"]["reverse_dns"], {"1.2.3.1": ["h.example.com"]})
+
+    @patch('shodan_enrich.time.sleep')
+    @patch('shodan_enrich.requests.get')
+    def test_a_failed_internetdb_call_is_not_cached(self, mock_get, _sleep):
+        from shodan_enrich import _internetdb_get
+        import requests as req_lib
+        ok = MagicMock(status_code=200, headers={})
+        ok.json.return_value = {"ports": [22]}
+        mock_get.side_effect = [req_lib.exceptions.ConnectTimeout("x"), ok]
+        self.assertIsNone(_internetdb_get("1.2.3.1"))
+        self.assertEqual(_internetdb_get("1.2.3.1"), {"ports": [22]})
+        self.assertEqual(_internetdb_get("1.2.3.1"), {"ports": [22]})
+        self.assertEqual(mock_get.call_count, 2)
+
+    @patch('shodan_enrich.time.sleep')
+    @patch('shodan_enrich.requests.get')
+    def test_the_key_never_reaches_the_log(self, mock_get, _sleep):
+        """Bug 8: the old warning printed requests' error text, which carries
+        the full URL with ?key=."""
+        import requests as req_lib
+        mock_get.side_effect = req_lib.exceptions.ConnectionError(
+            "HTTPSConnectionPool(host='api.shodan.io', port=443): Max retries exceeded "
+            "with url: /shodan/host/1.2.3.4?key=SUPERSECRETKEY")
+        result = _make_domain_combined_result()
+        settings = {"SHODAN_API_KEY": "SUPERSECRETKEY", "SHODAN_HOST_LOOKUP": True,
+                    "SHODAN_REVERSE_DNS": False, "SHODAN_DOMAIN_DNS": False,
+                    "SHODAN_PASSIVE_CVES": False}
+        import io
+        import logging
+        from contextlib import redirect_stdout
+        buf, log_buf = io.StringIO(), io.StringIO()
+        handler = logging.StreamHandler(log_buf)
+        logging.getLogger().addHandler(handler)
+        try:
+            with redirect_stdout(buf):
+                out = run_shodan_enrichment(result, settings)
+        finally:
+            logging.getLogger().removeHandler(handler)
+        self.assertNotIn("SUPERSECRETKEY", buf.getvalue() + log_buf.getvalue() + repr(out["shodan"]))
 
 
 if __name__ == '__main__':

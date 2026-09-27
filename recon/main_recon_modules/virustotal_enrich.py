@@ -63,9 +63,47 @@ def _extract_ips_from_recon(combined_result: dict) -> list[str]:
 
 
 def _effective_key(api_key: str, key_rotator) -> str:
+    # A pool whose every key was refused is empty for the run: falling back to
+    # the plain key would resurrect the pool's first member.
+    if key_rotator and getattr(key_rotator, "exhausted", False) is True:
+        return ""
     if key_rotator and getattr(key_rotator, "has_keys", False):
         return (key_rotator.current_key or "").strip()
     return (api_key or "").strip()
+
+
+# The free API allows 4 lookups a minute, so a 429 without Retry-After pauses
+# every worker for the rest of that window (the helper caps a pause at 60s)
+# instead of retrying straight back into the same quota.
+_VT_RETRY_AFTER_DEFAULT_S = 60.0
+
+
+def _vt_breaker():
+    from recon.helpers import circuit_breaker as cb
+    return cb.get_breaker("virustotal:report", label="VirusTotal", parent="virustotal")
+
+
+def _vt_classify(resp):
+    from recon.helpers import circuit_breaker as cb
+    if cb.status_of(resp) == 429:
+        return cb.CallResult(None, cb.Outcome.RATE_LIMIT, "HTTP 429",
+                             cb.retry_after_seconds(resp, default=_VT_RETRY_AFTER_DEFAULT_S))
+    return cb.json_result(resp, keyed=True)
+
+
+def _vt_call(path: str, keys, timeout: int = 30, *, admitted: bool = False):
+    """GET a VirusTotal v3 path through the VirusTotal breaker; returns a CallResult.
+
+    A first 429 pauses every worker and the call is sent once more; a second
+    one in a row stops VirusTotal. A refused key moves on to the next pooled
+    key, and stops VirusTotal only when none is left.
+    """
+    from recon.helpers import circuit_breaker as cb
+    url = f"{VIRUSTOTAL_API_BASE.rstrip('/')}/{path.lstrip('/')}"
+    return cb.guarded_call(
+        _vt_breaker(),
+        lambda key: requests.get(url, headers={"x-apikey": key}, timeout=timeout),
+        _vt_classify, keys=keys, admitted=admitted)
 
 
 def _vt_get(
@@ -74,37 +112,13 @@ def _vt_get(
     key_rotator,
     timeout: int = 30,
 ) -> dict | None:
-    """GET VirusTotal v3 path (relative to base). Handles 429 with one retry."""
-    eff = _effective_key(api_key, key_rotator)
-    if not eff:
+    """GET VirusTotal v3 path (relative to base). Returns the body, or None."""
+    from recon.helpers import circuit_breaker as cb
+    keys = cb.KeyPool(key_rotator, (api_key or "").strip(), label="VirusTotal")
+    if not keys.has_key:
         return None
-    url = f"{VIRUSTOTAL_API_BASE.rstrip('/')}/{path.lstrip('/')}"
-    headers = {"x-apikey": eff}
-
-    for attempt in range(2):
-        try:
-            resp = requests.get(url, headers=headers, timeout=timeout)
-            if key_rotator:
-                key_rotator.tick()
-            if resp.status_code == 200:
-                return resp.json()
-            if resp.status_code == 404:
-                logger.debug(f"VirusTotal 404 for {path}")
-                return None
-            if resp.status_code == 429:
-                logger.warning("VirusTotal rate limit (429), backing off and retrying once")
-                if attempt == 0:
-                    time.sleep(65)
-                    continue
-                return None
-            logger.warning(
-                f"VirusTotal {resp.status_code} for {path}: {resp.text[:200]}"
-            )
-            return None
-        except requests.RequestException as e:
-            logger.warning(f"VirusTotal request failed for {path}: {e}")
-            return None
-    return None
+    res = _vt_call(path, keys, timeout)
+    return res.data if res.ok else None
 
 
 def _parse_domain_attrs(data: dict | None) -> dict | None:
@@ -178,14 +192,15 @@ def run_virustotal_enrichment(combined_result: dict, settings: dict) -> dict:
         ],
     )
 
-    api_key = settings.get("VIRUSTOTAL_API_KEY", "")
-    key_rotator = settings.get("VIRUSTOTAL_KEY_ROTATOR")
+    from recon.helpers import circuit_breaker as cb
+    keys = cb.KeyPool(settings.get("VIRUSTOTAL_KEY_ROTATOR"),
+                      (settings.get("VIRUSTOTAL_API_KEY", "") or "").strip(), label="VirusTotal")
     _rl = settings.get("VIRUSTOTAL_RATE_LIMIT", 4)
     rate_limit = max(1, int(_rl if _rl is not None else 4))
     _mt = settings.get("VIRUSTOTAL_MAX_TARGETS", 20)
     max_targets = max(0, int(_mt if _mt is not None else 20))
 
-    if not _effective_key(api_key, key_rotator):
+    if not keys.has_key:
         print(f"[!][VirusTotal] No API key configured — skipping")
         return combined_result
 
@@ -205,6 +220,8 @@ def run_virustotal_enrichment(combined_result: dict, settings: dict) -> dict:
 
     throttle = 60.0 / rate_limit
     need_sleep = False
+    vt_scope = cb.scope("virustotal", label="VirusTotal", unit="lookup(s)")
+    breaker = _vt_breaker()
 
     try:
         if domain and not is_ip_mode:
@@ -212,8 +229,8 @@ def run_virustotal_enrichment(combined_result: dict, settings: dict) -> dict:
                 time.sleep(throttle)
             need_sleep = True
             print(f"[*][VirusTotal] Fetching domain report for {domain}...")
-            raw = _vt_get(f"domains/{domain}", api_key, key_rotator)
-            parsed = _parse_domain_attrs(raw)
+            res = _vt_call(f"domains/{domain}", keys)
+            parsed = _parse_domain_attrs(res.data if res.ok else None)
             if parsed:
                 vt_data["domain_report"] = {
                     "domain": domain,
@@ -235,12 +252,15 @@ def run_virustotal_enrichment(combined_result: dict, settings: dict) -> dict:
                 print(f"[!][VirusTotal] No domain report data for {domain}")
 
         def _enrich_single_ip(ip, rate_limiter):
+            # Before the wait: each slot is 60/rate seconds, so a breaker checked
+            # only after it would idle through every reserved slot.
+            if not breaker.allow():
+                return None
             rate_limiter.wait()
             print(f"[*][VirusTotal] Fetching IP report for {ip}...")
-            raw = _vt_get(f"ip_addresses/{ip}", api_key, key_rotator)
-            parsed = _parse_ip_attrs(raw)
+            res = _vt_call(f"ip_addresses/{ip}", keys, admitted=True)
+            parsed = _parse_ip_attrs(res.data if res.ok else None)
             if not parsed:
-                logger.warning(f"VirusTotal: no IP data for {ip}")
                 return None
             report = {
                 "ip": ip,
@@ -275,8 +295,7 @@ def run_virustotal_enrichment(combined_result: dict, settings: dict) -> dict:
                     if result is not None:
                         vt_data["ip_reports"].append(result)
                 except Exception as e:
-                    ip = futures[fut]
-                    logger.warning(f"VirusTotal worker error for {ip}: {e}")
+                    logger.warning(f"VirusTotal worker error: {type(e).__name__}")
         # Preserve original ordering (sorted IPs)
         ip_order = {ip: i for i, ip in enumerate(ip_slice)}
         vt_data["ip_reports"].sort(key=lambda r: ip_order.get(r["ip"], 0))
@@ -287,10 +306,11 @@ def run_virustotal_enrichment(combined_result: dict, settings: dict) -> dict:
             f"{len(vt_data['ip_reports'])} IP reports"
         )
     except Exception as e:
-        logger.error(f"VirusTotal enrichment failed: {e}")
-        print(f"[!][VirusTotal] Enrichment error: {e}")
+        logger.error(f"VirusTotal enrichment failed: {type(e).__name__}")
+        print(f"[!][VirusTotal] Enrichment error: {type(e).__name__}")
         print(f"[!][VirusTotal] Pipeline continues without full VirusTotal data")
 
+    vt_scope.finish("virustotal_enrich", payload=vt_data)
     combined_result["virustotal"] = vt_data
     return combined_result
 

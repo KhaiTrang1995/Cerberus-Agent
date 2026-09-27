@@ -532,5 +532,33 @@ class TestUrlCollection(unittest.TestCase):
         self.assertEqual(urls, [])
 
 
+class TestUncoverDropsRefusedEngines(unittest.TestCase):
+    """A provider whose key a pipeline enricher saw refused earlier in the run."""
+
+    def test_a_refused_provider_is_left_out_and_shodan_falls_back_to_idb(self):
+        from recon.helpers import circuit_breaker as cb
+        cb.get_breaker("shodan:host", label="Shodan", parent="shodan").record(
+            cb.Outcome.FATAL, "401 key rejected")
+        cb.get_breaker("fofa:search", label="FOFA", parent="fofa").record(
+            cb.Outcome.FATAL, "FOFA error -700: key rejected")
+        config, engines = _build_provider_config({
+            'SHODAN_API_KEY': 's', 'FOFA_API_KEY': 'f', 'NETLAS_API_KEY': 'n'})
+        self.assertNotIn('shodan', engines)
+        self.assertNotIn('fofa', engines)
+        self.assertNotIn('shodan', config)
+        self.assertIn('netlas', engines)
+        self.assertIn('shodan-idb', engines)
+        gaps = {g["source"] for g in cb.coverage_report().gaps}
+        self.assertEqual(gaps, {"uncover:shodan", "uncover:fofa"})
+
+    def test_a_paused_but_not_refused_provider_stays(self):
+        from recon.helpers import circuit_breaker as cb
+        breaker = cb.get_breaker("netlas:responses", label="Netlas", parent="netlas")
+        for _ in range(5):
+            breaker.record(cb.Outcome.TRANSIENT, "ReadTimeout")
+        _config, engines = _build_provider_config({'NETLAS_API_KEY': 'n'})
+        self.assertIn('netlas', engines)
+
+
 if __name__ == '__main__':
     unittest.main()

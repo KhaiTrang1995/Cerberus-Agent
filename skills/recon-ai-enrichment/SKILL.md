@@ -41,6 +41,16 @@ that toggles it, use `project-settings-cascade`.
   Fall back to the user's current value, not `[]`/`""`.
 - **NEVER call the LLM with no signal.** Empty fingerprint -> return the current
   value; do not send an empty prompt.
+- **ALWAYS take the `agent_llm` breaker AFTER the cache check, and honour it by
+  returning the existing fallback.** The agent's `/llm/*` endpoints share one
+  breaker: `gate = agent_llm_gate()` (from
+  [recon/helpers/ai_planner/__init__.py](../../recon/helpers/ai_planner/__init__.py));
+  when `not gate.allowed`, print "... Agent LLM paused (breaker open) - using the
+  fallback." and return the user's current value WITHOUT a POST. After the POST
+  call `gate.record(resp=resp)`; in the except branch call `gate.record(exc=e)`.
+  The cache is checked first so a cached answer is still served while the breaker
+  is open. This is the same never-raise/never-empty fallback as above — the
+  breaker just skips the call that would fail anyway when the agent is down.
 - **NEVER hook the AI separately in partial recon.** Most tools share one entry
   function (e.g. `run_vuln_scan` is called by both `main_recon_modules/` and
   `partial_recon_modules/`); hook it **once** and both paths inherit. `grep` the

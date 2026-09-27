@@ -360,7 +360,8 @@ class TestHttpxCallerPassesRealProbeHosts:
 
         captured = {}
 
-        def _fake_build(targets_file, output_file, settings, probe_hosts=None):
+        def _fake_build(targets_file, output_file, settings, probe_hosts=None,
+                        container_name=None):
             captured['hosts'] = probe_hosts
             raise _StopProbe()
 

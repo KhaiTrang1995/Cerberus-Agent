@@ -6002,6 +6002,33 @@ fields:
     bounds: { min: 0, max: 10 }
     meaning: >-
       How many times nuclei retries a failed request before giving up on it.
+  nucleiMaxRuntime:
+    tool: nuclei
+    runtime_key: "NUCLEI_MAX_RUNTIME"
+    unit: seconds
+    phase: vuln_scan
+    traffic: active
+    roe_capped: false
+    mcp: settable
+    bounds: { min: 600, max: 604800 }
+    meaning: >-
+      Wall-clock ceiling for a single nuclei pass, in seconds (default 24h). A
+      pass that reaches it is stopped, its partial findings are kept, and the
+      run is recorded as truncated. Not a rate and has no unlimited value; raise
+      it (up to 7 days) rather than disabling it.
+  nucleiMaxHostError:
+    tool: nuclei
+    runtime_key: "NUCLEI_MAX_HOST_ERROR"
+    unit: count
+    phase: vuln_scan
+    traffic: active
+    roe_capped: false
+    mcp: settable
+    bounds: { min: 1, max: 10000 }
+    meaning: >-
+      How many errors nuclei tolerates from one host before it stops probing
+      that host (nuclei's -mhe), so one dead host in a large target list cannot
+      soak the whole pass in timeouts.
   nucleiScanAllIps:
     tool: nuclei
     runtime_key: "NUCLEI_SCAN_ALL_IPS"
@@ -6113,8 +6140,9 @@ fields:
     bounds: { min: 1, max: 86400 }
     group: unbounded
     meaning: >-
-      How long nuclei may spend before it is abandoned, in seconds. A run that
-      hits it contributes whatever it found so far rather than failing the scan.
+      Per-request timeout, in seconds: how long nuclei waits for one template's
+      HTTP request (nuclei's -timeout), NOT a cap on the whole run. The
+      wall-clock ceiling for a pass is nucleiMaxRuntime.
   originDiscoveryEnabled:
     tool: origin_discovery
     runtime_key: "ORIGIN_DISCOVERY_ENABLED"

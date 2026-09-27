@@ -48,6 +48,7 @@ def _mock_response(status_code: int = 200, json_data: dict | None = None, text: 
     m = MagicMock()
     m.status_code = status_code
     m.text = text or ""
+    m.headers = {}
     if json_data is not None:
         m.json.return_value = json_data
     return m
@@ -359,7 +360,9 @@ class TestZoomeyeEnrich(unittest.TestCase):
         mock_get.return_value = _mock_response(429, {}, text="rl")
         out = run_zoomeye_enrichment(_combined_result(), self._settings())
         self.assertEqual(out["zoomeye"]["results"], [])
-        backoff_calls = [c for c in mock_sleep.call_args_list if c.args and c.args[0] == 2]
+        # The retry sleeps out what is left of the shared 2s pause (Retry-After
+        # absent), a hair under 2s by the time it is admitted.
+        backoff_calls = [c for c in mock_sleep.call_args_list if c.args and 1.5 <= c.args[0] <= 2]
         self.assertGreaterEqual(len(backoff_calls), 1)
 
     @patch("zoomeye_enrich.time.sleep")
@@ -479,6 +482,64 @@ class TestZoomeyeEnrich(unittest.TestCase):
         sub = run_zoomeye_enrichment_isolated(_combined_result(), self._settings())
         self.assertIn("results", sub)
         self.assertEqual(sub["results"], [])
+
+
+def _ips(n):
+    return {"domain": "", "dns": {},
+            "metadata": {"ip_mode": True, "expanded_ips": [f"1.2.3.{i}" for i in range(1, n + 1)]}}
+
+
+class TestZoomEyeCircuitBreaker(unittest.TestCase):
+    def _settings(self, **overrides) -> dict:
+        base = {"ZOOMEYE_ENABLED": True, "ZOOMEYE_API_KEY": "ze-key", "ZOOMEYE_KEY_ROTATOR": None,
+                "ZOOMEYE_MAX_RESULTS": 10, "ZOOMEYE_WORKERS": 1}
+        base.update(overrides)
+        return base
+
+    @patch("zoomeye_enrich.time.sleep")
+    @patch("zoomeye_enrich.requests.get")
+    def test_five_timeouts_mean_the_sixth_ip_is_never_requested(self, mock_get, _sleep):
+        import requests as req_lib
+        mock_get.side_effect = req_lib.exceptions.ReadTimeout("x")
+        out = run_zoomeye_enrichment(_ips(10), self._settings())
+        self.assertEqual(mock_get.call_count, 5)
+        (entry,) = out["zoomeye"]["degraded"]
+        self.assertEqual((entry["source"], entry["skipped"]), ("zoomeye:search", 5))
+
+    @patch("zoomeye_enrich.time.sleep")
+    @patch("zoomeye_enrich.requests.get")
+    def test_ten_empty_answers_never_trip_it(self, mock_get, _sleep):
+        mock_get.return_value = _mock_response(200, {"total": 0, "matches": []})
+        out = run_zoomeye_enrichment(_ips(10), self._settings())
+        self.assertEqual(mock_get.call_count, 10)
+        self.assertNotIn("degraded", out["zoomeye"])
+
+    @patch("zoomeye_enrich.time.sleep")
+    @patch("zoomeye_enrich.requests.get")
+    def test_no_credit_means_exactly_one_call(self, mock_get, _sleep):
+        mock_get.return_value = _mock_response(402, {"error": "credits_insufficent"}, text="x")
+        out = run_zoomeye_enrichment(_ips(10), self._settings())
+        self.assertEqual(mock_get.call_count, 1)
+        (entry,) = out["zoomeye"]["degraded"]
+        self.assertEqual((entry["source"], entry["outcome"]), ("zoomeye", "fatal"))
+
+    @patch("zoomeye_enrich.time.sleep")
+    @patch("zoomeye_enrich.requests.get")
+    def test_an_error_inside_a_200_body_is_classified(self, mock_get, _sleep):
+        mock_get.return_value = _mock_response(200, {"error": "login_required", "message": "x"})
+        run_zoomeye_enrichment(_ips(4), self._settings())
+        self.assertEqual(mock_get.call_count, 1)
+
+    @patch("zoomeye_enrich.time.sleep")
+    @patch("zoomeye_enrich.requests.get")
+    def test_a_provider_that_dies_mid_pagination_keeps_the_pages_it_returned(self, mock_get, _sleep):
+        import requests as req_lib
+        page = _zoomeye_body([_full_match()])
+        page["total"] = 50
+        mock_get.side_effect = [_mock_response(200, page)] + [req_lib.exceptions.ReadTimeout("x")] * 10
+        out = run_zoomeye_enrichment(_combined_result(), self._settings(ZOOMEYE_MAX_RESULTS=5))
+        self.assertEqual(len(out["zoomeye"]["results"]), 1)
+        self.assertEqual(mock_get.call_count, 2)
 
 
 if __name__ == "__main__":

@@ -176,6 +176,11 @@ export function ReconLogsDrawer({
   // Render those red so the user plainly sees when/what was capped.
   const isResourceCapLine = (logText: string) => logText.includes('[RESOURCE-CAP]')
 
+  // Circuit breakers: the pipeline emits "[!][DEGRADED]..." when it could not
+  // fully re-check a source or host (a breaker opened, a host went unreachable).
+  // Render those amber so a partial run is plain in the log.
+  const isDegradedLine = (logText: string) => logText.includes('[!][DEGRADED]')
+
   const nodeFilterClass = (logText: string) => {
     const kind = nodeFilterLineKind(logText)
     if (kind === 'summary') return ` ${styles.logNodeFilter}`
@@ -264,7 +269,9 @@ export function ReconLogsDrawer({
                 key={index}
                 className={`${styles.logLine} ${getLogClassName(log.level)}${
                   isTargetsLine(log.log) ? ` ${styles.logTargets}` : ''
-                }${isResourceCapLine(log.log) ? ` ${styles.logResourceCap}` : ''}${nodeFilterClass(log.log)}`}
+                }${isResourceCapLine(log.log) ? ` ${styles.logResourceCap}` : ''}${
+                  isDegradedLine(log.log) ? ` ${styles.logDegraded}` : ''
+                }${nodeFilterClass(log.log)}`}
               >
                 <span className={styles.logTimestamp}>
                   {new Date(log.timestamp).toLocaleTimeString()}

@@ -372,6 +372,25 @@ def _is_valid_injected_hostname(hostname: str) -> bool:
     return all(allowed.match(label) for label in hostname.split("."))
 
 
+def _resolver_down() -> bool:
+    """True when the shared DNS resolver is already known down this run."""
+    try:
+        from recon.main_recon_modules.domain_recon import resolver_breaker
+        return resolver_breaker.is_open()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _san_resolve_cache():
+    """Per-run cache (a circuit_breaker RunCache) so the second SAN merge does
+    not re-resolve the first's names (the two calls at main.py:1643,1753)."""
+    try:
+        from recon.helpers import circuit_breaker as cb
+        return cb.run_cache("san_resolve")
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _resolves_to_routable(hostname: str) -> bool:
     """Resolve-and-check for a SAN-derived name.
 
@@ -382,18 +401,36 @@ def _resolves_to_routable(hostname: str) -> bool:
     """
     import socket
     from recon.main_recon_modules.ip_filter import is_non_routable_ip
+
+    cache = _san_resolve_cache()
+    if cache is not None:
+        found, value = cache.get(hostname)
+        if found:
+            return value
+
+    def _remember(result: bool) -> bool:
+        if cache is not None:
+            cache.put(hostname, result)
+        return result
+
+    # A resolver already proven down would make every getaddrinfo a timeout;
+    # an unresolved name is in scope anyway, so keep it without resolving (and
+    # don't cache it - the resolver may recover and a later pass can resolve it).
+    if _resolver_down():
+        return True
+
     try:
         infos = socket.getaddrinfo(hostname, None)
     except Exception:
-        return True
+        return _remember(True)
     for info in infos:
         try:
             addr = info[4][0]
         except (IndexError, TypeError):
             continue
         if is_non_routable_ip(addr):
-            return False
-    return True
+            return _remember(False)
+    return _remember(True)
 
 
 def merge_discovered_hostnames(

@@ -17,6 +17,7 @@
  */
 import prisma from '@/lib/prisma'
 import { writeAudit } from '@/lib/audit'
+import { readDegradedSourceCount } from '@/lib/scanCoverage'
 import {
   captureGraphSnapshot,
   storeSnapshot,
@@ -351,9 +352,17 @@ export async function reconcileScanJobStatus(
         }))?.nodeCount ?? null
       : null
 
+    // Stamp how many finding sources this run could not fully re-check, read
+    // from the graph coverage record (the only reliable carrier). full_recon
+    // only; null on any other kind or when coverage is unknown.
+    const degradedSources =
+      kind === 'full_recon' && mapped === 'completed'
+        ? await readDegradedSourceCount(projectId)
+        : null
+
     await prisma.scanJob.update({
       where: { id: open.id },
-      data: { status: mapped, finishedAt: new Date(), nodeCount },
+      data: { status: mapped, finishedAt: new Date(), nodeCount, degradedSources },
     })
   } catch (err) {
     console.error('[scanTimeline] scan-job reconcile failed (continuing):', err)

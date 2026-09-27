@@ -51,6 +51,7 @@ def _mock_response(status_code: int = 200, json_data: dict | None = None, text: 
     m = MagicMock()
     m.status_code = status_code
     m.text = text or ""
+    m.headers = {}
     if json_data is not None:
         m.json.return_value = json_data
     return m
@@ -362,12 +363,15 @@ class TestVtGet(unittest.TestCase):
     @patch("virustotal_enrich.time.sleep")
     @patch("virustotal_enrich.requests.get")
     def test_429_sleeps_and_retries_once(self, mock_get, mock_sleep):
+        """first 429 -> a shared 60s pause (no Retry-After; the old code slept 65s
+        in every worker separately) -> retry -> second 429 -> give up."""
+        from recon.helpers import circuit_breaker as cb
+        cb.set_clock(now=lambda: 1000.0)  # a frozen clock: the pause is exactly 60s
         mock_get.return_value = _mock_response(429, {}, text="rate limited")
         result = _vt_get("domains/example.com", "key", None)
         self.assertIsNone(result)
-        # first 429 → sleep 65s → retry → second 429 → give up
         self.assertEqual(mock_get.call_count, 2)
-        mock_sleep.assert_called_once_with(65)
+        mock_sleep.assert_called_once_with(60.0)
 
     @patch("virustotal_enrich.requests.get")
     def test_500_returns_none(self, mock_get):
@@ -591,7 +595,9 @@ class TestRunVirustotalEnrichment(unittest.TestCase):
         out = run_virustotal_enrichment(_combined_result(), _default_settings())
         self.assertIsNone(out["virustotal"]["domain_report"])
         self.assertEqual(out["virustotal"]["ip_reports"], [])
-        long_sleeps = [c for c in mock_sleep.call_args_list if c[0] and c[0][0] == 65]
+        # One shared pause for every worker: what is left of 60s (no
+        # Retry-After) by the time the retry is admitted.
+        long_sleeps = [c for c in mock_sleep.call_args_list if c[0] and 59 <= c[0][0] <= 60]
         self.assertGreaterEqual(len(long_sleeps), 1)
 
 
@@ -664,6 +670,50 @@ class TestRunVirustotalEnrichmentIsolated(unittest.TestCase):
                       "popularity_alexa", "popularity_umbrella",
                       "last_dns_records_date", "last_https_certificate_date", "registrar"):
             self.assertIn(field, dr, f"missing domain field: {field}")
+
+
+class TestVirustotalCircuitBreaker(unittest.TestCase):
+    def _cr(self, n):
+        return {"domain": "", "metadata": {"ip_mode": True,
+                                           "expanded_ips": [f"1.2.3.{i}" for i in range(1, n + 1)]},
+                "dns": {}}
+
+    @patch("virustotal_enrich.time.sleep")
+    @patch("virustotal_enrich.requests.get")
+    def test_after_it_opens_no_worker_waits_out_its_slot(self, mock_get, mock_sleep):
+        """20 targets x 15s used to be ~5 min of idle waiting after the provider
+        was known dead: the breaker must be checked before the rate limiter."""
+        import requests as req_lib
+        mock_get.side_effect = req_lib.exceptions.ReadTimeout("x")
+        out = run_virustotal_enrichment(self._cr(20), _default_settings(VIRUSTOTAL_WORKERS=1))
+        self.assertEqual(mock_get.call_count, 5)
+        # Only the five admitted lookups waited for a rate-limiter slot.
+        self.assertLessEqual(mock_sleep.call_count, 5)
+        (entry,) = out["virustotal"]["degraded"]
+        self.assertEqual((entry["source"], entry["skipped"]), ("virustotal:report", 15))
+
+    @patch("virustotal_enrich.time.sleep")
+    @patch("virustotal_enrich.requests.get")
+    def test_a_refused_key_means_exactly_one_call(self, mock_get, _sleep):
+        mock_get.return_value = _mock_response(401, {"error": {"code": "WrongCredentialsError"}})
+        out = run_virustotal_enrichment(self._cr(10), _default_settings(VIRUSTOTAL_WORKERS=1))
+        self.assertEqual(mock_get.call_count, 1)
+        (entry,) = out["virustotal"]["degraded"]
+        self.assertEqual((entry["source"], entry["outcome"]), ("virustotal", "fatal"))
+
+    @patch("virustotal_enrich.time.sleep")
+    @patch("virustotal_enrich.requests.get")
+    def test_ten_404s_never_trip_it(self, mock_get, _sleep):
+        mock_get.return_value = _mock_response(404, {})
+        out = run_virustotal_enrichment(self._cr(10), _default_settings(VIRUSTOTAL_WORKERS=1))
+        self.assertEqual(mock_get.call_count, 10)
+        self.assertNotIn("degraded", out["virustotal"])
+
+    def test_an_exhausted_pool_never_resurrects_the_plain_key(self):
+        from recon.helpers.key_rotation import KeyRotator
+        rot = KeyRotator(["only"], rotate_every_n=10)
+        rot.mark_bad("only")
+        self.assertEqual(_effective_key("only", rot), "")
 
 
 if __name__ == "__main__":

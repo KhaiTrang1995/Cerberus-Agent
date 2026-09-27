@@ -93,42 +93,38 @@ def _censys_normalize_software(svc: dict) -> list:
     return out
 
 
-def _censys_get_host(ip: str, api_token: str, org_id: str) -> tuple[dict | None, bool]:
-    """GET /v3/global/asset/host/{ip} with Bearer token auth.
+def _censys_breaker():
+    from recon.helpers import circuit_breaker as cb
+    return cb.get_breaker("censys:host", label="Censys", parent="censys")
 
-    Returns (result_or_none, rate_limited). If rate_limited, caller should stop.
-    """
+
+def _censys_classify(resp):
+    """200 with a host record is OK; 200 without one, and 404, are answers
+    (no data). 401/403 refuse the token or org id; 429 is a rate limit."""
+    from recon.helpers import circuit_breaker as cb
+    res = cb.json_result(resp, keyed=True)
+    if res.ok:
+        result = res.data.get("result") if isinstance(res.data, dict) else None
+        if isinstance(result, dict):
+            return cb.CallResult(result, cb.Outcome.OK, res.detail)
+        return cb.CallResult(None, cb.Outcome.NO_DATA, res.detail)
+    return res
+
+
+def _censys_get_host(ip: str, api_token: str, org_id: str, *, admitted: bool = False):
+    """GET /v3/global/asset/host/{ip} with Bearer token auth, through the
+    Censys breaker. Returns a CallResult whose data is the host record."""
+    from recon.helpers import circuit_breaker as cb
     url = f"{CENSYS_API_BASE}/asset/host/{ip}"
     headers = {
         "Authorization": f"Bearer {api_token}",
         "Accept": "application/json",
     }
     params = {"organization_id": org_id}
-    try:
-        resp = requests.get(url, headers=headers, params=params, timeout=30)
-        if resp.status_code == 200:
-            body = resp.json()
-            result = body.get("result")
-            if isinstance(result, dict):
-                return result, False
-            logger.debug(f"Censys: unexpected body for {ip}")
-            return None, False
-        if resp.status_code == 404:
-            logger.debug(f"Censys 404 — no host data for {ip}")
-            return None, False
-        if resp.status_code == 429:
-            logger.warning("Censys rate limit (429) — stopping host fetches for this run")
-            print("[!][Censys] Rate limit hit — skipping remaining hosts")
-            return None, True
-        if resp.status_code in (401, 403):
-            logger.warning(f"Censys {resp.status_code} — auth failed (check token/org-id)")
-            print(f"[!][Censys] Auth error {resp.status_code} — verify API Token and Organization ID")
-            return None, True
-        logger.warning(f"Censys {resp.status_code} for {ip}: {resp.text[:200]}")
-        return None, False
-    except requests.RequestException as e:
-        logger.warning(f"Censys request failed for {ip}: {e}")
-        return None, False
+    return cb.guarded_call(
+        _censys_breaker(),
+        lambda: requests.get(url, headers=headers, params=params, timeout=30),
+        _censys_classify, admitted=admitted)
 
 
 def _censys_extract_tls(svc: dict) -> dict | None:
@@ -321,6 +317,9 @@ def run_censys_enrichment(combined_result: dict, settings: dict[str, Any]) -> di
     print(f"[+][Censys] Extracted {len(ips)} unique IPs for enrichment")
 
     censys_data: dict[str, Any] = {"hosts": []}
+    from recon.helpers import circuit_breaker as cb
+    censys_scope = cb.scope("censys", label="Censys", unit="IP(s)")
+    breaker = _censys_breaker()
 
     try:
         if not ips:
@@ -328,20 +327,17 @@ def run_censys_enrichment(combined_result: dict, settings: dict[str, Any]) -> di
         else:
             max_workers = settings.get("CENSYS_WORKERS", 5)
             rate_limiter = _RateLimiter(0.5)
-            stop_rl = threading.Event()
 
             def _enrich_single_ip(ip, api_token, org_id, rate_limiter):
                 """Enrich a single IP via Censys. Returns entry dict or None."""
-                if stop_rl.is_set():
+                # Before the wait: the limiter reserves a slot before sleeping.
+                if not breaker.allow():
                     return None
                 rate_limiter.wait()
-                result, rate_limited = _censys_get_host(ip, api_token, org_id)
-                if rate_limited:
-                    stop_rl.set()
+                res = _censys_get_host(ip, api_token, org_id, admitted=True)
+                if not res.ok:
                     return None
-                if result is None:
-                    return None
-                entry = _build_censys_host_entry(ip, result)
+                entry = _build_censys_host_entry(ip, res.data)
                 logger.info(f"  Censys host: {ip} -- {len(entry['services'])} services")
                 return entry
 
@@ -357,15 +353,16 @@ def run_censys_enrichment(combined_result: dict, settings: dict[str, Any]) -> di
                         if entry is not None:
                             censys_data["hosts"].append(entry)
                     except Exception as exc:
-                        logger.warning(f"Censys enrichment thread error for {futures[future]}: {exc}")
+                        logger.warning(f"Censys enrichment thread error: {type(exc).__name__}")
 
             print(f"[+][Censys] Enrichment complete: {len(censys_data['hosts'])} hosts")
 
     except Exception as e:
-        logger.error(f"Censys enrichment failed: {e}")
-        print(f"[!][Censys] Enrichment error: {e}")
+        logger.error(f"Censys enrichment failed: {type(e).__name__}")
+        print(f"[!][Censys] Enrichment error: {type(e).__name__}")
         print(f"[!][Censys] Pipeline continues with partial or empty Censys data")
 
+    censys_scope.finish("censys_enrich", payload=censys_data)
     combined_result["censys"] = censys_data
     return combined_result
 

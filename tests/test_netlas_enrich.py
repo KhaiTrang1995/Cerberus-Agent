@@ -5,8 +5,6 @@ Mocks requests.get for https://app.netlas.io/api/responses/.
 """
 from __future__ import annotations
 
-import pytest
-
 import sys
 import unittest
 from pathlib import Path
@@ -446,10 +444,14 @@ class TestNetlasEnrich(unittest.TestCase):
 
     @patch("netlas_enrich.time.sleep")
     @patch("netlas_enrich.requests.get")
-    @pytest.mark.xfail(strict=True, reason="Part H triage (bucket-3): enrichment rate-limit/stop-count behavior drifted (worker-pool concurrency changes exact API-call counts); may indicate an extra call after rate-limit - needs confirmation, see green-up report")
-    def test_ip_mode_stops_on_rate_limit(self, mock_get, _sleep):
+    def test_ip_mode_stops_after_two_rate_limits_in_a_row(self, mock_get, _sleep):
+        """A first 429 pauses and retries once; a second one in a row stops
+        Netlas for the run, so the third IP is never requested. (The old
+        contract - stop on the first 429 - printed "stopping" with no stop
+        flag behind it and kept querying.)"""
         mock_get.side_effect = [
             _mock_response(200, _netlas_body()),
+            _mock_response(429, {}, text="rl"),
             _mock_response(429, {}, text="rl"),
         ]
         cr = {
@@ -457,9 +459,12 @@ class TestNetlasEnrich(unittest.TestCase):
             "metadata": {"ip_mode": True, "expanded_ips": ["93.184.1.1", "93.184.1.2", "93.184.1.3"]},
             "dns": {},
         }
-        run_netlas_enrichment(cr, self._settings())
-        # Stops after the 429, so only 2 calls made (not 3)
-        self.assertEqual(mock_get.call_count, 2)
+        out = run_netlas_enrichment(cr, self._settings(NETLAS_WORKERS=1))
+        self.assertEqual(mock_get.call_count, 3)
+        self.assertEqual(len(out["netlas"]["results"]), 1)
+        (entry,) = out["netlas"]["degraded"]
+        self.assertEqual((entry["source"], entry["outcome"], entry["skipped"]),
+                         ("netlas", "rate_limit", 1))
 
     @patch("netlas_enrich.time.sleep")
     @patch("netlas_enrich.requests.get")
@@ -468,6 +473,68 @@ class TestNetlasEnrich(unittest.TestCase):
         out = run_netlas_enrichment(cr, self._settings())
         mock_get.assert_not_called()
         self.assertEqual(out["netlas"]["results"], [])
+
+
+def _ip_mode(n: int) -> dict:
+    return {"domain": "", "dns": {},
+            "metadata": {"ip_mode": True, "expanded_ips": [f"1.2.3.{i}" for i in range(1, n + 1)]}}
+
+
+class TestNetlasCircuitBreaker(unittest.TestCase):
+    def _settings(self, **overrides) -> dict:
+        base = {"NETLAS_ENABLED": True, "NETLAS_API_KEY": "nl-key", "NETLAS_KEY_ROTATOR": None,
+                "NETLAS_MAX_RESULTS": 100, "NETLAS_WORKERS": 1}
+        base.update(overrides)
+        return base
+
+    @patch("netlas_enrich.time.sleep")
+    @patch("netlas_enrich.requests.get")
+    def test_five_timeouts_mean_the_sixth_ip_is_never_requested(self, mock_get, _sleep):
+        import requests as req_lib
+        mock_get.side_effect = req_lib.exceptions.ConnectTimeout("x")
+        out = run_netlas_enrichment(_ip_mode(10), self._settings())
+        self.assertEqual(mock_get.call_count, 5)
+        (entry,) = out["netlas"]["degraded"]
+        self.assertEqual((entry["source"], entry["skipped"]), ("netlas:responses", 5))
+
+    @patch("netlas_enrich.time.sleep")
+    @patch("netlas_enrich.requests.get")
+    def test_ten_404s_never_trip_it(self, mock_get, _sleep):
+        mock_get.return_value = _mock_response(404, {})
+        out = run_netlas_enrichment(_ip_mode(10), self._settings())
+        self.assertEqual(mock_get.call_count, 10)
+        self.assertNotIn("degraded", out["netlas"])
+
+    @patch("netlas_enrich.time.sleep")
+    @patch("netlas_enrich.requests.get")
+    def test_a_refused_key_means_exactly_one_call(self, mock_get, _sleep):
+        for status, text in ((401, "unauthorized"), (400, '{"detail":"API key not found"}')):
+            with self.subTest(status=status):
+                from recon.helpers import circuit_breaker as cb
+                cb.reset_registry()
+                mock_get.reset_mock()
+                mock_get.return_value = _mock_response(status, {}, text=text)
+                out = run_netlas_enrichment(_ip_mode(10), self._settings())
+                self.assertEqual(mock_get.call_count, 1)
+                (entry,) = out["netlas"]["degraded"]
+                self.assertEqual((entry["source"], entry["outcome"]), ("netlas", "fatal"))
+
+    @patch("netlas_enrich.time.sleep")
+    @patch("netlas_enrich.requests.get")
+    def test_a_malformed_query_400_is_not_a_refused_key(self, mock_get, _sleep):
+        mock_get.return_value = _mock_response(400, {}, text='{"detail":"bad query syntax"}')
+        run_netlas_enrichment(_ip_mode(3), self._settings())
+        self.assertEqual(mock_get.call_count, 3)
+
+    @patch("netlas_enrich.time.sleep")
+    @patch("netlas_enrich.requests.get")
+    def test_the_rotator_supplies_the_key_per_request(self, mock_get, _sleep):
+        from recon.helpers.key_rotation import KeyRotator
+        mock_get.return_value = _mock_response(404, {})
+        rotator = KeyRotator(["nl-a", "nl-b"], rotate_every_n=1)
+        run_netlas_enrichment(_ip_mode(2), self._settings(NETLAS_KEY_ROTATOR=rotator))
+        used = [c.kwargs["headers"]["X-API-Key"] for c in mock_get.call_args_list]
+        self.assertEqual(used, ["nl-a", "nl-b"])
 
 
 if __name__ == "__main__":

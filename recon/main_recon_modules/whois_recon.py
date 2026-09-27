@@ -4,6 +4,7 @@ This module provides comprehensive WHOIS lookup capabilities for domain reconnai
 Output is saved as structured JSON to the output folder.
 """
 
+import ipaddress
 import json
 import time
 import whois
@@ -18,57 +19,110 @@ OUTPUT_DIR = Path(__file__).parent / "output"
 DEFAULT_WHOIS_MAX_RETRIES = 6
 
 
+class WhoisUnavailable(Exception):
+    """WHOIS is paused or stopped for this run: the `whois` circuit breaker is open."""
+
+
+def _is_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(str(value).strip())
+        return True
+    except ValueError:
+        return False
+
+
+def _query(domain: str, is_ip: bool):
+    """One WHOIS call, typed: (result, outcome, detail, retry_once_only).
+
+    python-whois defaults to ignore_socket_errors=True, which turns a dead
+    server into the text "Socket not responding: ..." that parses as an empty
+    entry, so a dead server looked exactly like "no data". Asking it to raise
+    keeps the two apart.
+    """
+    from recon.helpers.circuit_breaker import Outcome
+    from whois.exceptions import (
+        WhoisDomainNotFoundError, WhoisError, WhoisQuotaExceededError,
+    )
+    try:
+        w = whois.whois(domain, ignore_socket_errors=False, quiet=True)
+    except WhoisQuotaExceededError:
+        return None, Outcome.FATAL, "quota exceeded", False
+    except WhoisDomainNotFoundError:
+        return {}, Outcome.NO_DATA, "no record", False
+    except WhoisError as e:
+        # The message is read to classify, never logged.
+        if "no output" in str(e).lower():
+            if is_ip:
+                return {}, Outcome.NO_DATA, "no output", False
+            return None, Outcome.TRANSIENT, "no output", True
+        return None, Outcome.TRANSIENT, type(e).__name__, False
+    except Exception as e:  # noqa: BLE001 - socket errors and timeouts
+        return None, Outcome.TRANSIENT, type(e).__name__, False
+    if w and (w.domain_name or w.registrar or w.creation_date):
+        return w, Outcome.OK, "", False
+    # An empty parse is a permanent answer (typical for an IP without reverse
+    # DNS): returned as-is, never retried.
+    return (w if w is not None else {}), Outcome.NO_DATA, "empty record", False
+
+
 def get_whois_data(domain: str, max_retries: int = None, settings: Optional[dict] = None):
     """
-    Get WHOIS information for a domain with retry logic.
+    Get WHOIS information for a domain or an IP.
+
+    An empty answer is an answer and comes back at once: a parse with no
+    domain_name/registrar/creation_date, an unknown domain, or (for an IP) no
+    output at all. Only socket errors and timeouts are retried, with
+    exponential backoff, and only while the process-wide ``whois`` circuit
+    breaker is closed: three consecutive failures stop WHOIS for the run. A
+    domain that returns no output gets one short retry.
 
     Args:
-        domain: The domain to lookup (e.g., "example.com")
-        max_retries: Maximum retry attempts (overrides settings if provided)
+        domain: The domain or IP to look up (e.g., "example.com")
+        max_retries: Maximum attempts (overrides settings if provided)
         settings: Settings dict from project_settings.get_settings()
 
     Returns:
         Tuple of (whois_result_dict_like_object, domain_string).
 
     Raises:
-        Exception: If WHOIS lookup fails after all retries.
+        WhoisUnavailable: the whois breaker is open.
+        Exception: no answer was obtained (the message carries no server text).
     """
     if max_retries is None:
         if settings:
             max_retries = settings.get('WHOIS_MAX_RETRIES', DEFAULT_WHOIS_MAX_RETRIES)
         else:
             max_retries = DEFAULT_WHOIS_MAX_RETRIES
-    
-    last_error = None
-    
-    for attempt in range(max_retries):
-        try:
-            w = whois.whois(domain)
-            # Check if we got valid data (not all nulls)
-            if w and (w.domain_name or w.registrar or w.creation_date):
-                return w, domain
-            # If data is empty, treat as failure and retry
-            if attempt < max_retries - 1:
-                delay = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-                print(f"[!][WHOIS] Returned empty data, retrying in {delay}s... (attempt {attempt + 1}/{max_retries})")
-                time.sleep(delay)
-                continue
-        except Exception as e:
-            last_error = e
-            if attempt < max_retries - 1:
-                delay = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
-                print(f"[!][WHOIS] Failed: {str(e)}, retrying in {delay}s... (attempt {attempt + 1}/{max_retries})")
-                time.sleep(delay)
-            continue
-    
-    # If we got here with empty data but no exception, return the last result
-    try:
-        w = whois.whois(domain)
-        return w, domain
-    except Exception as e:
-        last_error = e
-    
-    raise Exception(f"WHOIS lookup failed for {domain} after {max_retries} attempts: {str(last_error)}")
+    attempts = max(1, int(max_retries or 1))
+
+    from recon.helpers import circuit_breaker as cb
+    breaker = cb.get_breaker("whois", label="WHOIS", threshold=cb.INTERNAL_THRESHOLD)
+    is_ip = _is_ip(domain)
+    last_detail = "no answer"
+    short_retry_used = False
+
+    for attempt in range(attempts):
+        if not breaker.allow():
+            raise WhoisUnavailable(f"WHOIS paused for this run ({breaker.detail})")
+        epoch = breaker.epoch()
+        result, outcome, detail, retry_once_only = _query(domain, is_ip)
+        breaker.record(outcome, detail, epoch=epoch)
+        if outcome in (cb.Outcome.OK, cb.Outcome.NO_DATA):
+            return result, domain
+        if outcome is cb.Outcome.FATAL:
+            raise Exception(f"WHOIS lookup refused for {domain}: {detail}")
+        last_detail = detail
+        if retry_once_only:
+            if short_retry_used:
+                break
+            short_retry_used = True
+        if attempt >= attempts - 1 or breaker.is_open:
+            break
+        delay = 1 if retry_once_only else 2 ** attempt
+        print(f"[!][WHOIS] {detail}, retrying in {delay}s... (attempt {attempt + 1}/{attempts})")
+        time.sleep(delay)
+
+    raise Exception(f"WHOIS lookup failed for {domain}: {last_detail}")
 
 
 def _serialize_for_json(value: Any) -> Any:
@@ -149,18 +203,7 @@ def save_json_report(data: dict, domain: str, output_dir: Path = OUTPUT_DIR) -> 
     return str(filepath)
 
 
-def whois_lookup(domain: str, save_output: bool = True, settings: Optional[dict] = None) -> dict:
-    """
-    Main function to perform a WHOIS lookup and save results as JSON.
-
-    Args:
-        domain: The domain to lookup (e.g., "example.com")
-        save_output: Whether to save the JSON report to file.
-        settings: Settings dict from project_settings.get_settings()
-
-    Returns:
-        Dictionary containing all WHOIS data with metadata.
-    """
+def print_whois_settings(settings: Optional[dict]) -> None:
     if settings:
         from recon.helpers import print_effective_settings
         print_effective_settings(
@@ -170,6 +213,25 @@ def whois_lookup(domain: str, save_output: bool = True, settings: Optional[dict]
                 ("WHOIS_MAX_RETRIES", "Retry policy"),
             ],
         )
+
+
+def whois_lookup(domain: str, save_output: bool = True, settings: Optional[dict] = None,
+                 print_settings: bool = True) -> dict:
+    """
+    Main function to perform a WHOIS lookup and save results as JSON.
+
+    Args:
+        domain: The domain to lookup (e.g., "example.com")
+        save_output: Whether to save the JSON report to file.
+        settings: Settings dict from project_settings.get_settings()
+        print_settings: Print the settings banner. A caller looping over many
+            targets prints it once itself and passes False.
+
+    Returns:
+        Dictionary containing all WHOIS data with metadata.
+    """
+    if print_settings:
+        print_whois_settings(settings)
 
     whois_result, domain = get_whois_data(domain, settings=settings)
     result = whois_to_dict(whois_result, domain)

@@ -8,6 +8,7 @@ Supports optional API key rotation via FOFA_KEY_ROTATOR.
 from __future__ import annotations
 
 import base64
+import re
 import time
 import threading
 import logging
@@ -73,10 +74,10 @@ def _extract_ips_from_recon(combined_result: dict) -> list[str]:
 
 
 def _fofa_effective_key(settings: dict, key_rotator) -> str:
-    api_key = settings.get("FOFA_API_KEY", "") or ""
-    if key_rotator and getattr(key_rotator, "has_keys", False):
-        return key_rotator.current_key or api_key
-    return api_key
+    """The key to use now; "" once every pooled key has been refused (the main
+    key was the pool's first member, so falling back to it would resurrect it)."""
+    from recon.helpers import circuit_breaker as cb
+    return cb.KeyPool(key_rotator, settings.get("FOFA_API_KEY", "") or "", label="FOFA").current()
 
 
 def _fofa_auth_params(api_key: str) -> dict:
@@ -95,39 +96,75 @@ def _fofa_auth_params(api_key: str) -> dict:
     return {"key": api_key.strip()}
 
 
+def _fofa_breaker():
+    from recon.helpers import circuit_breaker as cb
+    return cb.get_breaker("fofa:search", label="FOFA", parent="fofa")
+
+
+# FOFA reports most errors inside an HTTP 200 body ({"error": true, "errmsg":
+# ...}), in English or Chinese. The message is read to classify, never logged:
+# only its numeric error code reaches a detail.
+_FOFA_KEY_MARKERS = ("account invalid", "invalid key", "key invalid", "api key",
+                     "账号无效", "[-700]")
+_FOFA_CREDIT_MARKERS = ("余额不足", "insufficient", "f点", "quota", "credit", "[820031]")
+_FOFA_RATE_MARKERS = ("too fast", "too frequent", "too many", "频繁", "过快")
+_FOFA_ERROR_CODE = re.compile(r"\[(-?\d{1,7})\]")
+
+
+def _fofa_classify(resp):
+    from recon.helpers import circuit_breaker as cb
+    res = cb.json_result(resp, keyed=True)
+    if not res.ok:
+        return res
+    data = res.data if isinstance(res.data, dict) else {}
+    if data.get("error"):
+        msg = str(data.get("errmsg") or "").lower()
+        code = _FOFA_ERROR_CODE.search(msg)
+        tag = f"FOFA error {code.group(1)}" if code else "FOFA error"
+        if any(m in msg for m in _FOFA_KEY_MARKERS):
+            return cb.CallResult(None, cb.Outcome.FATAL, f"{tag}: key rejected")
+        if any(m in msg for m in _FOFA_CREDIT_MARKERS):
+            return cb.CallResult(None, cb.Outcome.FATAL, f"{tag}: credit exhausted")
+        if any(m in msg for m in _FOFA_RATE_MARKERS):
+            return cb.CallResult(None, cb.Outcome.RATE_LIMIT, f"{tag}: rate limited")
+        return cb.CallResult(None, cb.Outcome.TRANSIENT, tag)
+    if not data.get("results"):
+        return cb.CallResult(data, cb.Outcome.NO_DATA, res.detail)
+    return cb.CallResult(data, cb.Outcome.OK, res.detail)
+
+
+def _fofa_query(query: str, keys, size: int, *, admitted: bool = False):
+    """Run FOFA search/all through the FOFA breaker; returns a CallResult.
+
+    ``keys`` is a KeyPool: the key is read per request, so rotation happens,
+    and a refused key moves on to the next pooled one.
+    """
+    from recon.helpers import circuit_breaker as cb
+    q_b64 = base64.b64encode(query.encode("utf-8")).decode("ascii")
+
+    def send(key):
+        params = {
+            **_fofa_auth_params(key),
+            "qbase64": q_b64,
+            "fields": FOFA_FIELDS,
+            "size": size,
+        }
+        return requests.get(FOFA_API_URL, params=params, timeout=30)
+
+    return cb.guarded_call(_fofa_breaker(), send, _fofa_classify, keys=keys, admitted=admitted)
+
+
 def _fofa_search(
     query: str,
     api_key: str,
     size: int,
     key_rotator=None,
 ) -> dict | None:
-    """Run FOFA search/all. Returns API JSON dict or None on hard failure / 429."""
-    q_b64 = base64.b64encode(query.encode("utf-8")).decode("ascii")
-    params = {
-        **_fofa_auth_params(api_key),
-        "qbase64": q_b64,
-        "fields": FOFA_FIELDS,
-        "size": size,
-    }
-    try:
-        resp = requests.get(FOFA_API_URL, params=params, timeout=30)
-        if key_rotator:
-            key_rotator.tick()
-        if resp.status_code == 429:
-            logger.warning("FOFA rate limit (429)")
-            print("[!][FOFA] Rate limit hit — stopping FOFA queries for this run")
-            return None
-        if resp.status_code != 200:
-            logger.warning(f"FOFA {resp.status_code}: {resp.text[:200]}")
-            return None
-        data = resp.json()
-        if data.get("error"):
-            logger.warning(f"FOFA API error: {data.get('errmsg', data)}")
-            return None
-        return data
-    except requests.RequestException as e:
-        logger.warning(f"FOFA request failed: {e}")
-        return None
+    """Run FOFA search/all. Returns API JSON dict, or None on a failure, a
+    refused key, a rate limit or a paused FOFA."""
+    from recon.helpers import circuit_breaker as cb
+    res = _fofa_query(query, cb.KeyPool(key_rotator, api_key, label="FOFA"), size)
+    return res.data if res.answered else None
 
 
 _FOFA_FIELD_NAMES = [
@@ -196,9 +233,10 @@ def run_fofa_enrichment(combined_result: dict, settings: dict[str, Any]) -> dict
         ],
     )
 
-    key_rotator = settings.get("FOFA_KEY_ROTATOR")
-    api_key = _fofa_effective_key(settings, key_rotator)
-    if not api_key:
+    from recon.helpers import circuit_breaker as cb
+    keys = cb.KeyPool(settings.get("FOFA_KEY_ROTATOR"), settings.get("FOFA_API_KEY", "") or "",
+                      label="FOFA")
+    if not keys.has_key:
         logger.warning("FOFA API key missing — skipping enrichment")
         print("[!][FOFA] FOFA_API_KEY not configured — skipping")
         return combined_result
@@ -217,34 +255,33 @@ def run_fofa_enrichment(combined_result: dict, settings: dict[str, Any]) -> dict
     fofa_data: dict[str, Any] = {"results": [], "total": 0}
     aggregated: list[dict] = []
     total_hint = 0
+    fofa_scope = cb.scope("fofa", label="FOFA", unit="query(ies)")
+    breaker = _fofa_breaker()
 
     try:
         if is_ip_mode:
             print(f"[+][FOFA] IP mode -- {len(ips)} address(es)")
             max_workers = settings.get("FOFA_WORKERS", 5)
             rate_limiter = _RateLimiter(1.0)
-            stop_flag = threading.Event()
             results_lock = threading.Lock()
 
-            def _enrich_single_ip(ip, api_key, key_rotator, rate_limiter):
+            def _enrich_single_ip(ip, rate_limiter):
                 """Query FOFA for a single IP. Returns (rows, total_hint) or None."""
-                if stop_flag.is_set():
+                # Before the wait: the limiter reserves a slot before sleeping.
+                if not breaker.allow():
                     return None
                 rate_limiter.wait()
-                if stop_flag.is_set():
-                    return None
                 q = f'ip="{ip}"'
                 size = min(per_request_size, max_results)
-                data = _fofa_search(q, api_key, size, key_rotator=key_rotator)
-                if data is None:
-                    stop_flag.set()
+                res = _fofa_query(q, keys, size, admitted=True)
+                if not res.answered:
                     return None
-                rows, t = _parse_fofa_rows(data)
+                rows, t = _parse_fofa_rows(res.data or {})
                 return rows, t
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {
-                    executor.submit(_enrich_single_ip, ip, api_key, key_rotator, rate_limiter): ip
+                    executor.submit(_enrich_single_ip, ip, rate_limiter): ip
                     for ip in ips
                 }
                 for future in as_completed(futures):
@@ -256,16 +293,16 @@ def run_fofa_enrichment(combined_result: dict, settings: dict[str, Any]) -> dict
                                 total_hint = max(total_hint, t)
                                 aggregated.extend(rows)
                     except Exception as exc:
-                        logger.warning(f"FOFA enrichment thread error for {futures[future]}: {exc}")
+                        logger.warning(f"FOFA enrichment thread error: {type(exc).__name__}")
         else:
             if not domain:
                 print("[!][FOFA] No domain in scope — skipping")
             else:
                 print(f"[+][FOFA] Domain mode — {domain}")
                 q = f'domain="{domain}"'
-                data = _fofa_search(q, api_key, per_request_size, key_rotator=key_rotator)
-                if data is not None:
-                    rows, total_hint = _parse_fofa_rows(data)
+                res = _fofa_query(q, keys, per_request_size)
+                if res.answered:
+                    rows, total_hint = _parse_fofa_rows(res.data or {})
                     aggregated = rows[:max_results]
                 time.sleep(1)
 
@@ -274,12 +311,13 @@ def run_fofa_enrichment(combined_result: dict, settings: dict[str, Any]) -> dict
         print(f"[+][FOFA] Collected {len(fofa_data['results'])} result row(s) (total hint: {fofa_data['total']})")
 
     except Exception as e:
-        logger.error(f"FOFA enrichment failed: {e}")
-        print(f"[!][FOFA] Enrichment error: {e}")
+        logger.error(f"FOFA enrichment failed: {type(e).__name__}")
+        print(f"[!][FOFA] Enrichment error: {type(e).__name__}")
         print(f"[!][FOFA] Pipeline continues with partial or empty FOFA data")
         fofa_data["results"] = aggregated[:max_results]
         fofa_data["total"] = total_hint if total_hint else len(fofa_data["results"])
 
+    fofa_scope.finish("fofa_enrich", payload=fofa_data)
     combined_result["fofa"] = fofa_data
     return combined_result
 

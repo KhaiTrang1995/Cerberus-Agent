@@ -17,6 +17,7 @@ import glob
 import json
 import time
 import shutil
+import threading
 import dns.resolver
 import dns.reversename
 from pathlib import Path
@@ -34,6 +35,159 @@ from helpers.ai_signal_catalog import match_ai_txt_hint, match_ai_ns_hint
 
 OUTPUT_DIR = Path(__file__).parent / "output"
 DNS_RECORD_TYPES = ['A', 'AAAA', 'MX', 'NS', 'TXT', 'SOA', 'CNAME']
+
+
+# ---------------------------------------------------------------------------
+# DNS resolver health (circuit_breaker integration)
+# ---------------------------------------------------------------------------
+# The recursive resolver is a single shared dependency: when it dies, EVERY
+# name lookup times out and the old code retried each 80x7 lookup three times.
+# A canary tells a dead resolver apart from a dead name: on a transient failure
+# we re-resolve a root that already answered this run. Canary answers -> the
+# resolver is fine, this name is just unreachable (per-zone, stay closed);
+# canary times out too -> the resolver itself is down, open and stop retrying.
+
+# Errors that are a definitive answer ("this name does not resolve"), never a
+# resolver fault: no retry, no breaker impact.
+def _dns_definitive_errors():
+    import dns.resolver
+    import dns.name
+    errs = (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer)
+    for extra in ("YXDOMAIN",):
+        e = getattr(dns.resolver, extra, None)
+        if e is not None:
+            errs = errs + (e,)
+    # dns.name.* syntax errors (EmptyLabel, LabelTooLong, NameTooLong, ...)
+    errs = errs + (dns.name.EmptyLabel, dns.name.LabelTooLong,
+                   dns.name.NameTooLong, dns.name.BadEscape)
+    return errs
+
+
+def _cb_enabled() -> bool:
+    try:
+        from recon.helpers import circuit_breaker as cb
+        return cb.enabled()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+class _ResolverBreaker:
+    """Shared DNS resolver liveness, canary-gated (see the block comment)."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._open = False
+        self._canary = None
+        self._noted = False
+
+    def reset(self):
+        with self._lock:
+            self._open = False
+            self._canary = None
+            self._noted = False
+
+    def set_canary(self, name: str):
+        if not name:
+            return
+        with self._lock:
+            if self._canary is None:
+                self._canary = name
+
+    def is_open(self) -> bool:
+        if not _cb_enabled():
+            return False
+        with self._lock:
+            return self._open
+
+    def _canary_responds(self) -> bool:
+        """True if the canary root gets ANY definitive DNS response (even
+        NXDOMAIN = the resolver is reachable); False on a transient failure."""
+        with self._lock:
+            canary = self._canary
+        if not canary:
+            return True  # no canary yet -> cannot blame the resolver
+        import dns.resolver
+        try:
+            dns.resolver.resolve(canary, 'A', lifetime=5)
+            return True
+        except (dns.resolver.NXDOMAIN, dns.resolver.NoAnswer):
+            return True
+        except Exception:  # noqa: BLE001 - Timeout / NoNameservers / etc.
+            return False
+
+    def note_transient(self) -> bool:
+        """Record a transient resolution failure. Returns True when the resolver
+        is now considered DOWN (the caller should stop retrying this run)."""
+        if not _cb_enabled():
+            return False
+        with self._lock:
+            if self._open:
+                return True
+            have_canary = self._canary is not None
+        if not have_canary:
+            return False  # can't distinguish a dead resolver from a dead name
+        if self._canary_responds():
+            return False  # resolver is fine; this specific name is unreachable
+        with self._lock:
+            self._open = True
+            noted = self._noted
+            self._noted = True
+        if not noted:
+            print("[!][DNS] Resolver appears down (canary root did not answer) - "
+                  "skipping remaining lookups this run")
+            try:
+                from recon.helpers import circuit_breaker as cb
+                cb.note_degraded("domain_recon", sources=["dns"], reason="DNS resolver down")
+            except Exception:  # noqa: BLE001
+                pass
+        return True
+
+
+resolver_breaker = _ResolverBreaker()
+
+
+# ---------------------------------------------------------------------------
+# Per-source subdomain breakers (crt.sh / HackerTarget / subfinder / knockpy /
+# amass / puredns). One call per root, repeated every Domain-batch group, so a
+# source that failed in group 1 is skipped in the rest instead of failing again.
+# ---------------------------------------------------------------------------
+def _source_breaker(name: str):
+    if not _cb_enabled():
+        return None
+    try:
+        from recon.helpers import circuit_breaker as cb
+        return cb.get_breaker(f"subsrc:{name}", label="Subdomains",
+                              threshold=cb.INTERNAL_THRESHOLD)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _source_skipped(name: str, label: str) -> bool:
+    b = _source_breaker(name)
+    if b is None:
+        return False
+    try:
+        if not b.allow():
+            print(f"[-][{label}] paused this run after repeated failures - skipping")
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _source_record(name: str, outcome, detail: str = "") -> None:
+    b = _source_breaker(name)
+    if b is None:
+        return
+    try:
+        b.record(outcome, detail=detail)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _outcome(name: str):
+    from recon.helpers import circuit_breaker as cb
+    return getattr(cb.Outcome, name)
 
 
 def _annotate_ai_service_hint(dns_entry: dict, settings: dict | None) -> None:
@@ -91,6 +245,9 @@ def query_crtsh(domain: str, settings: dict = None) -> dict:
         print(f"[-][crt.sh] Disabled — skipping")
         return {}
 
+    if _source_skipped("crtsh", "crt.sh"):
+        return {}
+
     sourced = {}
     session = requests.Session()
     try:
@@ -109,6 +266,7 @@ def query_crtsh(domain: str, settings: dict = None) -> dict:
             print(f"[+][crt.sh] Found {len(crtsh_subs)} subdomains")
             for s in crtsh_subs:
                 sourced.setdefault(s, set()).add("crt.sh")
+            _source_record("crtsh", _outcome("OK"))
         else:
             # requests does not raise on 4xx/5xx, so without this a 502 - which
             # crt.sh returns regularly - produced NO line at all: not a success,
@@ -116,8 +274,12 @@ def query_crtsh(domain: str, settings: dict = None) -> dict:
             # exactly like "this domain has no CT entries" or "crt.sh is off".
             print(f"[!][crt.sh] HTTP {resp.status_code} - no results from this "
                   f"source (it is degraded, not empty)")
+            _source_record("crtsh",
+                           _outcome("RATE_LIMIT") if resp.status_code == 429 else _outcome("TRANSIENT"),
+                           detail=f"HTTP {resp.status_code}")
     except Exception as e:
         print(f"[!][crt.sh] Error: {e}")
+        _source_record("crtsh", _outcome("TRANSIENT"), detail=type(e).__name__)
     finally:
         session.close()
 
@@ -138,13 +300,17 @@ def query_hackertarget(domain: str, settings: dict = None) -> dict:
         print(f"[-][HackerTarget] Disabled — skipping")
         return {}
 
+    if _source_skipped("hackertarget", "HackerTarget"):
+        return {}
+
     sourced = {}
     session = requests.Session()
     try:
         print(f"[*][HackerTarget] Querying host search API...")
         ht_subs = set()
         resp = session.get(f"https://api.hackertarget.com/hostsearch/?q={domain}", timeout=30)
-        if resp.status_code == 200 and "error" not in resp.text.lower():
+        body_lower = resp.text.lower()
+        if resp.status_code == 200 and "error" not in body_lower:
             for line in resp.text.strip().split('\n'):
                 if ',' in line:
                     ht_subs.add(line.split(',')[0].strip())
@@ -155,8 +321,20 @@ def query_hackertarget(domain: str, settings: dict = None) -> dict:
             print(f"[+][HackerTarget] Found {len(ht_subs)} subdomains")
             for s in ht_subs:
                 sourced.setdefault(s, set()).add("hackertarget")
+            _source_record("hackertarget", _outcome("OK"))
+        elif resp.status_code == 429 or "api count exceeded" in body_lower or "rate" in body_lower:
+            # HackerTarget's free tier caps daily calls; the body says so on a
+            # 200. Escalate to RATE_LIMIT so the source is paused, not retried.
+            print(f"[!][HackerTarget] Rate-limited (HTTP {resp.status_code}) - source degraded, not empty")
+            _source_record("hackertarget", _outcome("RATE_LIMIT"), detail=f"HTTP {resp.status_code}")
+        else:
+            # A non-200 (or an "error" body) used to print nothing, so the source
+            # silently vanished and read as "0 subdomains". Say it failed.
+            print(f"[!][HackerTarget] HTTP {resp.status_code} - source failed (degraded, not empty)")
+            _source_record("hackertarget", _outcome("TRANSIENT"), detail=f"HTTP {resp.status_code}")
     except Exception as e:
         print(f"[!][HackerTarget] Error: {e}")
+        _source_record("hackertarget", _outcome("TRANSIENT"), detail=type(e).__name__)
     finally:
         session.close()
 
@@ -188,29 +366,41 @@ def run_knockpy(domain: str, bruteforce: bool = False, settings: dict = None) ->
         print(f"[-][Knockpy] Disabled — skipping")
         return set()
 
+    if _source_skipped("knockpy", "Knockpy"):
+        return set()
+
     subdomains = set()
     mode = "recon + bruteforce" if bruteforce else "recon only"
     print(f"[*][Knockpy] Running ({mode})...")
-    
+
     command = ['knockpy', '-d', domain, '--recon']
     if bruteforce:
         command.append('--bruteforce')
 
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=600)
-        
+
+        # A non-zero exit means the tool failed; parsing its stdout would print
+        # "Found 0 subdomains" and hide the failure. Record it and stop here.
+        if result.returncode != 0:
+            tail = (result.stderr or "").strip().splitlines()[-1:] or ["no stderr"]
+            print(f"[!][Knockpy] Failed (exit {result.returncode}): {tail[0][:200]}")
+            _source_record("knockpy", _outcome("TRANSIENT"), detail=f"exit {result.returncode}")
+            return set()
+
         # Strip ANSI color codes from output before parsing
         ansi_escape = re.compile(r'\x1b\[[0-9;]*m')
         clean_output = ansi_escape.sub('', result.stdout.lower())
-        
+
         # Extract everything that looks like a subdomain
         matches = re.findall(r'([\w.-]+\.' + re.escape(domain) + r')', clean_output)
         subdomains.update(matches)
-        
+
         max_results = settings.get('KNOCKPY_RECON_MAX_RESULTS', 5000)
         if len(subdomains) > max_results:
             subdomains = set(sorted(subdomains)[:max_results])
             print(f"[*][Knockpy] Capped at {max_results} results")
+        _source_record("knockpy", _outcome("OK"))
         if subdomains:
             print(f"[+][Knockpy] Found {len(subdomains)} subdomains")
         else:
@@ -218,10 +408,12 @@ def run_knockpy(domain: str, bruteforce: bool = False, settings: dict = None) ->
 
     except subprocess.TimeoutExpired:
         print("[!][Knockpy] Timed out")
+        _source_record("knockpy", _outcome("TRANSIENT"), detail="timeout")
     except FileNotFoundError:
         print("[!][Knockpy] Not installed (pip install knockpy)")
     except Exception as e:
         print(f"[!][Knockpy] Error: {e}")
+        _source_record("knockpy", _outcome("TRANSIENT"), detail=type(e).__name__)
     finally:
         # Clean up knockpy's auto-generated files
         for f in glob.glob(str(PROJECT_ROOT / f"{domain}_*.json")):
@@ -256,9 +448,18 @@ def run_subfinder(domain: str, settings: dict = None) -> set:
         '-max-time', '10',
     ]
 
+    if _source_skipped("subfinder", "Subfinder"):
+        return set()
+
     subdomains = set()
     try:
         result = subprocess.run(command, capture_output=True, text=True, timeout=720)
+
+        if result.returncode != 0:
+            tail = (result.stderr or "").strip().splitlines()[-1:] or ["no stderr"]
+            print(f"[!][Subfinder] Failed (exit {result.returncode}): {tail[0][:200]}")
+            _source_record("subfinder", _outcome("TRANSIENT"), detail=f"exit {result.returncode}")
+            return set()
 
         for line in result.stdout.strip().split('\n'):
             line = line.strip()
@@ -276,6 +477,7 @@ def run_subfinder(domain: str, settings: dict = None) -> set:
             subdomains = set(sorted(subdomains)[:max_results])
             print(f"[*][Subfinder] Capped at {max_results} results")
 
+        _source_record("subfinder", _outcome("OK"))
         if subdomains:
             print(f"[+][Subfinder] Found {len(subdomains)} subdomains")
         else:
@@ -283,10 +485,12 @@ def run_subfinder(domain: str, settings: dict = None) -> set:
 
     except subprocess.TimeoutExpired:
         print("[!][Subfinder] Timed out")
+        _source_record("subfinder", _outcome("TRANSIENT"), detail="timeout")
     except FileNotFoundError:
         print("[!][Subfinder] Docker not found — cannot run")
     except Exception as e:
         print(f"[!][Subfinder] Error: {e}")
+        _source_record("subfinder", _outcome("TRANSIENT"), detail=type(e).__name__)
 
     return subdomains
 
@@ -357,12 +561,22 @@ def run_amass(domain: str, settings: dict = None) -> set:
         else:
             print(f"[*][Amass] Using Amass built-in wordlist (~8K entries) for brute force")
 
+    if _source_skipped("amass", "Amass"):
+        shutil.rmtree(amass_temp, ignore_errors=True)
+        return set()
+
     subdomains = set()
     try:
         result = subprocess.run(
             command, capture_output=True, text=True,
             timeout=(timeout_min * 60) + 120
         )
+
+        if result.returncode != 0:
+            tail = (result.stderr or "").strip().splitlines()[-1:] or ["no stderr"]
+            print(f"[!][Amass] Failed (exit {result.returncode}): {tail[0][:200]}")
+            _source_record("amass", _outcome("TRANSIENT"), detail=f"exit {result.returncode}")
+            return set()
 
         # Output format: "name (FQDN) --> record_type --> target (FQDN)"
         # Capture ALL FQDNs per line (both source and target can be subdomains)
@@ -380,6 +594,7 @@ def run_amass(domain: str, settings: dict = None) -> set:
             subdomains = set(sorted(subdomains)[:max_results])
             print(f"[*][Amass] Capped at {max_results} results")
 
+        _source_record("amass", _outcome("OK"))
         if subdomains:
             print(f"[+][Amass] Found {len(subdomains)} subdomains")
         else:
@@ -387,10 +602,12 @@ def run_amass(domain: str, settings: dict = None) -> set:
 
     except subprocess.TimeoutExpired:
         print("[!][Amass] Timed out")
+        _source_record("amass", _outcome("TRANSIENT"), detail="timeout")
     except FileNotFoundError:
         print("[!][Amass] Docker not found — cannot run")
     except Exception as e:
         print(f"[!][Amass] Error: {e}")
+        _source_record("amass", _outcome("TRANSIENT"), detail=type(e).__name__)
     finally:
         shutil.rmtree(amass_temp, ignore_errors=True)
 
@@ -410,32 +627,43 @@ def dns_lookup_single(hostname: str, rtype: str, max_retries: int = 3) -> list:
         List of DNS records or None if not found/failed
     """
     
-    last_error = None
-    
+    # A resolver already proven down this run: skip immediately, don't retry
+    # into a timeout wall (inert under the off switch).
+    if resolver_breaker.is_open():
+        return None
+
+    definitive = _dns_definitive_errors()
+
     for attempt in range(max_retries):
         try:
             answers = dns.resolver.resolve(hostname, rtype)
             return [rr.to_text() for rr in answers]
-        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
-            # These are expected "not found" responses - no retry needed
+        except definitive:
+            # A definitive "does not resolve" answer - not a resolver fault,
+            # never retried.
             return None
-        except (dns.resolver.NoNameservers, dns.resolver.Timeout) as e:
-            # Temporary failures - worth retrying
-            last_error = e
+        except (dns.resolver.NoNameservers, dns.resolver.Timeout,
+                dns.resolver.LifetimeTimeout) as e:
+            # Transient. The canary decides whether the resolver itself is down;
+            # if so, stop retrying every remaining record type/host this run.
+            if resolver_breaker.note_transient():
+                return None
             if attempt < max_retries - 1:
                 delay = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s
                 time.sleep(delay)
                 continue
             return None
-        except Exception as e:
-            # Unexpected errors - retry
-            last_error = e
+        except Exception:
+            # An unexpected resolver error is treated as transient (canary-gated)
+            # but a dns.name syntax error was already handled above.
+            if resolver_breaker.note_transient():
+                return None
             if attempt < max_retries - 1:
                 delay = 2 ** attempt
                 time.sleep(delay)
                 continue
             return None
-    
+
     return None
 
 
@@ -520,7 +748,12 @@ def verify_domain_ownership(domain: str, token: str, txt_prefix: str = "_redamon
         txt_records = dns_lookup_single(record_name, "TXT")
 
         if txt_records is None:
-            result["error"] = f"No TXT record found at {record_name}"
+            # A resolver that is down reads as "no TXT record", which would
+            # abort verification with the wrong instruction. Say so instead.
+            if resolver_breaker.is_open():
+                result["error"] = "DNS resolver down - cannot verify ownership (retry later)"
+            else:
+                result["error"] = f"No TXT record found at {record_name}"
             return result
 
         # Clean up TXT records (remove quotes)
@@ -574,6 +807,9 @@ def resolve_all_dns(domain: str, subdomains: list, max_workers: int = 20, record
     _annotate_ai_service_hint(result["domain"], settings)
     if result["domain"]["ips"]["ipv4"]:
         print(f"[+][DNS] {domain} → {', '.join(result['domain']['ips']['ipv4'])}")
+        # This root answered, so it is a good canary: a later transient failure
+        # re-resolves it to tell a dead resolver from a dead name.
+        resolver_breaker.set_canary(domain)
 
     # Resolve all subdomains in parallel
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="dns") as executor:
@@ -629,6 +865,9 @@ def run_puredns_resolve(subdomains: list, domain: str, settings: dict = None) ->
         print(f"[-][Puredns] No subdomains to validate")
         return subdomains
 
+    if _source_skipped("puredns", "Puredns"):
+        return subdomains  # graceful: the unfiltered list is still usable
+
     docker_image = settings.get('PUREDNS_DOCKER_IMAGE', 'frost19k/puredns:latest')
     threads = settings.get('PUREDNS_THREADS', 0)
     rate_limit = settings.get('PUREDNS_RATE_LIMIT', 0)
@@ -683,21 +922,26 @@ def run_puredns_resolve(subdomains: list, domain: str, settings: dict = None) ->
                 filtered = [line.strip() for line in f if line.strip()]
             removed = len(subdomains) - len(filtered)
             print(f"[+][Puredns] Validated: {len(filtered)} real, {removed} filtered (wildcards/poisoned)")
+            _source_record("puredns", _outcome("OK"))
             return filtered
         else:
             print(f"[!][Puredns] No output file produced — returning unfiltered list")
             if result.stderr:
                 print(f"[!][Puredns] stderr: {result.stderr[:500]}")
+            _source_record("puredns", _outcome("TRANSIENT"),
+                           detail=f"no output (exit {result.returncode})")
             return subdomains
 
     except subprocess.TimeoutExpired:
         print("[!][Puredns] Timed out (600s) — returning unfiltered list")
+        _source_record("puredns", _outcome("TRANSIENT"), detail="timeout")
         return subdomains
     except FileNotFoundError:
         print("[!][Puredns] Docker not found — cannot run")
         return subdomains
     except Exception as e:
         print(f"[!][Puredns] Error: {e} — returning unfiltered list")
+        _source_record("puredns", _outcome("TRANSIENT"), detail=type(e).__name__)
         return subdomains
     finally:
         # Cleanup temp files (may be root-owned from Docker)
@@ -705,11 +949,16 @@ def run_puredns_resolve(subdomains: list, domain: str, settings: dict = None) ->
             try:
                 tmp.unlink(missing_ok=True)
             except PermissionError:
-                subprocess.run(
-                    ["docker", "run", "--rm", "-v", f"{data_dir}:/cleanup",
-                     "alpine", "rm", "-f", f"/cleanup/{tmp.name}"],
-                    capture_output=True
-                )
+                # The cleanup container itself must be bounded: without a timeout
+                # a hung `docker run` here would stall the whole scan at the end.
+                try:
+                    subprocess.run(
+                        ["docker", "run", "--rm", "-v", f"{data_dir}:/cleanup",
+                         "alpine", "rm", "-f", f"/cleanup/{tmp.name}"],
+                        capture_output=True, timeout=60
+                    )
+                except Exception:  # noqa: BLE001 - best-effort cleanup
+                    pass
 
 
 def discover_subdomains(domain: str, bruteforce: bool = False,
@@ -886,21 +1135,84 @@ def reverse_dns_lookup(ip_address: str, max_retries: int = 3):
     Returns:
         Hostname string if PTR record found, None otherwise
     """
+    if resolver_breaker.is_open():
+        return None
+
+    # Per-/24 (reverse-zone) breaker: a zone whose PTR authority stops answering
+    # is skipped for its remaining IPs, instead of timing out on each one. A
+    # definitive "no PTR" is an answer (keeps the zone healthy); only timeouts
+    # count against it.
+    zone_breaker = _rdns_zone_breaker(ip_address)
+    if zone_breaker is not None and _breaker_is_open(zone_breaker):
+        return None
+
+    definitive = _dns_definitive_errors()
     for attempt in range(max_retries):
         try:
             rev_name = dns.reversename.from_address(ip_address)
             answers = dns.resolver.resolve(rev_name, 'PTR')
+            _rdns_record_ok(zone_breaker)
             # Return first PTR record, strip trailing dot
             hostname = str(answers[0]).rstrip('.')
             return hostname
-        except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+        except definitive:
+            _rdns_record_ok(zone_breaker)  # a definitive answer = zone is alive
             return None
-        except dns.resolver.LifetimeTimeout:
+        except (dns.resolver.LifetimeTimeout, dns.resolver.Timeout,
+                dns.resolver.NoNameservers):
+            if resolver_breaker.note_transient():
+                return None
             if attempt < max_retries - 1:
                 time.sleep(1)
                 continue
+            _rdns_record_timeout(zone_breaker)
             return None
         except Exception:
             return None
     return None
+
+
+def _rdns_zone_breaker(ip_address: str):
+    """The circuit breaker for an IP's reverse zone (/24 for IPv4), or None."""
+    if not _cb_enabled():
+        return None
+    try:
+        if ":" in ip_address:  # IPv6: group by the first four hextets
+            zone = ":".join(ip_address.split(":")[:4])
+        else:
+            zone = ip_address.rsplit(".", 1)[0]
+        if not zone:
+            return None
+        from recon.helpers import circuit_breaker as cb
+        return cb.get_breaker(f"rdns:{zone}", label="DNS",
+                              threshold=cb.INTERNAL_THRESHOLD)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _breaker_is_open(breaker) -> bool:
+    try:
+        return not breaker.allow()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _rdns_record_ok(breaker) -> None:
+    if breaker is None:
+        return
+    try:
+        from recon.helpers import circuit_breaker as cb
+        breaker.record(cb.Outcome.OK)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _rdns_record_timeout(breaker) -> None:
+    if breaker is None:
+        return
+    try:
+        from recon.helpers import circuit_breaker as cb
+        breaker.record(cb.Outcome.TRANSIENT, detail="PTR timeout")
+    except Exception:  # noqa: BLE001
+        pass
 

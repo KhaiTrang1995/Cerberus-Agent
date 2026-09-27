@@ -64,6 +64,8 @@ def build_nuclei_command(
     interactsh: bool = True,
     force_dast_pass: bool = False,
     auth_headers: List[str] = None,
+    container_name: str = None,
+    max_host_error: int = 0,
 ) -> List[str]:
     """
     Build nuclei Docker command with all configured parameters.
@@ -104,10 +106,17 @@ def build_nuclei_command(
     # silently fails with ECONNREFUSED.
     cmd = [
         "docker", "run", "--rm", "--net=host",
+    ]
+    # A name so the runtime-cap watchdog can `docker kill` this exact container.
+    # vuln_scan's Nuclei and the takeover Nuclei start together in GROUP 6, and a
+    # pid-based name repeats across scan containers, so the caller passes a uuid.
+    if container_name:
+        cmd.extend(["--name", container_name])
+    cmd.extend([
         "-v", f"{targets_host_path}:/targets:ro",
         "-v", f"{output_host_path}:/output",
         "-v", f"{NUCLEI_TEMPLATES_VOLUME}:/root/nuclei-templates",
-    ]
+    ])
 
     # Mount custom templates if any are selected
     host_custom_templates = os.environ.get("HOST_CUSTOM_TEMPLATES_PATH", "")
@@ -208,6 +217,11 @@ def build_nuclei_command(
     
     if retries > 0:
         cmd.extend(["-retries", str(retries)])
+
+    # -mhe: stop probing a host after this many errors, so one dead host in a
+    # big target list cannot soak the whole pass in timeouts.
+    if max_host_error and max_host_error > 0:
+        cmd.extend(["-mhe", str(max_host_error)])
     
     # DAST mode for active vulnerability fuzzing
     if dast_mode:

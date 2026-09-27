@@ -263,6 +263,9 @@ function summariseDelta(delta: ReconDelta) {
   return {
     totals: delta.totals,
     scorecard: delta.scorecard,
+    // Which finding sources the newer run could not fully re-check (circuit
+    // breakers): removed counts below may include skipped work, not real change.
+    coverageGaps: delta.coverage?.sources ?? null,
     lenses: {
       newlyExposedPorts: l.newlyExposedPorts.length,
       closedPorts: l.closedPorts.length,

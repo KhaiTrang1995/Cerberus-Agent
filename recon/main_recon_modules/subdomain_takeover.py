@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import subprocess
+import uuid
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -583,6 +584,9 @@ def _run_nuclei_takeover(urls: list[str], work_dir: Path, settings: dict) -> lis
     # Force takeover-only template dirs. The full template set is mounted at
     # /root/nuclei-templates inside the nuclei container, so relative paths
     # resolve correctly.
+    # A uuid name so a timeout kills THIS container. vuln_scan's Nuclei and this
+    # one start together in GROUP 6, so a pid-based name would collide.
+    container_name = f"redamon-nuclei-takeover-{uuid.uuid4().hex[:12]}"
     cmd = build_nuclei_command(
         targets_file=str(targets_file),
         output_file=str(output_file),
@@ -599,6 +603,8 @@ def _run_nuclei_takeover(urls: list[str], work_dir: Path, settings: dict) -> lis
         follow_redirects=bool(settings.get("NUCLEI_FOLLOW_REDIRECTS", True)),
         max_redirects=int(settings.get("NUCLEI_MAX_REDIRECTS", 10)),
         interactsh=False,  # Takeover templates don't need OOB interactions
+        container_name=container_name,
+        max_host_error=int(settings.get("NUCLEI_MAX_HOST_ERROR", 30)),
     )
     print(f"[*][Takeover][Nuclei] {' '.join(cmd)}")
 
@@ -612,8 +618,20 @@ def _run_nuclei_takeover(urls: list[str], work_dir: Path, settings: dict) -> lis
             check=False,
         )
     except subprocess.TimeoutExpired:
-        print(f"[!][Takeover][Nuclei] run timed out after {run_timeout}s")
-        return []
+        # The docker CLI is killed by subprocess, but the daemon-owned container
+        # keeps running; kill it by name (mirror _run_baddns) and keep the
+        # partial JSONL that is already on disk.
+        print(f"[!][Takeover][Nuclei] run timed out after {run_timeout}s -- killing container")
+        try:
+            subprocess.run(["docker", "kill", container_name],
+                           capture_output=True, text=True, timeout=15, check=False)
+        except Exception as e:  # noqa: BLE001
+            print(f"[!][Takeover][Nuclei] failed to kill orphan container: {type(e).__name__}")
+        try:
+            fix_file_ownership(output_file)
+        except Exception:
+            pass
+        return _load_nuclei_jsonl(output_file)
     except FileNotFoundError:
         print("[!][Takeover][Nuclei] docker binary missing")
         return []

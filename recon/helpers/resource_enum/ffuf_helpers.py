@@ -215,11 +215,19 @@ def run_ffuf_discovery(
     fuzz_targets = _build_fuzz_targets(target_urls, discovered_base_paths)
     print(f"[*][FFuf] Fuzz targets (root + base paths): {len(fuzz_targets)}")
 
+    # Skip a fuzz target whose host another module already found unreachable:
+    # ffuf otherwise burns its per-target max_time against a dead host. Results
+    # land under source 'resource_enum', so the skip is reported per host and
+    # the prune keeps that host's endpoints.
+    from recon.helpers import circuit_breaker as _cb
+    _scope = _cb.scope((), label="FFuf", unit="target(s)")
+    fuzz_targets = [u for u in fuzz_targets if not _scope.skip_if_down(u)]
+
     output_dir = tempfile.mkdtemp(prefix="redamon_ffuf_")
 
     try:
-        effective_threads = max(threads // parallelism, 5)
-        max_workers = min(parallelism, len(fuzz_targets))
+        effective_threads = max(threads // max(parallelism, 1), 5)
+        max_workers = min(parallelism, len(fuzz_targets)) if fuzz_targets else 1
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {}
@@ -244,6 +252,7 @@ def run_ffuf_discovery(
 
     finally:
         shutil.rmtree(output_dir, ignore_errors=True)
+        _scope.finish("resource_enum", host_source="resource_enum")
 
     unique_results = _deduplicate_results(all_results)
     print(f"[+][FFuf] Discovered {len(unique_results)} unique endpoints")

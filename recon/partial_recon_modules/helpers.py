@@ -20,6 +20,9 @@ sys.path.insert(0, str(PROJECT_ROOT))
 STATUS_OK = "ok"
 STATUS_NO_RESULTS = "no_results"
 STATUS_RATE_LIMITED = "rate_limited"
+# The root ran but a circuit breaker / HostHealth cut some of its coverage.
+# It counts as a root that ran (exit 0), and is listed with its reason.
+STATUS_DEGRADED = "degraded"
 
 # Pacing for the per-root API loops. Module constants rather than a project
 # setting, which keeps the settings cascade out of this change.
@@ -160,7 +163,21 @@ def partial_settings(config: dict) -> dict:
     return dict(loaded)
 
 
+def _coverage_signature():
+    """A cheap snapshot of what the run has noted degraded so far, or None when
+    circuit breakers are off / unavailable. Used to tell whether ``fn(root)``
+    cut any coverage (a provider skipped, a host unreachable)."""
+    try:
+        from recon.helpers import circuit_breaker as cb
+        report = cb.coverage_report()
+        return (frozenset(report.degraded_sources), len(report.skipped_hosts),
+                report.nuclei_truncated, len(report.gaps))
+    except Exception:  # noqa: BLE001 - accumulator faulted or breakers off
+        return None
+
+
 def _run_one_root(fn, root: str) -> str:
+    before = _coverage_signature()
     try:
         result = fn(root)
     except (Exception, SystemExit) as e:  # noqa: BLE001 - one root must not end the run
@@ -168,8 +185,15 @@ def _run_one_root(fn, root: str) -> str:
         # (URLs with keys, headers) in their text.
         print(f"[!][Partial Recon] {root}: failed ({type(e).__name__})")
         return f"failed: {type(e).__name__}"
-    if result in (STATUS_NO_RESULTS, STATUS_RATE_LIMITED):
+    if result in (STATUS_NO_RESULTS, STATUS_RATE_LIMITED, STATUS_DEGRADED):
         return result
+    # A root that otherwise looks OK is DEGRADED when it recorded new coverage
+    # gaps (e.g. every OSINT provider was refused): those _one_root functions
+    # return STATUS_OK regardless, so the accumulator is the truth.
+    after = _coverage_signature()
+    if before is not None and after is not None and after != before:
+        print(f"[!][Partial Recon] {root}: completed with degraded coverage")
+        return STATUS_DEGRADED
     return STATUS_OK
 
 
@@ -198,8 +222,9 @@ def run_per_root(roots: list, fn, tool: str) -> dict:
 
 
 def run_exit_code(statuses: dict) -> int:
-    """0 when at least one root ran (ok or no_results), 1 when nothing did."""
-    return 0 if any(s in (STATUS_OK, STATUS_NO_RESULTS) for s in statuses.values()) else 1
+    """0 when at least one root ran (ok, no_results or degraded), 1 when nothing did."""
+    ran = (STATUS_OK, STATUS_NO_RESULTS, STATUS_DEGRADED)
+    return 0 if any(s in ran for s in statuses.values()) else 1
 
 
 def print_run_report(tool: str, statuses: dict, refused: dict) -> None:

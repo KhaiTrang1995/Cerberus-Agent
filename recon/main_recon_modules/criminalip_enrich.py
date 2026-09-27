@@ -61,12 +61,6 @@ def _extract_ips_from_recon(combined_result: dict) -> list[str]:
     return sorted(ips)
 
 
-def _effective_key(api_key: str, key_rotator) -> str:
-    if key_rotator and getattr(key_rotator, "has_keys", False):
-        return (key_rotator.current_key or "").strip()
-    return (api_key or "").strip()
-
-
 STOP_AUTH = "auth"
 STOP_CREDIT = "credit"
 STOP_RATE = "rate"
@@ -86,62 +80,62 @@ def _classify_stop_reason(status: int, body_text: str) -> str | None:
     return None
 
 
-def _cip_get(
-    path: str,
-    api_key: str,
-    key_rotator,
-    params: dict | None = None,
-    timeout: int = 30,
-) -> tuple[dict | None, str | None]:
-    """GET Criminal IP v1 with 429 retry once.
+_STOP_DETAILS = {STOP_AUTH: "key rejected", STOP_CREDIT: "credit exhausted"}
 
-    Returns (body_or_none, stop_reason).  stop_reason is non-None when further
-    requests should be skipped (auth failure, credit exhaustion, rate limit).
+
+def _cip_breaker(endpoint: str):
+    """Three consecutive failures stop an endpoint (Criminal IP credits are
+    scarce); a refused key, exhausted credit or a second 429 in a row stops
+    the provider."""
+    from recon.helpers import circuit_breaker as cb
+    return cb.get_breaker(f"criminalip:{endpoint}", label="CriminalIP", parent="criminalip",
+                          threshold=cb.INTERNAL_THRESHOLD)
+
+
+def _cip_classify(resp):
+    """404 and a 200 with nothing parseable are answers, never failures.
+
+    Any other non-200 is FATAL when ``_classify_stop_reason`` says further
+    requests are futile (bad key, exhausted credit), else TRANSIENT. The body
+    is read only to classify.
     """
-    eff = _effective_key(api_key, key_rotator)
-    if not eff:
-        return None, STOP_AUTH
+    from recon.helpers import circuit_breaker as cb
+    status = cb.status_of(resp)
+    if status == 200:
+        try:
+            return cb.CallResult(resp.json(), cb.Outcome.OK, "HTTP 200")
+        except ValueError:
+            return cb.CallResult(None, cb.Outcome.TRANSIENT, "non-JSON response")
+    if status == 404:
+        return cb.CallResult(None, cb.Outcome.NO_DATA, "HTTP 404")
+    if status == 429:
+        return cb.CallResult(None, cb.Outcome.RATE_LIMIT, "HTTP 429",
+                             cb.retry_after_seconds(resp))
+    try:
+        body_text = str(resp.text or "")[:300]
+    except Exception:  # noqa: BLE001
+        body_text = ""
+    stop = _classify_stop_reason(status or 0, body_text)
+    if stop:
+        return cb.CallResult(None, cb.Outcome.FATAL, f"{status} {_STOP_DETAILS.get(stop, stop)}")
+    return cb.CallResult(None, cb.Outcome.TRANSIENT, f"HTTP {status}")
+
+
+def _cip_get(path: str, keys, params: dict | None = None, *, admitted: bool = False,
+             timeout: int = 30):
+    """GET Criminal IP v1 through its breaker; returns a CallResult.
+
+    A 429 waits out Retry-After and is sent once more (guarded_call).
+    """
+    from recon.helpers import circuit_breaker as cb
+    breaker = _cip_breaker("domain" if path.startswith("domain") else "ip")
     url = f"{CRIMINALIP_API_BASE.rstrip('/')}/{path.lstrip('/')}"
-    headers = {"x-api-key": eff}
     merged = dict(params or {})
 
-    for attempt in range(2):
-        try:
-            resp = requests.get(url, headers=headers, params=merged, timeout=timeout)
-            if key_rotator:
-                key_rotator.tick()
-            if resp.status_code == 200:
-                try:
-                    return resp.json(), None
-                except ValueError:
-                    logger.warning(f"CriminalIP invalid JSON for {path}")
-                    return None, None
-            if resp.status_code == 404:
-                logger.debug(f"CriminalIP 404 for {path}")
-                return None, None
-            if resp.status_code == 429:
-                logger.warning("CriminalIP rate limit (429), sleeping and retrying once")
-                if attempt == 0:
-                    time.sleep(2)
-                    continue
-                return None, STOP_RATE
+    def send(key):
+        return requests.get(url, headers={"x-api-key": key}, params=merged, timeout=timeout)
 
-            body_text = resp.text[:300]
-            stop = _classify_stop_reason(resp.status_code, body_text)
-            if stop:
-                logger.warning(
-                    f"CriminalIP {resp.status_code} for {path}: {body_text}"
-                )
-                return None, stop
-
-            logger.warning(
-                f"CriminalIP {resp.status_code} for {path}: {body_text[:200]}"
-            )
-            return None, None
-        except requests.RequestException as e:
-            logger.warning(f"CriminalIP request failed for {path}: {e}")
-            return None, None
-    return None, STOP_RATE
+    return cb.guarded_call(breaker, send, _cip_classify, keys=keys, admitted=admitted)
 
 
 def _parse_ip_report(ip: str, body: dict | None) -> dict | None:
@@ -322,21 +316,13 @@ def _parse_domain_report(domain: str, body: dict | None) -> dict | None:
     return out
 
 
-_STOP_MESSAGES = {
-    STOP_AUTH: "API key is invalid or expired — skipping remaining Criminal IP requests",
-    STOP_CREDIT: "API credit/quota exhausted — skipping remaining Criminal IP requests",
-    STOP_RATE: "Rate limit exceeded — skipping remaining Criminal IP requests",
-}
-
-_MAX_CONSECUTIVE_FAILURES = 3
-
-
 def run_criminalip_enrichment(combined_result: dict, settings: dict) -> dict:
     """
     Run Criminal IP enrichment: domain report (domain mode) and per-IP data.
 
-    Stops early on auth/credit errors (single message) or after
-    ``_MAX_CONSECUTIVE_FAILURES`` consecutive data failures.
+    Stops early on a refused key or exhausted credit (one line), and an
+    endpoint after three consecutive real failures; no-data answers never
+    count (recon/helpers/circuit_breaker.py).
 
     Mutates combined_result in place with key ``criminalip``.
     """
@@ -355,10 +341,11 @@ def run_criminalip_enrichment(combined_result: dict, settings: dict) -> dict:
         ],
     )
 
-    api_key = settings.get("CRIMINALIP_API_KEY", "")
-    key_rotator = settings.get("CRIMINALIP_KEY_ROTATOR")
+    from recon.helpers import circuit_breaker as cb
+    keys = cb.KeyPool(settings.get("CRIMINALIP_KEY_ROTATOR"),
+                      (settings.get("CRIMINALIP_API_KEY", "") or "").strip(), label="CriminalIP")
 
-    if not _effective_key(api_key, key_rotator):
+    if not keys.has_key:
         print("[!][CriminalIP] No API key configured — skipping")
         return combined_result
 
@@ -374,102 +361,65 @@ def run_criminalip_enrichment(combined_result: dict, settings: dict) -> dict:
         "ip_reports": [],
         "domain_report": None,
     }
-
-    def _handle_stop(reason: str) -> None:
-        msg = _STOP_MESSAGES.get(reason, f"Stopping Criminal IP requests ({reason})")
-        print(f"[!][CriminalIP] {msg}")
+    cip_scope = cb.scope("criminalip", label="CriminalIP", unit="IP(s)")
 
     try:
-        need_sleep = False
-        stopped = False
-
         if domain and not is_ip_mode:
             print(f"[*][CriminalIP] Fetching domain report for {domain}...")
-            raw, stop = _cip_get(
-                "domain/report",
-                api_key,
-                key_rotator,
-                params={"query": domain},
-            )
-            if stop:
-                _handle_stop(stop)
-                stopped = True
-            else:
-                cip_data["domain_report"] = _parse_domain_report(domain, raw)
+            res = _cip_get("domain/report", keys, params={"query": domain})
+            if res.answered:
+                cip_data["domain_report"] = _parse_domain_report(domain, res.data)
                 if cip_data["domain_report"]:
                     print(f"[+][CriminalIP] Domain report retrieved for {domain}")
                 else:
                     print(f"[!][CriminalIP] No domain report data for {domain}")
-            need_sleep = True
+            elif res.outcome is not cb.Outcome.SKIPPED:
+                print(f"[!][CriminalIP] Domain report unavailable ({res.detail})")
 
         max_workers = settings.get("CRIMINALIP_WORKERS", 5)
         rate_limiter = _RateLimiter(1.0)
-        stop_event = threading.Event()
-        if stopped:
-            stop_event.set()
+        ip_breaker = _cip_breaker("ip")
 
-        def _enrich_single_ip(ip, api_key, key_rotator, rate_limiter):
-            """Enrich a single IP via Criminal IP. Returns (report_or_None, stop_reason_or_None)."""
-            if stop_event.is_set():
-                return None, None
+        def _enrich_single_ip(ip):
+            """Enrich a single IP via Criminal IP. Returns the report or None."""
+            # Before the wait: the limiter reserves a slot before sleeping.
+            if not ip_breaker.allow():
+                return None
             rate_limiter.wait()
-            if stop_event.is_set():
-                return None, None
             print(f"[*][CriminalIP] Fetching IP data for {ip}...")
-            raw, stop = _cip_get("ip/data", api_key, key_rotator, params={"ip": ip, "full": "true"})
-            if stop:
-                stop_event.set()
-                return None, stop
-            report = _parse_ip_report(ip, raw)
+            res = _cip_get("ip/data", keys, params={"ip": ip, "full": "true"}, admitted=True)
+            if not res.ok:
+                return None
+            report = _parse_ip_report(ip, res.data)
             if report:
                 vuln_count = len(report.get("vulnerabilities") or [])
                 print(
                     f"[+][CriminalIP] IP data retrieved for {ip} "
                     f"(ports={len(report['ports'])}, vulns={vuln_count})"
                 )
-            else:
-                logger.warning(f"CriminalIP: no data for {ip}")
-            return report, None
+            return report
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {
-                executor.submit(_enrich_single_ip, ip, api_key, key_rotator, rate_limiter): ip
-                for ip in ips
-            }
-            consecutive_fails = 0
+            futures = {executor.submit(_enrich_single_ip, ip): ip for ip in ips}
             for future in as_completed(futures):
                 try:
-                    report, stop_reason = future.result()
-                    if stop_reason:
-                        _handle_stop(stop_reason)
-                        stopped = True
-                    elif report is not None:
+                    report = future.result()
+                    if report is not None:
                         cip_data["ip_reports"].append(report)
-                        consecutive_fails = 0
-                    else:
-                        consecutive_fails += 1
-                        if consecutive_fails >= _MAX_CONSECUTIVE_FAILURES:
-                            print(
-                                f"[!][CriminalIP] {consecutive_fails} consecutive failures "
-                                f"-- skipping remaining IPs"
-                            )
-                            stopped = True
-                            stop_event.set()
                 except Exception as exc:
-                    logger.warning(f"CriminalIP enrichment thread error for {futures[future]}: {exc}")
+                    logger.warning(f"CriminalIP enrichment thread error: {type(exc).__name__}")
 
-        if stopped:
-            print(f"[!][CriminalIP] Some IPs may have been skipped due to early stop")
         print(
             f"[+][CriminalIP] Enrichment complete: "
             f"{len(cip_data['ip_reports'])} IP report(s), "
             f"domain={'yes' if cip_data['domain_report'] else 'no'}"
         )
     except Exception as e:
-        logger.error(f"CriminalIP enrichment failed: {e}")
-        print(f"[!][CriminalIP] Enrichment error: {e}")
+        logger.error(f"CriminalIP enrichment failed: {type(e).__name__}")
+        print(f"[!][CriminalIP] Enrichment error: {type(e).__name__}")
         print(f"[!][CriminalIP] Pipeline continues without full Criminal IP data")
 
+    cip_scope.finish("criminalip_enrich", payload=cip_data)
     combined_result["criminalip"] = cip_data
     return combined_result
 

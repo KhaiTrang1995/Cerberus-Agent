@@ -21,6 +21,9 @@ import ipaddress
 import json
 import os
 import subprocess
+import threading
+import time
+import uuid
 from pathlib import Path
 from datetime import datetime
 from urllib.parse import urlparse
@@ -80,9 +83,58 @@ from recon.helpers import (
 )
 
 
-def _execute_nuclei_pass(cmd: list, output_file: str, label: str) -> tuple:
+def _nuclei_watch_stats(line: str, label: str, state: dict) -> None:
+    """Warn ONCE if 10 min pass with >50% of requests erroring and zero matches.
+
+    Reads the JSON `-stats` heartbeat nuclei already prints; every field is a
+    string. A tarpit or a dead target set looks like this, and the warning is
+    the operator's cue to lower NUCLEI_MAX_RUNTIME. Never raises.
+    """
+    if state.get("warned"):
+        return
+    text = line.lstrip()
+    if not (text.startswith("{") and '"requests"' in text and '"errors"' in text):
+        return
+    try:
+        stats = json.loads(text)
+        requests_n = int(stats.get("requests") or 0)
+        errors_n = int(stats.get("errors") or 0)
+        matched_n = int(stats.get("matched") or 0)
+    except Exception:  # noqa: BLE001
+        return
+    bad = requests_n >= 100 and matched_n == 0 and errors_n > requests_n * 0.5
+    now = time.monotonic()
+    if not bad:
+        state["since"] = None
+        return
+    if state["since"] is None:
+        state["since"] = now
+    elif now - state["since"] >= 600:
+        state["warned"] = True
+        pct = int(100 * errors_n / requests_n) if requests_n else 0
+        print(f"[!][Nuclei] {label}: {pct}% of {requests_n:,} requests are erroring "
+              f"with no matches after 10 min - consider lowering NUCLEI_MAX_RUNTIME", flush=True)
+
+
+def _nuclei_kill_container(container_name: str) -> None:
+    """`docker kill` a named nuclei container. The daemon owns it, so killing the
+    docker CLI (process.terminate) would leave it running; mirror _run_baddns."""
+    try:
+        subprocess.run(["docker", "kill", container_name],
+                       capture_output=True, text=True, timeout=15, check=False)
+    except Exception as e:  # noqa: BLE001
+        print(f"[!][Nuclei] failed to kill {container_name}: {type(e).__name__}")
+
+
+def _execute_nuclei_pass(cmd: list, output_file: str, label: str,
+                         runtime_cap: float = 0, container_name: str = None) -> tuple:
     """
     Run a single nuclei invocation and parse the JSONL output.
+
+    ``runtime_cap`` (seconds, with ``container_name``) is a wall-clock ceiling
+    enforced by a watchdog: at the cap the container is killed, the partial
+    JSONL already on disk is still parsed, and the run is recorded as truncated
+    (a 21.5h field run sat at 31% because process.wait() had no timeout).
 
     Returns (findings, false_positives, duration_seconds, return_code).
     """
@@ -97,15 +149,44 @@ def _execute_nuclei_pass(cmd: list, output_file: str, label: str) -> tuple:
         text=True,
         bufsize=1,
     )
+
+    truncated = {"hit": False}
+    watchdog = None
+    if runtime_cap and runtime_cap > 0 and container_name:
+        def _fire():
+            truncated["hit"] = True
+            hrs = runtime_cap / 3600.0
+            print(f"[!][Nuclei] {label} hit the {hrs:.1f}h runtime cap "
+                  f"(NUCLEI_MAX_RUNTIME) - stopping it, keeping partial results", flush=True)
+            _nuclei_kill_container(container_name)
+        watchdog = threading.Timer(runtime_cap, _fire)
+        watchdog.daemon = True
+        watchdog.start()
+
+    stat_watch = {"since": None, "warned": False}
     stderr_lines = []
-    for line in process.stdout:
-        line = line.rstrip()
-        if not line:
-            continue
-        print(f"[*][Nuclei][{label}] {line}", flush=True)
-        stderr_lines.append(line)
-    process.wait()
+    try:
+        for line in process.stdout:
+            line = line.rstrip()
+            if not line:
+                continue
+            print(f"[*][Nuclei][{label}] {line}", flush=True)
+            stderr_lines.append(line)
+            _nuclei_watch_stats(line, label, stat_watch)
+        process.wait()
+    finally:
+        if watchdog is not None:
+            watchdog.cancel()
     duration = (datetime.now() - start_time).total_seconds()
+
+    if truncated["hit"]:
+        try:
+            from recon.helpers import circuit_breaker
+            circuit_breaker.note_degraded("vuln_scan", sources=["nuclei"],
+                                          nuclei_truncated=True,
+                                          reason="NUCLEI_MAX_RUNTIME reached")
+        except Exception:  # noqa: BLE001
+            pass
 
     if process.returncode != 0 and stderr_lines:
         # Skip noise: nuclei [WRN]/[INF] lines, the pipe-format stats heartbeat
@@ -192,6 +273,8 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
     NUCLEI_CONCURRENCY = settings.get('NUCLEI_CONCURRENCY', 25)
     NUCLEI_TIMEOUT = settings.get('NUCLEI_TIMEOUT', 10)
     NUCLEI_RETRIES = settings.get('NUCLEI_RETRIES', 1)
+    NUCLEI_MAX_RUNTIME = settings.get('NUCLEI_MAX_RUNTIME', 86400)
+    NUCLEI_MAX_HOST_ERROR = settings.get('NUCLEI_MAX_HOST_ERROR', 30)
     NUCLEI_TAGS = settings.get('NUCLEI_TAGS', ['cve', 'xss', 'sqli', 'rce', 'lfi', 'ssrf', 'xxe', 'ssti'])
     NUCLEI_EXCLUDE_TAGS = settings.get('NUCLEI_EXCLUDE_TAGS', ['dos', 'fuzz'])
     NUCLEI_DAST_MODE = settings.get('NUCLEI_DAST_MODE', False)
@@ -330,6 +413,8 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
                 ("NUCLEI_CONCURRENCY", "Performance"),
                 ("NUCLEI_TIMEOUT", "Performance"),
                 ("NUCLEI_RETRIES", "Performance"),
+                ("NUCLEI_MAX_RUNTIME", "Performance"),
+                ("NUCLEI_MAX_HOST_ERROR", "Performance"),
                 ("NUCLEI_SYSTEM_RESOLVERS", "Network"),
                 ("NUCLEI_FOLLOW_REDIRECTS", "Network"),
                 ("NUCLEI_MAX_REDIRECTS", "Network"),
@@ -583,6 +668,7 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
                 print("[*][Nuclei] DETECTION pass skipped (no tags + no custom templates)")
                 d_findings, d_fps = [], []
             else:
+                detection_container = f"redamon-nuclei-detection-{uuid.uuid4().hex[:12]}"
                 detection_cmd = build_nuclei_command(
                     targets_file=detection_targets_file,
                     output_file=detection_output_file,
@@ -607,9 +693,12 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
                     max_redirects=NUCLEI_MAX_REDIRECTS,
                     interactsh=NUCLEI_INTERACTSH,
                     auth_headers=_nuclei_auth,
+                    container_name=detection_container,
+                    max_host_error=NUCLEI_MAX_HOST_ERROR,
                 )
                 d_findings, d_fps, d_duration, _ = _execute_nuclei_pass(
-                    detection_cmd, detection_output_file, label="DETECTION"
+                    detection_cmd, detection_output_file, label="DETECTION",
+                    runtime_cap=NUCLEI_MAX_RUNTIME, container_name=detection_container,
                 )
             findings.extend(d_findings)
             false_positives_filtered.extend(d_fps)
@@ -617,6 +706,7 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
             # ---- Pass B: DAST (additive) ----
             dast_duration = 0
             if do_dast_pass:
+                dast_container = f"redamon-nuclei-dast-{uuid.uuid4().hex[:12]}"
                 dast_cmd = build_nuclei_command(
                     targets_file=dast_targets_file,
                     output_file=dast_output_file,
@@ -634,9 +724,12 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
                     interactsh=NUCLEI_INTERACTSH,
                     force_dast_pass=True,
                     auth_headers=_nuclei_auth,
+                    container_name=dast_container,
+                    max_host_error=NUCLEI_MAX_HOST_ERROR,
                 )
                 b_findings, b_fps, b_duration, _ = _execute_nuclei_pass(
-                    dast_cmd, dast_output_file, label="DAST"
+                    dast_cmd, dast_output_file, label="DAST",
+                    runtime_cap=NUCLEI_MAX_RUNTIME, container_name=dast_container,
                 )
                 findings.extend(b_findings)
                 false_positives_filtered.extend(b_fps)

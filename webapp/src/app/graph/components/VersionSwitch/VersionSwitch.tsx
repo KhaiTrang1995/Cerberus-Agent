@@ -123,6 +123,8 @@ export function VersionSwitch({
                     <span className={styles.itemMeta}>
                       v{v.seq} · {formatDate(v.createdAt)} · {formatCount(v.nodeCount)} nodes
                       {!v.isCurrent && !v.activatable && ' · no snapshot'}
+                      {typeof v.degradedSources === 'number' && v.degradedSources > 0
+                        && ` · partial — ${v.degradedSources} source${v.degradedSources === 1 ? '' : 's'} skipped`}
                     </span>
                   </span>
                 </button>

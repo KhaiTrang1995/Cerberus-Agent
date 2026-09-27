@@ -141,11 +141,36 @@ def _build_provider_config(settings: dict) -> tuple[dict, list[str]]:
         config['driftnet'] = [driftnet_key]
         engines.append('driftnet')
 
+    _drop_refused_engines(config, engines)
+
     # shodan-idb works without keys, always include for IP lookups
     if 'shodan' not in engines:
         engines.append('shodan-idb')
 
     return config, engines
+
+
+# Engines whose key the pipeline's own enrichers also use: when one of those
+# refused the key earlier in this run (a Domain batch runs its groups in one
+# process), uncover would only spend the same refusal again.
+_ENGINES_WITH_A_PIPELINE_BREAKER = ('shodan', 'censys', 'fofa', 'zoomeye', 'netlas', 'criminalip')
+
+
+def _drop_refused_engines(config: dict, engines: list[str]) -> None:
+    """Leave out every engine whose provider breaker is FATAL. Logged and noted
+    for the run's coverage only: an empty uncover payload must stay falsy."""
+    from recon.helpers import circuit_breaker as cb
+    refused = [e for e in engines if e in _ENGINES_WITH_A_PIPELINE_BREAKER and cb.is_fatal(e)]
+    if not refused:
+        return
+    for engine in refused:
+        engines.remove(engine)
+        config.pop(engine, None)
+    print(f"[!][Uncover] Engines left out, their key was refused earlier this run: "
+          f"{', '.join(refused)}")
+    cb.note_degraded("uncover", entries=[
+        {"source": f"uncover:{e}", "reason": "key refused earlier this run", "skipped": 1}
+        for e in refused])
 
 
 def _build_queries(domain: str, settings: dict) -> list[str]:

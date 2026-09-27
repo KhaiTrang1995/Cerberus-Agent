@@ -27,6 +27,10 @@
 - criminalip_risk_grade (string): domain risk grade from Criminal IP
 - criminalip_abuse_count (int): number of abuse reports for this domain from Criminal IP
 - criminalip_current_service (string): current service classification from Criminal IP
+- recon_coverage_at (datetime): when this run stamped its coverage record; present on every Domain a full recon run completed, absent when the run crashed, the graph write failed, or an older recon wrote the node
+- recon_coverage_gaps (string): JSON array of what this run could NOT check, one object per cut source (`source`, `module`, `reason`, `skipped`, `hosts`); "[]" on a clean run
+- recon_skipped_hosts (list[string]): host:port targets this run skipped as unreachable (first 500, sorted); their findings were kept, not re-checked
+- recon_nuclei_truncated (boolean): a Nuclei pass hit NUCLEI_MAX_RUNTIME and was stopped; its partial findings were kept
 Additional properties present on this node type, not yet described:
 - admin_name (string)
 - admin_org (string)

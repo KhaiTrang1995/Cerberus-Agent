@@ -27,10 +27,15 @@ sys.path.insert(0, str(REPO_ROOT / "recon"))
 sys.path.insert(0, str(REPO_ROOT / "recon" / "helpers"))
 
 # Stub out Docker-only dependencies before importing cve_helpers
-# (security_checks.py imports dns.resolver which is only in the container)
+# (security_checks.py imports dns.resolver which is only in the container).
+# Only where dnspython is really missing: a stub over the real package breaks
+# recon.helpers' own `import dns.zone` in the recon image.
 for mod_name in ["dns", "dns.resolver", "dns.rdatatype", "dns.name"]:
     if mod_name not in sys.modules:
-        sys.modules[mod_name] = types.ModuleType(mod_name)
+        try:
+            importlib.import_module(mod_name)
+        except ImportError:
+            sys.modules[mod_name] = types.ModuleType(mod_name)
 
 
 # =============================================================================
@@ -167,6 +172,45 @@ class TestKeyRotatorRotation(unittest.TestCase):
 
         # After full cycle, back to first key
         self.assertEqual(r.current_key, "key-0")
+
+
+class TestKeyRotatorPool(unittest.TestCase):
+    """The lock and mark_bad the recon circuit breakers rely on."""
+
+    def test_concurrent_ticks_rotate_exactly(self):
+        from concurrent.futures import ThreadPoolExecutor
+        r = KeyRotator(["a", "b", "c"], rotate_every_n=7)
+        with ThreadPoolExecutor(max_workers=16) as pool:
+            list(pool.map(lambda _: r.tick(), range(7 * 3 * 50)))
+        # 150 full cycles of 3 keys: back to the first, with no lost update.
+        self.assertEqual(r.current_key, "a")
+
+    def test_mark_bad_reports_the_configured_position_never_the_value(self):
+        r = KeyRotator(["main", "", "extra-1", "extra-2"], rotate_every_n=10)
+        self.assertEqual(r.mark_bad("extra-1"), (3, 2))
+        self.assertEqual(r.keys, ["main", "extra-2"])
+
+    def test_a_key_already_dropped_is_a_no_op(self):
+        r = KeyRotator(["a", "b"], rotate_every_n=10)
+        r.mark_bad("a")
+        self.assertEqual(r.mark_bad("a"), (0, 1))
+
+    def test_the_pool_is_exhausted_only_after_a_drop(self):
+        self.assertFalse(KeyRotator([], rotate_every_n=10).exhausted)
+        r = KeyRotator(["only"], rotate_every_n=10)
+        self.assertFalse(r.exhausted)
+        r.mark_bad("only")
+        self.assertTrue(r.exhausted)
+        self.assertEqual(r.current_key, "")
+
+    def test_rotation_continues_over_the_remaining_keys(self):
+        r = KeyRotator(["a", "b", "c"], rotate_every_n=1)
+        r.mark_bad("b")
+        seen = []
+        for _ in range(4):
+            seen.append(r.current_key)
+            r.tick()
+        self.assertEqual(seen, ["a", "c", "a", "c"])
 
 
 # =============================================================================

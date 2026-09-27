@@ -230,6 +230,33 @@ export function NucleiSection({ data, updateField, onRun }: NucleiSectionProps) 
               <span className={styles.fieldHint}>Retry attempts for failed requests</span>
             </div>
             <div className={styles.fieldGroup}>
+              <label className={styles.fieldLabel}>Max runtime (seconds)</label>
+              <input
+                type="number"
+                className="textInput"
+                value={data.nucleiMaxRuntime}
+                onChange={(e) => updateField('nucleiMaxRuntime', parseInt(e.target.value) || 86400)}
+                min={600}
+                max={604800}
+              />
+              <span className={styles.fieldHint}>Wall-clock cap per pass; partial findings are kept (default 24h)</span>
+            </div>
+          </div>
+
+          <div className={styles.fieldRow}>
+            <div className={styles.fieldGroup}>
+              <label className={styles.fieldLabel}>Max errors per host</label>
+              <input
+                type="number"
+                className="textInput"
+                value={data.nucleiMaxHostError}
+                onChange={(e) => updateField('nucleiMaxHostError', parseInt(e.target.value) || 30)}
+                min={1}
+                max={10000}
+              />
+              <span className={styles.fieldHint}>Stop probing a host after this many errors (-mhe)</span>
+            </div>
+            <div className={styles.fieldGroup}>
               <label className={styles.fieldLabel}>Max Redirects</label>
               <input
                 type="number"

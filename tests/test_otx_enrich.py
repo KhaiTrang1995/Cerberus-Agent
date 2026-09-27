@@ -877,5 +877,176 @@ class TestOtxEnrichIntegration(unittest.TestCase):
         self.assertEqual(out["otx"]["ip_reports"], [])
 
 
+# ---------------------------------------------------------------------------
+# Circuit breakers (recon/helpers/circuit_breaker.py)
+# ---------------------------------------------------------------------------
+
+def _many_ips(n: int, domain: str = "example.com") -> dict:
+    return {
+        "domain": domain,
+        "metadata": {"ip_mode": False, "modules_executed": []},
+        "dns": {"domain": {"ips": {"ipv4": [f"1.2.3.{i}" for i in range(1, n + 1)]}},
+                "subdomains": {}},
+    }
+
+
+class TestOtxCircuitBreaker(unittest.TestCase):
+    """One worker keeps the call order deterministic."""
+
+    def _settings(self, **overrides) -> dict:
+        base = {"OTX_ENABLED": True, "OTX_API_KEY": "otx-test-key",
+                "OTX_KEY_ROTATOR": None, "OTX_WORKERS": 1}
+        base.update(overrides)
+        return base
+
+    def _paths(self, mock_get) -> list[str]:
+        return [c.args[0].replace("https://otx.alienvault.com/api/v1/indicators", "")
+                for c in mock_get.call_args_list]
+
+    @patch("otx_enrich.time.sleep")
+    @patch("otx_enrich.requests.get")
+    def test_five_timeouts_mean_the_sixth_ip_is_never_requested(self, mock_get, _sleep):
+        import requests as req_lib
+        mock_get.side_effect = req_lib.exceptions.ReadTimeout("read timeout=30")
+        out = run_otx_enrichment(_many_ips(10), self._settings())
+        paths = self._paths(mock_get)
+        self.assertEqual(len(paths), 5)
+        self.assertTrue(all(p.endswith("/general") for p in paths))
+        otx = out["otx"]
+        self.assertEqual(otx["ip_reports"], [])
+        (entry,) = [d for d in otx["degraded"] if d["source"] == "otx:general"]
+        self.assertEqual(entry["outcome"], "transient")
+        self.assertEqual(entry["reason"], "5 consecutive failures (ReadTimeout)")
+        # Five remaining IPs plus the domain lookup.
+        self.assertEqual(entry["skipped"], 6)
+        self.assertFalse(entry["recovered"])
+
+    @patch("otx_enrich.time.sleep")
+    @patch("otx_enrich.requests.get")
+    def test_ten_404s_never_trip_it(self, mock_get, _sleep):
+        def side_effect(url, **_kwargs):
+            if url.endswith("/general"):
+                return _mock_response(200, {"pulse_info": {"count": 0, "pulses": []}})
+            return _mock_response(404, {})
+        mock_get.side_effect = side_effect
+        out = run_otx_enrichment(_many_ips(10), self._settings())
+        otx = out["otx"]
+        self.assertEqual(len(otx["ip_reports"]), 10)
+        self.assertNotIn("degraded", otx)
+        # 10 IPs x 4 sections, plus the domain's 4.
+        self.assertEqual(mock_get.call_count, 44)
+
+    @patch("otx_enrich.time.sleep")
+    @patch("otx_enrich.requests.get")
+    def test_a_refused_key_means_exactly_one_call(self, mock_get, _sleep):
+        mock_get.return_value = _mock_response(403, {}, text="forbidden")
+        with patch("builtins.print") as fake_print:
+            out = run_otx_enrichment(_many_ips(10), self._settings())
+        self.assertEqual(mock_get.call_count, 1)
+        printed = "\n".join(" ".join(map(str, c.args)) for c in fake_print.call_args_list)
+        self.assertIn("[!][OTX] otx: 403 key rejected - stopped for the rest of this run", printed)
+        self.assertNotIn("otx-test-key", printed)
+        self.assertNotIn("forbidden", printed)
+        (entry,) = out["otx"]["degraded"]
+        self.assertEqual((entry["source"], entry["outcome"]), ("otx", "fatal"))
+
+    @patch("otx_enrich.time.sleep")
+    @patch("otx_enrich.requests.get")
+    def test_a_dead_section_is_skipped_while_general_keeps_working(self, mock_get, _sleep):
+        def side_effect(url, **_kwargs):
+            if url.endswith("/passive_dns"):
+                return _mock_response(502, {}, text="<html>Bad Gateway</html>")
+            if url.endswith("/general"):
+                return _mock_response(200, _otx_general_body_full())
+            return _mock_response(404, {})
+        mock_get.side_effect = side_effect
+        out = run_otx_enrichment(_many_ips(8), self._settings())
+        paths = self._paths(mock_get)
+        self.assertEqual(sum(p.endswith("/passive_dns") for p in paths), 5)
+        self.assertEqual(sum(p.endswith("/general") for p in paths), 9)  # 8 IPs + domain
+        otx = out["otx"]
+        self.assertEqual(len(otx["ip_reports"]), 8)
+        (entry,) = otx["degraded"]
+        self.assertEqual(entry["source"], "otx:passive_dns")
+        self.assertEqual(entry["skipped"], 4)  # 3 IPs + the domain
+
+    @patch("otx_enrich.time.sleep")
+    @patch("otx_enrich.requests.get")
+    def test_a_failed_domain_lookup_never_writes_zeros(self, mock_get, _sleep):
+        """Bug 9: the pre-filled zero report must not reach the graph writer."""
+        def side_effect(url, **_kwargs):
+            if "/domain/" in url:
+                return _mock_response(500, {})
+            return self._full(url)
+        mock_get.side_effect = side_effect
+        out = run_otx_enrichment(_combined_result(), self._settings())
+        dr = out["otx"]["domain_report"]
+        self.assertEqual(dr["domain"], "")
+        called = self._paths(mock_get)
+        self.assertEqual([p for p in called if "/domain/" in p], ["/domain/example.com/general"])
+
+    @patch("otx_enrich.time.sleep")
+    @patch("otx_enrich.requests.get")
+    def test_a_domain_with_no_data_is_still_written(self, mock_get, _sleep):
+        def side_effect(url, **_kwargs):
+            if "/domain/" in url:
+                return _mock_response(404, {})
+            return self._full(url)
+        mock_get.side_effect = side_effect
+        out = run_otx_enrichment(_combined_result(), self._settings())
+        self.assertEqual(out["otx"]["domain_report"]["domain"], "example.com")
+
+    def _full(self, url):
+        path = url.replace("https://otx.alienvault.com/api/v1/indicators", "")
+        if path.endswith("/general"):
+            return _mock_response(200, _otx_general_body_full())
+        return _mock_response(404, {})
+
+    @patch("otx_enrich.time.sleep")
+    @patch("otx_enrich.requests.get")
+    def test_the_key_is_read_per_request_so_rotation_works(self, mock_get, _sleep):
+        """Bug 5: the key used to be read once per run, so rotation did nothing."""
+        from recon.helpers.key_rotation import KeyRotator
+        mock_get.return_value = _mock_response(404, {})
+        rotator = KeyRotator(["key-a", "key-b"], rotate_every_n=1)
+        run_otx_enrichment(_many_ips(2, domain=""), self._settings(OTX_KEY_ROTATOR=rotator))
+        used = [c.kwargs["headers"]["X-OTX-API-KEY"] for c in mock_get.call_args_list]
+        self.assertEqual(used, ["key-a", "key-b"])
+
+    @patch("otx_enrich.time.sleep")
+    @patch("otx_enrich.requests.get")
+    def test_a_refused_pooled_key_is_dropped_and_the_next_one_used(self, mock_get, _sleep):
+        from recon.helpers.key_rotation import KeyRotator
+
+        def side_effect(url, headers=None, **_kwargs):
+            if headers.get("X-OTX-API-KEY") == "revoked":
+                return _mock_response(401, {})
+            return self._full(url)
+        mock_get.side_effect = side_effect
+        rotator = KeyRotator(["revoked", "good"], rotate_every_n=100)
+        out = run_otx_enrichment(_many_ips(3), self._settings(OTX_KEY_ROTATOR=rotator))
+        self.assertEqual(len(out["otx"]["ip_reports"]), 3)
+        self.assertEqual(rotator.keys, ["good"])
+        self.assertNotIn("degraded", out["otx"])
+
+    @patch("otx_enrich.time.sleep")
+    @patch("otx_enrich.requests.get")
+    def test_a_clean_run_keeps_todays_shape(self, mock_get, _sleep):
+        mock_get.side_effect = self._full
+        out = run_otx_enrichment(_combined_result(), self._settings())
+        self.assertEqual(set(out["otx"]), {"ip_reports", "domain_report"})
+
+    @patch("otx_enrich.time.sleep")
+    @patch("otx_enrich.requests.get")
+    def test_off_switch_calls_every_item(self, mock_get, _sleep):
+        import os
+        import requests as req_lib
+        mock_get.side_effect = req_lib.exceptions.ReadTimeout("x")
+        with patch.dict(os.environ, {"RECON_CIRCUIT_BREAKERS": "off"}):
+            out = run_otx_enrichment(_many_ips(10), self._settings())
+        self.assertEqual(mock_get.call_count, 11)  # 10 IPs + the domain
+        self.assertNotIn("degraded", out["otx"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

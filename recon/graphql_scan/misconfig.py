@@ -106,6 +106,17 @@ def run_graphql_cop(
     if not settings.get('GRAPHQL_COP_ENABLED', False):
         return None
 
+    # Skip a host already known unreachable this run: graphql-cop is a full
+    # docker run per endpoint and would spend its whole timeout on a dead host.
+    # is_down is inert under the off switch. (HostHealth, circuit_breaker.py)
+    try:
+        from recon.helpers import circuit_breaker as _cb
+        if _cb.host_health.is_down(endpoint):
+            print(f"[-][GraphQL-Cop] {endpoint} host unreachable this run -- skipping")
+            return {'findings': [], 'raw': []}
+    except Exception:  # noqa: BLE001 - a fault here scans as today
+        pass
+
     timeout = timeout or settings.get('GRAPHQL_COP_TIMEOUT', 120)
     image = settings.get('GRAPHQL_COP_DOCKER_IMAGE', DEFAULT_IMAGE) or DEFAULT_IMAGE
     excluded = _build_excluded_tests(settings)

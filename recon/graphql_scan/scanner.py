@@ -49,7 +49,22 @@ def _build_retry_session(retry_count: int, backoff: float) -> requests.Session:
     return session
 
 
+# The run's report scope while run_graphql_scan runs (one scan per process).
+_GQL_SCOPE = None
+
+
 def run_graphql_scan(combined_result: dict, settings: dict) -> dict:
+    """Run the GraphQL scan; see _run_graphql_scan. Owns the host-health scope."""
+    global _GQL_SCOPE
+    from recon.helpers import circuit_breaker as _cb
+    _GQL_SCOPE = _cb.scope((), label="GraphQL", unit="host(s)")
+    try:
+        return _run_graphql_scan(combined_result, settings)
+    finally:
+        _GQL_SCOPE = None
+
+
+def _run_graphql_scan(combined_result: dict, settings: dict) -> dict:
     """
     Run GraphQL security scan on discovered endpoints.
 
@@ -230,6 +245,11 @@ def run_graphql_scan(combined_result: dict, settings: dict) -> dict:
             except Exception as e:
                 print(f"[!][GraphQL] Error testing {endpoint}: {str(e)}")
 
+    # Hosts skipped as unreachable: the prune keeps their previous findings.
+    if _GQL_SCOPE is not None:
+        _GQL_SCOPE.finish("graphql_scan", host_source="graphql_scan",
+                          payload=graphql_results)
+
     # Aggregate vulnerability statistics
     vuln_summary = aggregate_findings(graphql_results['vulnerabilities'])
     graphql_results['summary']['vulnerabilities_found'] = vuln_summary['total_findings']
@@ -298,8 +318,21 @@ def test_single_endpoint(endpoint: str, auth_headers: dict,
         depth_limit: TypeRef fragment recursion depth for full introspection.
 
     Returns:
-        Dict with endpoint data and vulnerabilities
+        Dict with endpoint data and vulnerabilities, or None when the endpoint
+        is not GraphQL or its host is known unreachable this run.
     """
+    # Gate here, once per endpoint, never inside test_introspection (a leaf the
+    # tests drive with fixed responses): a host another module already found
+    # dead is skipped instead of costing ~4 guessed endpoints x retries.
+    try:
+        from recon.helpers import circuit_breaker as _cb
+        if _GQL_SCOPE is not None:
+            if not _GQL_SCOPE.allow_host(endpoint):
+                return None
+        elif not _cb.host_health.allow(endpoint):
+            return None
+    except Exception:  # noqa: BLE001 - a fault here tests as today
+        pass
     result = {
         'endpoint_data': {
             'tested': True,

@@ -379,6 +379,8 @@ export const reconPresetSchema = z.object({
   nucleiConcurrency: int,
   nucleiTimeout: int,
   nucleiRetries: int,
+  nucleiMaxRuntime: int,
+  nucleiMaxHostError: int,
   nucleiTags: strArr,
   nucleiExcludeTags: strArr,
   nucleiDastMode: bool,
@@ -923,8 +925,10 @@ export const RECON_PARAMETER_CATALOG = `
 - nucleiRateLimit: integer - Requests per second
 - nucleiBulkSize: integer
 - nucleiConcurrency: integer
-- nucleiTimeout: integer - Seconds
+- nucleiTimeout: integer - Seconds (per-request timeout)
 - nucleiRetries: integer
+- nucleiMaxRuntime: integer - Seconds; wall-clock cap per nuclei pass (default 24h)
+- nucleiMaxHostError: integer - Stop probing a host after this many errors (-mhe)
 - nucleiTags: string[] - Template tags to include
 - nucleiExcludeTags: string[] - Template tags to exclude, e.g. ["dos", "fuzz"]
 - nucleiDastMode: boolean - Dynamic testing mode

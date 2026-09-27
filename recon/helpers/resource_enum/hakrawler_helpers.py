@@ -255,7 +255,18 @@ def run_hakrawler_crawler(
     if not valid_urls:
         return [], {"external_domains": []}
 
-    max_workers = min(parallelism, len(valid_urls))
+    # Skip a seed whose host another module already found unreachable: each
+    # crawl otherwise costs its full per-seed timeout against a dead host. The
+    # discovered URLs land under source 'resource_enum', so the skip is
+    # reported per host and the prune keeps that host's endpoints.
+    from recon.helpers import circuit_breaker as _cb
+    _scope = _cb.scope((), label="Hakrawler", unit="seed(s)")
+    live_urls = [u for u in valid_urls if not _scope.skip_if_down(u)]
+    if not live_urls:
+        _scope.finish("resource_enum", host_source="resource_enum")
+        return [], {"external_domains": []}
+
+    max_workers = min(parallelism, len(live_urls))
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
@@ -265,7 +276,7 @@ def run_hakrawler_crawler(
                 include_subs, insecure, allowed_hosts, custom_headers,
                 exclude_patterns, discovered_urls, urls_lock, max_urls,
             ): url
-            for url in valid_urls
+            for url in live_urls
         }
 
         for future in as_completed(futures):
@@ -276,6 +287,8 @@ def run_hakrawler_crawler(
                     external_domain_entries.extend(externals)
             except Exception as e:
                 print(f"[!][Hakrawler] Worker error: {e}")
+
+    _scope.finish("resource_enum", host_source="resource_enum")
 
     urls_list = sorted(list(discovered_urls))
     print(f"[+][Hakrawler] Discovered {len(urls_list)} URLs")

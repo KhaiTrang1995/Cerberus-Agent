@@ -380,24 +380,112 @@ class TestNoRedirectFollow(unittest.TestCase):
 
 
 class TestCacheDoesNotPoison(unittest.TestCase):
-    def test_empty_result_not_cached(self):
-        """F4: an empty (often transient-error) result is not cached, so later hosts retry."""
+    """Keyed producers return typed results: an ANSWER is cached, a failure never is."""
+
+    def _typed(self, ips, outcome):
+        from recon.helpers.circuit_breaker import CallResult
+        return CallResult(ips, outcome)
+
+    def test_no_data_is_cached(self):
+        """A genuine "nothing found" is an answer: N hosts sharing the key cost one call."""
+        from recon.helpers.circuit_breaker import Outcome
         ctx = od._RunCtx(_settings())
         calls = {"n": 0}
 
         def _producer():
             calls["n"] += 1
-            return []      # simulate a transient failure that a producer swallows to []
+            return self._typed([], Outcome.NO_DATA)
 
-        ctx.cached("otx", "example.com", _producer)
-        ctx.cached("otx", "example.com", _producer)
-        self.assertEqual(calls["n"], 2)             # re-queried, not served a poisoned []
-        # a non-empty result IS cached (still one call for N hosts sharing a key)
-        calls["n"] = 0
-        ctx.cached("otx", "good.com", lambda: (calls.__setitem__("n", calls["n"] + 1) or ["1.2.3.4"]))
-        r = ctx.cached("otx", "good.com", lambda: (calls.__setitem__("n", calls["n"] + 1) or ["9.9.9.9"]))
+        self.assertEqual(ctx.cached("otx", "example.com", _producer), [])
+        self.assertEqual(ctx.cached("otx", "example.com", _producer), [])
         self.assertEqual(calls["n"], 1)
-        self.assertEqual(r, ["1.2.3.4"])
+
+    def test_failures_are_not_cached(self):
+        """F4: a failure must not black the key out for every later host."""
+        from recon.helpers.circuit_breaker import Outcome
+        for outcome in (Outcome.TRANSIENT, Outcome.RATE_LIMIT, Outcome.FATAL, Outcome.SKIPPED):
+            with self.subTest(outcome=outcome):
+                ctx = od._RunCtx(_settings())
+                calls = {"n": 0}
+
+                def _producer(outcome=outcome):
+                    calls["n"] += 1
+                    return self._typed([], outcome)
+
+                ctx.cached("otx", "example.com", _producer)
+                ctx.cached("otx", "example.com", _producer)
+                self.assertEqual(calls["n"], 2)
+
+    def test_hits_are_cached(self):
+        from recon.helpers.circuit_breaker import Outcome
+        ctx = od._RunCtx(_settings())
+        calls = {"n": 0}
+        first = ctx.cached("otx", "good.com", lambda: (calls.__setitem__("n", calls["n"] + 1)
+                                                       or self._typed(["1.2.3.4"], Outcome.OK)))
+        again = ctx.cached("otx", "good.com", lambda: (calls.__setitem__("n", calls["n"] + 1)
+                                                       or self._typed(["9.9.9.9"], Outcome.OK)))
+        self.assertEqual((first, again, calls["n"]), (["1.2.3.4"], ["1.2.3.4"], 1))
+
+    def test_a_keyless_plain_list_is_cached_only_when_non_empty(self):
+        """A plain list cannot tell "none" from "failed"."""
+        ctx = od._RunCtx(_settings())
+        calls = {"n": 0}
+
+        def _producer():
+            calls["n"] += 1
+            return []
+
+        ctx.cached("od_crtsh", "example.com", _producer)
+        ctx.cached("od_crtsh", "example.com", _producer)
+        self.assertEqual(calls["n"], 2)
+        calls["n"] = 0
+        ctx.cached("od_crtsh", "good.com", lambda: (calls.__setitem__("n", calls["n"] + 1) or ["1.2.3.4"]))
+        ctx.cached("od_crtsh", "good.com", lambda: (calls.__setitem__("n", calls["n"] + 1) or ["9.9.9.9"]))
+        self.assertEqual(calls["n"], 1)
+
+
+class TestKeyedSourcesUseTheBreakers(unittest.TestCase):
+    """The shared provider breakers (recon/helpers/circuit_breaker.py)."""
+
+    def _ctx(self, **overrides):
+        return od._RunCtx(_settings(**overrides))
+
+    def test_a_refused_key_is_surfaced_once_then_skipped_without_budget(self):
+        from recon.main_recon_modules.shodan_enrich import ShodanApiKeyError
+        ctx = self._ctx(SHODAN_API_KEY="bad", ORIGIN_DISCOVERY_MAX_SEARCH_CALLS=50)
+        refused = MagicMock(status_code=401, headers={}, text="")
+        with patch("recon.main_recon_modules.shodan_enrich.requests.get",
+                   return_value=refused) as get:
+            with self.assertRaises(ShodanApiKeyError):
+                od._discover_via_shodan("www.example.com", None, ctx)
+            budget_after_refusal = ctx.budget.remaining
+            self.assertEqual(od._discover_via_shodan("api.example.com", None, ctx), [])
+        self.assertEqual(get.call_count, 1)
+        self.assertEqual(ctx.budget.remaining, budget_after_refusal)
+
+    def test_a_paused_source_does_not_draw_the_budget(self):
+        from recon.helpers import circuit_breaker as cb
+        breaker = cb.get_breaker("censys:search", label="Censys", parent="censys")
+        for _ in range(5):
+            breaker.record(cb.Outcome.TRANSIENT, "ReadTimeout")
+        ctx = self._ctx(CENSYS_API_TOKEN="tok", ORIGIN_DISCOVERY_MAX_SEARCH_CALLS=3)
+        with patch.object(od.requests, "post") as post:
+            self.assertEqual(od._discover_via_censys("www.example.com", ctx), [])
+        post.assert_not_called()
+        self.assertEqual(ctx.budget.remaining, 3)
+
+    def test_a_cut_provider_degrades_the_origin_discovery_source(self):
+        from recon.helpers import circuit_breaker as cb
+        breaker = cb.get_breaker("otx:passive_dns", label="OTX", parent="otx")
+        for _ in range(5):
+            breaker.record(cb.Outcome.TRANSIENT, "ReadTimeout")
+        cr = _fronted_result()
+        with patch.object(od, "_discover_via_subdomains", return_value=[]), \
+                patch.object(od, "_discover_via_email_records", return_value=[]), \
+                patch.object(od, "_discover_via_crtsh", return_value=[]):
+            out = od.run_origin_discovery_enrichment(cr, _settings(ORIGIN_DISCOVERY_SCANNERS=True))
+        self.assertIn("degraded", out["origin_discovery"])
+        self.assertIn("origin_discovery", cb.coverage_report().degraded_sources)
 
 
 class TestPortPrecheck(unittest.TestCase):

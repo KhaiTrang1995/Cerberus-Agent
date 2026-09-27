@@ -445,6 +445,104 @@ def classify_cvss_score(score: float) -> str:
 # NVD API Lookup
 # =============================================================================
 
+def _nvd_breaker():
+    from recon.helpers import circuit_breaker as cb
+    return cb.get_breaker("nvd", label="CVE-NVD")
+
+
+def _vulners_breaker():
+    from recon.helpers import circuit_breaker as cb
+    return cb.get_breaker("vulners", label="CVE-Vulners")
+
+
+def _nvd_classify(sent):
+    """NVD signals a rate limit with 403 as well as 429, and refuses an unknown
+    key with a 404 whose empty body puts the reason in the `message` header.
+    Any other 404 is an unknown CPE: an answer, not a failure."""
+    from recon.helpers import circuit_breaker as cb
+    resp, keyed = sent
+    status = cb.status_of(resp)
+    if status in (403, 429):
+        return cb.CallResult(None, cb.Outcome.RATE_LIMIT, f"HTTP {status}",
+                             cb.retry_after_seconds(resp, default=6.0))
+    if status == 404:
+        try:
+            reason = str((resp.headers or {}).get("message") or "").lower()
+        except Exception:  # noqa: BLE001
+            reason = ""
+        if keyed and ("apikey" in reason or "api key" in reason):
+            return cb.CallResult(None, cb.Outcome.FATAL, "404 key rejected")
+        return cb.CallResult(None, cb.Outcome.NO_DATA, "HTTP 404")
+    return cb.json_result(resp, keyed=keyed)
+
+
+def _nvd_query(product: str, version: str, max_results: int, keys, *,
+               admitted: bool = False):
+    """One NVD lookup through the `nvd` breaker. Returns a CallResult whose data
+    is the list of CVE dicts."""
+    from recon.helpers import circuit_breaker as cb
+    product_normalized = normalize_product_name(product)
+    cpe_info = CPE_MAPPINGS.get(product_normalized)
+
+    params = {"resultsPerPage": max_results}
+    if cpe_info and version:
+        vendor, prod = cpe_info
+        params["cpeName"] = f"cpe:2.3:a:{vendor}:{prod}:{version}:*:*:*:*:*:*:*"
+    elif cpe_info:
+        vendor, prod = cpe_info
+        params["cpeName"] = f"cpe:2.3:a:{vendor}:{prod}:*:*:*:*:*:*:*:*"
+    else:
+        # Fallback to keyword search for unknown products
+        keyword = product
+        if version:
+            keyword += f" {version}"
+        params["keywordSearch"] = keyword
+
+    def send(key):
+        headers = {"apiKey": key} if key else {}
+        return requests.get(NVD_API_URL, params=params, headers=headers, timeout=30), bool(key)
+
+    res = cb.guarded_call(_nvd_breaker(), send, _nvd_classify, keys=keys, admitted=admitted)
+    if not res.ok:
+        return cb.CallResult([], res.outcome, res.detail)
+    cves = []
+    for vuln in (res.data or {}).get("vulnerabilities", []):
+        cve_data = vuln.get("cve", {})
+        cve_id = cve_data.get("id", "")
+
+        metrics = cve_data.get("metrics", {})
+        cvss_v3 = metrics.get("cvssMetricV31", [{}])[0] if metrics.get("cvssMetricV31") else None
+        cvss_v2 = metrics.get("cvssMetricV2", [{}])[0] if metrics.get("cvssMetricV2") else None
+
+        cvss_score = None
+        severity = None
+
+        if cvss_v3:
+            cvss_score = cvss_v3.get("cvssData", {}).get("baseScore")
+            severity = cvss_v3.get("cvssData", {}).get("baseSeverity")
+        elif cvss_v2:
+            cvss_score = cvss_v2.get("cvssData", {}).get("baseScore")
+            severity = cvss_v2.get("baseSeverity")
+
+        descriptions = cve_data.get("descriptions", [])
+        description = next((d["value"] for d in descriptions if d.get("lang") == "en"), "")
+
+        refs = cve_data.get("references", [])
+        reference_urls = [ref.get("url") for ref in refs[:3] if ref.get("url")]
+
+        cves.append({
+            "id": cve_id,
+            "cvss": cvss_score,
+            "severity": severity,
+            "description": description[:300] if description else "",
+            "published": cve_data.get("published"),
+            "references": reference_urls,
+            "source": "nvd",
+            "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}",
+        })
+    return cb.CallResult(cves, cb.Outcome.OK if cves else cb.Outcome.NO_DATA, res.detail)
+
+
 def lookup_cves_nvd(
     product: str,
     version: str = None,
@@ -464,96 +562,71 @@ def lookup_cves_nvd(
     Returns:
         List of CVE dictionaries
     """
-    cves = []
-    product_normalized = normalize_product_name(product)
-    cpe_info = CPE_MAPPINGS.get(product_normalized)
-
-    params = {"resultsPerPage": max_results}
-    headers = {}
-
-    # Add API key if available (use rotator if present)
-    effective_key = key_rotator.current_key if key_rotator and key_rotator.has_keys else api_key
-    if effective_key:
-        headers["apiKey"] = effective_key
-
-    if cpe_info and version:
-        vendor, prod = cpe_info
-        params["cpeName"] = f"cpe:2.3:a:{vendor}:{prod}:{version}:*:*:*:*:*:*:*"
-    elif cpe_info:
-        vendor, prod = cpe_info
-        params["cpeName"] = f"cpe:2.3:a:{vendor}:{prod}:*:*:*:*:*:*:*:*"
-    else:
-        # Fallback to keyword search for unknown products
-        keyword = product
-        if version:
-            keyword += f" {version}"
-        params["keywordSearch"] = keyword
-
-    try:
-        response = requests.get(NVD_API_URL, params=params, headers=headers, timeout=30)
-        if key_rotator:
-            key_rotator.tick()
-
-        # Handle rate limiting (NVD returns 403 or 429 when rate limited)
-        if response.status_code == 403:
-            print(f"[!][CVE] NVD API rate limited. Configure NVD API Key in Global Settings → Tool API Keys for higher limits.")
-            return cves
-        if response.status_code == 404:
-            # 404 can occur with invalid CPE format or when service is unavailable
-            print(f"[!][CVE] NVD API returned 404 for {product}. Skipping CVE lookup.")
-            return cves
-        if response.status_code == 429:
-            print(f"[!][CVE] NVD API rate limited (429). Waiting...")
-            time.sleep(6)  # Wait 6 seconds and continue
-            return cves
-
-        response.raise_for_status()
-        data = response.json()
-
-        for vuln in data.get("vulnerabilities", []):
-            cve_data = vuln.get("cve", {})
-            cve_id = cve_data.get("id", "")
-            
-            metrics = cve_data.get("metrics", {})
-            cvss_v3 = metrics.get("cvssMetricV31", [{}])[0] if metrics.get("cvssMetricV31") else None
-            cvss_v2 = metrics.get("cvssMetricV2", [{}])[0] if metrics.get("cvssMetricV2") else None
-            
-            cvss_score = None
-            severity = None
-            
-            if cvss_v3:
-                cvss_score = cvss_v3.get("cvssData", {}).get("baseScore")
-                severity = cvss_v3.get("cvssData", {}).get("baseSeverity")
-            elif cvss_v2:
-                cvss_score = cvss_v2.get("cvssData", {}).get("baseScore")
-                severity = cvss_v2.get("baseSeverity")
-            
-            descriptions = cve_data.get("descriptions", [])
-            description = next((d["value"] for d in descriptions if d.get("lang") == "en"), "")
-            
-            refs = cve_data.get("references", [])
-            reference_urls = [ref.get("url") for ref in refs[:3] if ref.get("url")]
-            
-            cves.append({
-                "id": cve_id,
-                "cvss": cvss_score,
-                "severity": severity,
-                "description": description[:300] if description else "",
-                "published": cve_data.get("published"),
-                "references": reference_urls,
-                "source": "nvd",
-                "url": f"https://nvd.nist.gov/vuln/detail/{cve_id}",
-            })
-            
-    except Exception as e:
-        print(f"[!][CVE] NVD API error: {str(e)[:80]}")
-    
-    return cves
+    from recon.helpers import circuit_breaker as cb
+    keys = cb.KeyPool(key_rotator, api_key or "", label="CVE-NVD")
+    return _nvd_query(product, version, max_results, keys).data
 
 
 # =============================================================================
 # Vulners API Lookup
 # =============================================================================
+
+def _vulners_classify(resp):
+    """Vulners answers in-body: "OK" (results), "warning" (nothing found),
+    "error" (a refused key among others). The body is read only to classify."""
+    from recon.helpers import circuit_breaker as cb
+    res = cb.json_result(resp, keyed=True)
+    if not res.ok:
+        return res
+    data = res.data if isinstance(res.data, dict) else {}
+    result = str(data.get("result") or "").lower()
+    if result == "ok":
+        return cb.CallResult(data, cb.Outcome.OK, res.detail)
+    if result == "warning":
+        return cb.CallResult(data, cb.Outcome.NO_DATA, "nothing found")
+    inner = data.get("data") if isinstance(data.get("data"), dict) else {}
+    message = f"{inner.get('error') or ''} {inner.get('errorCode') or ''}".lower()
+    if "key" in message or "auth" in message or "credential" in message:
+        return cb.CallResult(None, cb.Outcome.FATAL, "key rejected")
+    if "limit" in message or "too many" in message:
+        return cb.CallResult(None, cb.Outcome.RATE_LIMIT, "rate limited")
+    return cb.CallResult(None, cb.Outcome.TRANSIENT, "Vulners error body")
+
+
+def _vulners_query(product: str, version: str, keys, *, admitted: bool = False):
+    """One Vulners lookup through the `vulners` breaker. Returns a CallResult
+    whose data is the list of CVE dicts."""
+    from recon.helpers import circuit_breaker as cb
+    if not version:
+        return cb.CallResult([], cb.Outcome.NO_DATA, "no version")
+
+    def send(key):
+        params = {"software": f"{product} {version}", "version": version, "type": "software"}
+        if key:
+            params["apiKey"] = key
+        return requests.get(VULNERS_API_URL, params=params, timeout=30)
+
+    res = cb.guarded_call(_vulners_breaker(), send, _vulners_classify, keys=keys,
+                          admitted=admitted)
+    if not res.ok:
+        return cb.CallResult([], res.outcome, res.detail)
+    cves = []
+    for vuln in (res.data.get("data") or {}).get("search", []):
+        vuln_id = vuln.get("id", "")
+        cvss_data = vuln.get("cvss", {})
+
+        cves.append({
+            "id": vuln_id,
+            "cvss": cvss_data.get("score"),
+            "severity": classify_cvss_score(cvss_data.get("score")),
+            "description": vuln.get("description", "")[:300],
+            "published": vuln.get("published"),
+            "references": [vuln.get("href")] if vuln.get("href") else [],
+            "source": "vulners",
+            "url": f"https://vulners.com/{vuln.get('type', 'cve')}/{vuln_id}",
+        })
+    return cb.CallResult(cves, cb.Outcome.OK if cves else cb.Outcome.NO_DATA, res.detail)
+
 
 def lookup_cves_vulners(product: str, version: str, api_key: str = None, key_rotator=None) -> List[Dict]:
     """
@@ -568,41 +641,9 @@ def lookup_cves_vulners(product: str, version: str, api_key: str = None, key_rot
     Returns:
         List of CVE dictionaries
     """
-    cves = []
-    if not version:
-        return cves
-
-    effective_key = key_rotator.current_key if key_rotator and key_rotator.has_keys else api_key
-    params = {"software": f"{product} {version}", "version": version, "type": "software"}
-    if effective_key:
-        params["apiKey"] = effective_key
-
-    try:
-        response = requests.get(VULNERS_API_URL, params=params, timeout=30)
-        if key_rotator:
-            key_rotator.tick()
-        response.raise_for_status()
-        data = response.json()
-        
-        if data.get("result") == "OK":
-            for vuln in data.get("data", {}).get("search", []):
-                vuln_id = vuln.get("id", "")
-                cvss_data = vuln.get("cvss", {})
-                
-                cves.append({
-                    "id": vuln_id,
-                    "cvss": cvss_data.get("score"),
-                    "severity": classify_cvss_score(cvss_data.get("score")),
-                    "description": vuln.get("description", "")[:300],
-                    "published": vuln.get("published"),
-                    "references": [vuln.get("href")] if vuln.get("href") else [],
-                    "source": "vulners",
-                    "url": f"https://vulners.com/{vuln.get('type', 'cve')}/{vuln_id}",
-                })
-    except Exception as e:
-        print(f"[!][CVE] Vulners API error: {str(e)[:80]}")
-    
-    return cves
+    from recon.helpers import circuit_breaker as cb
+    keys = cb.KeyPool(key_rotator, api_key or "", label="CVE-Vulners")
+    return _vulners_query(product, version, keys).data
 
 
 # =============================================================================
@@ -703,17 +744,38 @@ def run_cve_lookup(
     # Lookup CVEs
     cve_results = {}
     all_cves = []
-    
+    from recon.helpers import circuit_breaker as cb
+    use_vulners = source == "vulners" and bool(vulners_api_key)
+    keys = (cb.KeyPool(vulners_key_rotator, vulners_api_key or "", label="CVE-Vulners") if use_vulners
+            else cb.KeyPool(nvd_key_rotator, nvd_api_key or "", label="CVE-NVD"))
+    breaker = _vulners_breaker() if use_vulners else _nvd_breaker()
+    cve_scope = cb.scope(("nvd", "vulners"), label="CVE", unit="technolog(ies)")
+    # NVD allows 5 requests / 30s without a key, 50 with one.
+    nvd_pacing = 0.6 if keys.has_key else 6.0
+    hinted = False
+
     for i, tech in enumerate(tech_to_lookup, 1):
         name, version = parse_technology_string(tech)
         name = normalize_product_name(name)
-        
+
+        # A paused or stopped source is skipped silently; the scope summarises it.
+        if not breaker.allow():
+            continue
         print(f"[*][CVE] [{i}/{len(tech_to_lookup)}] {tech}...", end=" ", flush=True)
-        
-        if source == "vulners" and vulners_api_key:
-            cves = lookup_cves_vulners(name, version, vulners_api_key, key_rotator=vulners_key_rotator)
+
+        if use_vulners:
+            res = _vulners_query(name, version, keys, admitted=True)
         else:
-            cves = lookup_cves_nvd(name, version, max_cves, nvd_api_key, key_rotator=nvd_key_rotator)
+            res = _nvd_query(name, version, max_cves, keys, admitted=True)
+        cves = res.data or []
+        if not res.answered:
+            print(f"failed ({res.detail})")
+            if (res.outcome is cb.Outcome.RATE_LIMIT and not use_vulners
+                    and not keys.has_key and not hinted):
+                hinted = True
+                print("[!][CVE] NVD API rate limited. Configure NVD API Key in Global Settings "
+                      "→ Tool API Keys for higher limits.")
+            continue
         
         # Filter by min CVSS
         if min_cvss > 0:
@@ -737,9 +799,12 @@ def run_cve_lookup(
         else:
             print("no CVEs")
         
-        # Rate limiting for NVD API
-        if source == "nvd" and i < len(tech_to_lookup):
-            time.sleep(6)
+        # NVD pacing, after an answer only: a failure has already cost its
+        # time, and a rate limit is paced by the breaker's shared pause.
+        if not use_vulners and i < len(tech_to_lookup):
+            time.sleep(nvd_pacing)
+
+    cve_scope.finish("cve_lookup")
     
     # Count unique CVEs
     unique_cve_ids = set()

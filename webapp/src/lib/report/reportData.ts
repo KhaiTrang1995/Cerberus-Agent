@@ -273,6 +273,11 @@ export interface ReportData {
   remediations: Remediation[]
   generatedAt: string
 
+  /** Recon coverage limitations (circuit breakers): finding sources a run could
+   *  not fully re-check this scan. Empty when coverage was clean or unrecorded.
+   *  Rendered as escaped text by the report route. */
+  coverageLimitations: { source: string; reason: string }[]
+
   // Graph Overview
   graphOverview: {
     totalNodes: number
@@ -535,6 +540,47 @@ async function queryTriageRisks(session: any, projectId: string) {
 
 // ── Main Data Gathering ─────────────────────────────────────────────────────
 
+/**
+ * Recon coverage limitations from the `Domain` coverage records (circuit
+ * breakers): distinct finding sources a run could not fully re-check, with a
+ * reason. Empty when nothing was cut or no coverage was recorded. Never throws.
+ */
+async function queryCoverageLimitations(
+  session: any, // eslint-disable-line @typescript-eslint/no-explicit-any
+  pid: string
+): Promise<{ source: string; reason: string }[]> {
+  try {
+    const res = await session.run(
+      `MATCH (d:Domain {project_id: $pid})
+       WHERE d.recon_coverage_gaps IS NOT NULL
+       RETURN d.recon_coverage_gaps AS gaps`,
+      { pid }
+    )
+    const bySource = new Map<string, string>()
+    for (const rec of res.records) {
+      let parsed: unknown = rec.get('gaps')
+      if (typeof parsed === 'string') {
+        try { parsed = JSON.parse(parsed) } catch { continue }
+      }
+      if (!Array.isArray(parsed)) continue
+      for (const g of parsed) {
+        if (!g || typeof g !== 'object') continue
+        const source = (g as { source?: unknown }).source
+        if (typeof source !== 'string' || !source || source.length > 64) continue
+        const reason = (g as { reason?: unknown }).reason
+        if (!bySource.has(source)) {
+          bySource.set(source, typeof reason === 'string' ? reason.slice(0, 200) : '')
+        }
+      }
+    }
+    return [...bySource.entries()]
+      .map(([source, reason]) => ({ source, reason }))
+      .sort((a, b) => a.source.localeCompare(b.source))
+  } catch {
+    return []
+  }
+}
+
 export async function gatherReportData(projectId: string): Promise<ReportData> {
   // Fetch PostgreSQL data
   const [project, remediations] = await Promise.all([
@@ -585,6 +631,9 @@ export async function gatherReportData(projectId: string): Promise<ReportData> {
   ])
 
   const triageRisks = await withSession(s => queryTriageRisks(s, projectId))
+    .catch(() => [])
+
+  const coverageLimitations = await withSession(s => queryCoverageLimitations(s, projectId))
     .catch(() => [])
 
   // Compute metrics
@@ -824,6 +873,7 @@ export async function gatherReportData(projectId: string): Promise<ReportData> {
       project,
       remediations,
       generatedAt: new Date().toISOString(),
+      coverageLimitations,
       graphOverview,
       attackSurface,
       vulnerabilities: vulnData,

@@ -60,6 +60,17 @@ graph-write rules it depends on.
   Reference: `prune_unseen_findings` in
   [graph_db/mixins/base_mixin.py](../../graph_db/mixins/base_mixin.py), and the
   four clears that spare them.
+- **NEVER prune a source or host the run could not re-check (circuit breakers).**
+  When a data provider was paused or a scan host was skipped, "not seen this run"
+  does NOT mean "gone". The caller passes `keep_hosts` (anchored regexes, matched
+  against `_KEEP_HOST_FIELDS` with `toStringOrNull`, passed as a Cypher parameter)
+  to `prune_unseen_findings`, and skips the prune entirely for a degraded source.
+  What was cut is recorded on the `Domain` coverage record — `recon_coverage_at`,
+  `recon_coverage_gaps`, `recon_skipped_hosts`, `recon_nuclei_truncated` (written
+  by `update_graph_coverage` in
+  [graph_db/mixins/recon/domain_mixin.py](../../graph_db/mixins/recon/domain_mixin.py)).
+  Those four are in the webapp's `VOLATILE_PROPERTIES`, so they never make a
+  `Domain` read as "changed" in the Recon Delta.
 - **NEVER write an unscoped `MATCH` for an entity node.** Uniqueness is the
   `(id, user_id, project_id)` triple, so a natural id is NOT unique across the
   database and `MATCH (n {id: $id})` can read or write another project's node.

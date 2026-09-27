@@ -98,7 +98,8 @@ def ensure_kiterunner_binary(wordlist_name: str) -> Tuple[Optional[str], Optiona
                 download_url,
                 headers={'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) RedAmon/1.0'}
             )
-            with urllib.request.urlopen(request) as response:
+            # A GitHub/CDN download that hangs must not stall the whole scan.
+            with urllib.request.urlopen(request, timeout=30) as response:
                 with open(archive_path, 'wb') as f:
                     f.write(response.read())
 
@@ -146,7 +147,8 @@ def ensure_kiterunner_binary(wordlist_name: str) -> Tuple[Optional[str], Optiona
                     wordlist_url,
                     headers={'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) RedAmon/1.0'}
                 )
-                with urllib.request.urlopen(request) as response:
+                # A CDN download that hangs must not stall the whole scan.
+                with urllib.request.urlopen(request, timeout=30) as response:
                     with open(archive_path, 'wb') as f:
                         f.write(response.read())
 
@@ -600,6 +602,21 @@ def detect_kiterunner_methods(
                 url_methods[url] = []
             if method not in url_methods[url]:
                 url_methods[url].append(method)
+
+    # Skip method probes for URLs whose host is already known unreachable this
+    # run: their Kiterunner-reported method is kept, they are just not re-probed.
+    # is_down is inert under the off switch. (HostHealth, circuit_breaker.py)
+    try:
+        from recon.helpers import circuit_breaker as _cb
+        live_urls = [u for u in urls if not _cb.host_health.is_down(u)]
+        if len(live_urls) != len(urls):
+            print(f"[-][Kiterunner] Skipping method detection for "
+                  f"{len(urls) - len(live_urls)} URL(s) on unreachable host(s)")
+            urls = live_urls
+    except Exception:  # noqa: BLE001 - a fault here scans as today
+        pass
+    if not urls:
+        return url_methods
 
     # Use /tmp/redamon for Docker-in-Docker compatibility (avoids paths with spaces)
     temp_path = _create_temp_dir("kr_methods")

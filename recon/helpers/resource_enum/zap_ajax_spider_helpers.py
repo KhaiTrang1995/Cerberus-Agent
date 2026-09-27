@@ -465,9 +465,23 @@ def run_zap_ajax_spider(
     }
     debug_enabled = _zap_ajax_debug_enabled()
 
+    # Skip a seed whose host another module already found unreachable: the ZAP
+    # Ajax Spider otherwise spends its full per-seed run (up to ~780s) on a dead
+    # host. Discovered URLs land under source 'resource_enum', so the skip is
+    # reported per host and the prune keeps that host's endpoints.
+    from recon.helpers import circuit_breaker as _cb
+    _scope = _cb.scope((), label="ZAP Ajax", unit="seed(s)")
+    kept_seeds = [s for s in seeds if not _scope.skip_if_down(s)]
+    if len(kept_seeds) != len(seeds):
+        metadata["seeds_skipped_unreachable"] = len(seeds) - len(kept_seeds)
+        seeds = kept_seeds
+        metadata["seed_urls"] = len(seeds)
+        metadata["seeds_attempted"] = len(seeds)
+
     if not seeds:
         filtered, filter_meta = filter_zap_ajax_urls([], allowed_hosts, exclude_patterns, max_urls)
         metadata.update(filter_meta)
+        _scope.finish("resource_enum", host_source="resource_enum")
         return filtered, metadata
 
     work_dir = Path(f"/tmp/redamon/zap_ajax_{uuid.uuid4().hex[:8]}")
@@ -607,6 +621,7 @@ def run_zap_ajax_spider(
         metadata["failed_seeds"] = seeds_failed
         return filtered, metadata
     finally:
+        _scope.finish("resource_enum", host_source="resource_enum")
         if debug_enabled:
             print(f"[*][ZAP Ajax] Debug work directory retained: {work_dir}")
         else:

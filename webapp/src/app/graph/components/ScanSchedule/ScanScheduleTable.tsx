@@ -32,6 +32,9 @@ interface Job {
   createdAt: string
   nodeCount: number | null
   ramReason: string | null
+  /** Finding sources a full_recon could not fully re-check (circuit breakers).
+   *  null = unknown/complete, N>0 = partial. */
+  degradedSources: number | null
   version: { seq: number; label: string } | null
 }
 
@@ -407,6 +410,12 @@ export function ScanScheduleTable({ projectId }: ScanScheduleTableProps) {
                   }>
                     {j.status}
                   </span>
+                  {typeof j.degradedSources === 'number' && j.degradedSources > 0 && (
+                    <span className={styles.partialBadge}
+                      title="Some finding sources could not be fully re-checked this run">
+                      partial — {j.degradedSources} source{j.degradedSources === 1 ? '' : 's'} skipped
+                    </span>
+                  )}
                 </td>
                 <td className={styles.muted}>{j.version ? `v${j.version.seq}` : '-'}</td>
                 <td className={styles.muted}>{fmt(j.startedAt ?? j.createdAt)}</td>

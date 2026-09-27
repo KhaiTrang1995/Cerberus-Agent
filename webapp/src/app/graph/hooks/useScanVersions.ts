@@ -13,6 +13,9 @@ export interface ScanVersionSummary {
   linkCount: number | null
   createdAt: string
   snapshotBytes: number
+  /** Finding sources the run behind this version could not fully re-check
+   *  (circuit breakers). null = unknown/complete, N>0 = partial. */
+  degradedSources?: number | null
   /** False for the current version and for versions with no restorable bytes. */
   activatable: boolean
 }

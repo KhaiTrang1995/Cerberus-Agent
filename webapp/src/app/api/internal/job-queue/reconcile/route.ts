@@ -20,6 +20,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { isInternalRequest } from '@/lib/session'
+import { readDegradedSourceCount } from '@/lib/scanCoverage'
 import { orchestratorFetch } from '@/lib/orchestrator'
 
 export const runtime = 'nodejs'
@@ -175,10 +176,16 @@ export async function POST(request: NextRequest) {
       } else {
         outcome = 'canceled' // an older, superseded run for the same project+kind
       }
+      // Stamp degraded-source coverage from the graph, full_recon completions
+      // only (the same rule as the status-poll close path).
+      const degradedSources =
+        s.kind === 'full_recon' && outcome === 'completed'
+          ? await readDegradedSourceCount(s.projectId)
+          : null
       await prisma.scanJob
         .updateMany({
           where: { id: s.id, status: 'running' },
-          data: { status: outcome, finishedAt: new Date() },
+          data: { status: outcome, finishedAt: new Date(), degradedSources },
         })
         .then(res => { scansClosed += res.count })
         .catch(() => {})

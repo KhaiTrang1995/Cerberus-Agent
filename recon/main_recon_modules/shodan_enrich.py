@@ -111,99 +111,172 @@ def _extract_ips_from_recon(combined_result: dict) -> list[str]:
 
 
 class ShodanApiKeyError(Exception):
-    """Raised when the Shodan API key is invalid (401) or lacks access (403) to abort early."""
-    pass
+    """Raised when the Shodan API key is invalid (401) or lacks access (403) to abort early.
+
+    ``local`` marks a plan-gated 403: that endpoint is closed to this plan, the
+    key itself still works for the others.
+    """
+
+    def __init__(self, message: str, *, local: bool = False, detail: str = ""):
+        super().__init__(message)
+        self.local = local
+        self.detail = detail or ("403 plan-gated" if local else "401 key rejected")
 
 
-def _shodan_get(endpoint: str, api_key: str, params: dict | None = None, key_rotator=None) -> dict | None:
-    """Make a GET request to the Shodan API with error handling and optional key rotation."""
-    effective_key = key_rotator.current_key if key_rotator and key_rotator.has_keys else api_key
+def _shodan_endpoint(endpoint: str) -> str:
+    if endpoint.startswith("/shodan/host/search"):
+        return "search"
+    if endpoint.startswith("/shodan/host/"):
+        return "host"
+    if endpoint.startswith("/dns/reverse"):
+        return "dns_reverse"
+    if endpoint.startswith("/dns/domain/"):
+        return "dns_domain"
+    return "api"
+
+
+def _shodan_breaker(name: str):
+    """A refused key or a second 429 in a row stops every Shodan endpoint; a
+    plan-gated 403, timeouts and 5xx stop only the endpoint that failed."""
+    from recon.helpers import circuit_breaker as cb
+    return cb.get_breaker(f"shodan:{name}", label="Shodan", parent="shodan")
+
+
+def _shodan_classify(resp):
+    from recon.helpers import circuit_breaker as cb
+    status = cb.status_of(resp)
+    if status == 401:
+        return cb.CallResult(None, cb.Outcome.FATAL, "401 key rejected")
+    if status == 403:
+        return cb.CallResult(None, cb.Outcome.FATAL, "403 plan-gated", local=True)
+    return cb.json_result(resp, keyed=True)
+
+
+def _shodan_call(endpoint: str, keys, params: dict | None = None, *, admitted: bool = False):
+    """GET the Shodan API through the endpoint's breaker; returns a CallResult.
+
+    ``keys`` is a KeyPool. The key travels as the ``key`` query parameter,
+    which is why no exception text ever reaches a log line.
+    """
+    from recon.helpers import circuit_breaker as cb
     url = f"{SHODAN_API_BASE}{endpoint}"
-    all_params = {"key": effective_key}
-    if params:
-        all_params.update(params)
-    try:
-        resp = requests.get(url, params=all_params, timeout=30)
-        if key_rotator:
-            key_rotator.tick()
-        if resp.status_code == 200:
-            return resp.json()
-        elif resp.status_code == 404:
-            logger.debug(f"Shodan 404 for {endpoint}")
-            return None
-        elif resp.status_code == 401:
-            logger.error("Shodan API key is invalid or expired")
-            raise ShodanApiKeyError("Shodan API key is invalid or expired (401)")
-        elif resp.status_code == 403:
-            logger.error(f"Shodan access denied (403) — requires paid membership")
-            raise ShodanApiKeyError("Shodan API requires paid membership for this feature (403)")
-        elif resp.status_code == 429:
-            logger.warning("Shodan rate limit hit, waiting 2s")
-            time.sleep(2)
-            return None
-        else:
-            logger.warning(f"Shodan {resp.status_code} for {endpoint}: {resp.text[:200]}")
-            return None
-    except ShodanApiKeyError:
-        raise  # Re-raise auth/access errors for early abort
-    except requests.RequestException as e:
-        logger.warning(f"Shodan request failed for {endpoint}: {e}")
-        return None
+
+    def send(key):
+        all_params = {"key": key}
+        if params:
+            all_params.update(params)
+        return requests.get(url, params=all_params, timeout=30)
+
+    return cb.guarded_call(_shodan_breaker(_shodan_endpoint(endpoint)), send, _shodan_classify,
+                           keys=keys, admitted=admitted)
+
+
+def _shodan_get(endpoint: str, api_key: str, params: dict | None = None, key_rotator=None,
+                *, admitted: bool = False) -> dict | None:
+    """GET the Shodan API through the endpoint's breaker, with optional key rotation.
+
+    Returns the parsed body, or None for no data, a failure, or a paused
+    endpoint. A 429 waits out Retry-After and is sent once more. Raises
+    ShodanApiKeyError when the key is refused (401, after every pooled key) or
+    the endpoint is plan-gated (403), and again on every later call while
+    that stays true, so callers keep taking their fallback path.
+    """
+    from recon.helpers import circuit_breaker as cb
+    breaker = _shodan_breaker(_shodan_endpoint(endpoint))
+    res = _shodan_call(endpoint, cb.KeyPool(key_rotator, api_key, label="Shodan"), params,
+                       admitted=admitted)
+    if res.ok:
+        return res.data
+    if res.outcome is cb.Outcome.FATAL or (res.outcome is cb.Outcome.SKIPPED and breaker.is_fatal):
+        local = res.local if res.outcome is cb.Outcome.FATAL else not bool(
+            breaker.parent and breaker.parent.is_fatal)
+        if local:
+            raise ShodanApiKeyError("Shodan API requires paid membership for this feature (403)",
+                                    local=True)
+        raise ShodanApiKeyError("Shodan API key is invalid or expired (401)")
+    return None
+
+
+def _internetdb_breaker():
+    from recon.helpers import circuit_breaker as cb
+    return cb.get_breaker("internetdb", label="InternetDB")
 
 
 def _internetdb_get(ip: str) -> dict | None:
-    """Query Shodan InternetDB (free, no key required) for basic host data."""
-    try:
-        resp = requests.get(f"{INTERNETDB_BASE}/{ip}", timeout=15)
-        if resp.status_code == 200:
-            return resp.json()
-        elif resp.status_code == 404:
-            logger.debug(f"InternetDB: no data for {ip}")
-            return None
-        else:
-            logger.warning(f"InternetDB {resp.status_code} for {ip}")
-            return None
-    except requests.RequestException as e:
-        logger.warning(f"InternetDB request failed for {ip}: {e}")
-        return None
+    """Query Shodan InternetDB (free, no key required) for basic host data.
+
+    Host lookup, reverse DNS and passive CVEs all ask for the same IPs, so an
+    answer (including "no data") is cached for the run; a failure is not.
+    """
+    from recon.helpers import circuit_breaker as cb
+    cache = cb.run_cache("internetdb")
+    hit, cached = cache.get(ip)
+    if hit:
+        return cached
+    res = cb.guarded_call(
+        _internetdb_breaker(),
+        lambda: requests.get(f"{INTERNETDB_BASE}/{ip}", timeout=15),
+        lambda resp: cb.json_result(resp, keyed=False),
+    )
+    if res.ok:
+        cache.put(ip, res.data)
+        return res.data
+    if res.answered:
+        cache.put(ip, None)
+    return None
 
 
 def _lookup_single_ip(ip: str, use_internetdb: bool, api_key: str, key_rotator, rate_limiter: _RateLimiter) -> dict | None:
-    """Lookup a single IP via Shodan API or InternetDB. Thread-safe."""
+    """Lookup a single IP via Shodan API or InternetDB. Thread-safe.
+
+    Takes the InternetDB branch itself once the host API is refused or
+    paused, so no IP is lost to a fallback that happens elsewhere.
+    """
     if not use_internetdb:
-        try:
+        from recon.helpers.circuit_breaker import Outcome
+        host_breaker = _shodan_breaker("host")
+        # Checked BEFORE the rate-limiter wait, which reserves its slot first.
+        if host_breaker.allow():
             rate_limiter.wait()
-            data = _shodan_get(f"/shodan/host/{ip}", api_key, key_rotator=key_rotator)
-        except ShodanApiKeyError:
-            # Caller will detect and switch to InternetDB
-            raise
-        if data:
-            host_entry = {
-                "ip": ip,
-                "os": data.get("os"),
-                "isp": data.get("isp"),
-                "org": data.get("org"),
-                "country_name": data.get("country_name"),
-                "city": data.get("city"),
-                "ports": data.get("ports", []),
-                "vulns": list(data.get("vulns", {}).keys()) if isinstance(data.get("vulns"), dict) else data.get("vulns", []),
-                "services": [],
-                "source": "shodan_api",
-            }
-            for svc in data.get("data", []):
-                host_entry["services"].append({
-                    "port": svc.get("port"),
-                    "transport": svc.get("transport", "tcp"),
-                    "product": svc.get("product", ""),
-                    "version": svc.get("version", ""),
-                    "banner": (svc.get("data", "") or "")[:500],
-                    "module": svc.get("_shodan", {}).get("module", ""),
-                    "ssl": _normalize_shodan_ssl(svc.get("ssl")),
-                })
-            logger.info(f"  Shodan host lookup: {ip} — {len(host_entry['ports'])} ports, "
-                        f"{len(host_entry['vulns'])} vulns")
-            return host_entry
-        return None
+            try:
+                data = _shodan_get(f"/shodan/host/{ip}", api_key, key_rotator=key_rotator,
+                                   admitted=True)
+            except ShodanApiKeyError as e:
+                # _shodan_get has recorded it; recording again keeps a stubbed
+                # _shodan_get honest too, and a second FATAL is a no-op.
+                host_breaker.record(Outcome.FATAL, e.detail, local=e.local)
+                data = None
+                use_internetdb = True
+            if not use_internetdb:
+                if data:
+                    host_entry = {
+                        "ip": ip,
+                        "os": data.get("os"),
+                        "isp": data.get("isp"),
+                        "org": data.get("org"),
+                        "country_name": data.get("country_name"),
+                        "city": data.get("city"),
+                        "ports": data.get("ports", []),
+                        "vulns": list(data.get("vulns", {}).keys()) if isinstance(data.get("vulns"), dict) else data.get("vulns", []),
+                        "services": [],
+                        "source": "shodan_api",
+                    }
+                    for svc in data.get("data", []):
+                        host_entry["services"].append({
+                            "port": svc.get("port"),
+                            "transport": svc.get("transport", "tcp"),
+                            "product": svc.get("product", ""),
+                            "version": svc.get("version", ""),
+                            "banner": (svc.get("data", "") or "")[:500],
+                            "module": svc.get("_shodan", {}).get("module", ""),
+                            "ssl": _normalize_shodan_ssl(svc.get("ssl")),
+                        })
+                    logger.info(f"  Shodan host lookup: {ip} — {len(host_entry['ports'])} ports, "
+                                f"{len(host_entry['vulns'])} vulns")
+                    return host_entry
+                return None
+        else:
+            use_internetdb = True
 
     # InternetDB path
     rate_limiter.wait()
@@ -233,10 +306,14 @@ def _lookup_single_ip(ip: str, use_internetdb: bool, api_key: str, key_rotator, 
 def _run_host_lookup(ips: list[str], api_key: str, key_rotator=None, max_workers: int = 5) -> list[dict]:
     """Fetch Shodan host data for each IP using parallel workers.
 
-    Tries the full /shodan/host/{ip} API first. If that returns 403
-    (paid membership required) or no API key is configured, automatically
-    falls back to the free InternetDB API (https://internetdb.shodan.io/{ip})
-    which provides ports, hostnames, CPEs, CVEs, and tags -- no banners or geo data.
+    Tries the full /shodan/host/{ip} API first. Once that is refused (401,
+    or 403 = paid membership required), paused by its breaker, or no API key
+    is configured, each IP takes the free InternetDB API
+    (https://internetdb.shodan.io/{ip}) instead: ports, hostnames, CPEs, CVEs
+    and tags -- no banners or geo data.
+
+    The first IP is looked up alone, so a refused key costs one call rather
+    than one per worker.
     """
     hosts = []
     use_internetdb = not api_key  # No key -> go straight to InternetDB
@@ -247,44 +324,37 @@ def _run_host_lookup(ips: list[str], api_key: str, key_rotator=None, max_workers
 
     # Rate limiter: 1 req/sec for Shodan API, 0.5s for InternetDB
     rate_limiter = _RateLimiter(0.5 if use_internetdb else 1.0)
-    workers = min(max_workers, len(ips))
+    if not ips:
+        return hosts
 
-    if workers <= 1 or len(ips) <= 1:
-        # Sequential fallback for single IP or single worker
-        for ip in ips:
+    first = _lookup_single_ip(ips[0], use_internetdb, api_key, key_rotator, rate_limiter)
+    if first:
+        hosts.append(first)
+    rest = ips[1:]
+    if not use_internetdb and _shodan_breaker("host").is_fatal:
+        logger.info("Paid API unavailable — falling back to InternetDB (free)")
+        print("[*][Shodan] Falling back to InternetDB (free, no key required)")
+
+    workers = min(max_workers, len(rest))
+    if workers <= 1:
+        for ip in rest:
             result = _lookup_single_ip(ip, use_internetdb, api_key, key_rotator, rate_limiter)
             if result:
                 hosts.append(result)
         return hosts
 
-    # Try parallel execution; fall back to InternetDB if Shodan API fails
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
             executor.submit(_lookup_single_ip, ip, use_internetdb, api_key, key_rotator, rate_limiter): ip
-            for ip in ips
+            for ip in rest
         }
-
         for future in as_completed(futures):
-            ip = futures[future]
             try:
                 result = future.result()
                 if result:
                     hosts.append(result)
-            except ShodanApiKeyError:
-                # Switch to InternetDB for remaining IPs
-                logger.info("Paid API unavailable — falling back to InternetDB (free)")
-                print("[*][Shodan] Falling back to InternetDB (free, no key required)")
-                # Cancel remaining futures and re-run sequentially with InternetDB
-                executor.shutdown(wait=False, cancel_futures=True)
-                remaining_ips = [ip2 for ip2 in ips if ip2 not in {futures[f] for f in futures if f.done()}]
-                idb_limiter = _RateLimiter(0.5)
-                for rip in remaining_ips:
-                    result = _lookup_single_ip(rip, True, api_key, key_rotator, idb_limiter)
-                    if result:
-                        hosts.append(result)
-                break
             except Exception as e:
-                logger.warning(f"Host lookup failed for {ip}: {e}")
+                logger.warning(f"Host lookup failed: {type(e).__name__}")
 
     return hosts
 
@@ -310,7 +380,9 @@ def _run_reverse_dns(ips: list[str], api_key: str, hosts: list[dict] | None = No
                             results[ip] = hostnames
                             logger.info(f"  Shodan reverse DNS: {ip} → {hostnames}")
                 time.sleep(1)
-            return results
+            if not _shodan_breaker("dns_reverse").is_open:
+                return results
+            print("[*][Shodan] Reverse DNS API paused — InternetDB for the IPs it did not cover")
         except ShodanApiKeyError:
             logger.info("Paid DNS API unavailable — extracting hostnames from InternetDB data")
             print("[*][Shodan] Falling back to InternetDB for reverse DNS")
@@ -493,6 +565,8 @@ def run_shodan_enrichment(combined_result: dict, settings: dict[str, Any]) -> di
         "domain_dns": {},
         "cves": [],
     }
+    from recon.helpers import circuit_breaker as cb
+    shodan_scope = cb.scope(("shodan", "internetdb"), label="Shodan", unit="call(s)")
 
     try:
         # 1. Host Lookup (falls back to InternetDB on 403)
@@ -528,10 +602,11 @@ def run_shodan_enrichment(combined_result: dict, settings: dict[str, Any]) -> di
         print(f"[!][Shodan] Aborting enrichment — pipeline continues")
 
     except Exception as e:
-        logger.error(f"Shodan enrichment failed: {e}")
-        print(f"[!][Shodan] Enrichment error: {e}")
+        logger.error(f"Shodan enrichment failed: {type(e).__name__}")
+        print(f"[!][Shodan] Enrichment error: {type(e).__name__}")
         print(f"[!][Shodan] Pipeline continues without Shodan data")
 
+    shodan_scope.finish("shodan_enrich", payload=shodan_data)
     combined_result["shodan"] = shodan_data
     return combined_result
 

@@ -556,6 +556,11 @@ services:
       # "myregistry.local/naabu:latest,myregistry.local/httpx:latest"). Empty =
       # strict shipped-only. Forwarded to the recon pipeline by container_manager.
       RECON_EXTRA_ALLOWED_IMAGES: ${RECON_EXTRA_ALLOWED_IMAGES:-}
+      # Recon circuit breakers (recon/helpers/circuit_breaker.py). Only the exact
+      # value "off" disables them: every failing dependency is then called for
+      # every item again. Coverage recording and the prune guard stay on. Apply
+      # with `docker compose up -d recon-orchestrator`; takes effect next scan.
+      RECON_CIRCUIT_BREAKERS: ${RECON_CIRCUIT_BREAKERS:-on}
       # Scan Timeline — Scan Scheduler worker (plan Section 7.2). It ticks here
       # (the orchestrator owns admission + spawn) and asks the webapp to run each
       # due schedule through the same start path a manual scan uses. Listed

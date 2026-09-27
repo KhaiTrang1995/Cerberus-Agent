@@ -201,6 +201,17 @@
 .statusRunning { background: rgba(59, 130, 246, 0.15); color: #3b82f6; }
 .statusDeferred { background: rgba(245, 158, 11, 0.15); color: var(--status-warning); }
 
+/* Circuit breakers: a run that could not fully re-check every source. */
+.partialBadge {
+  display: inline-block;
+  margin-left: var(--space-1);
+  padding: 1px var(--space-1);
+  border-radius: var(--radius-sm);
+  font-size: 9px;
+  background: rgba(245, 158, 11, 0.15);
+  color: var(--status-warning);
+}
+
 .spinner { animation: spin 1s linear infinite; }
 
 @keyframes spin {

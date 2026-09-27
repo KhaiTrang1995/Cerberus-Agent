@@ -251,6 +251,17 @@ def discover_and_analyze_sourcemaps(
             if not js_url:
                 return []
 
+            # Skip a host already known unreachable this run: otherwise each JS
+            # file costs up to 8 guessed .map probes (HEAD+GET) against a dead
+            # host. is_down is inert under the off switch. (HostHealth,
+            # recon/helpers/circuit_breaker.py)
+            try:
+                from recon.helpers import circuit_breaker as _cb
+                if _cb.host_health.is_down(js_url):
+                    return []
+            except Exception:  # noqa: BLE001 - a fault here scans as today
+                pass
+
             map_url = None
             discovery_method = None
 

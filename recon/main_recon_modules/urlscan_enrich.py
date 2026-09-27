@@ -37,56 +37,59 @@ class RateLimitedResults(list):
     """
 
 
+def _urlscan_breaker():
+    from recon.helpers import circuit_breaker as cb
+    return cb.get_breaker("urlscan:search", label="URLScan", parent="urlscan")
+
+
 def _urlscan_search(domain: str, api_key: str, max_results: int = 500, key_rotator=None) -> list[dict]:
     """Query URLScan.io Search API for domain results.
 
     Uses page.domain field for accurate matching:
     - Without API key: exact match on page.domain (root domain only)
     - With API key: also searches page.domain:*.domain for subdomain discovery
+
+    Goes through the URLScan breaker: a rate limit (now or while the breaker
+    is paused on one) returns RateLimitedResults, a refused key or a failure
+    returns [].
     """
-    effective_key = key_rotator.current_key if key_rotator and key_rotator.has_keys else api_key
+    from recon.helpers import circuit_breaker as cb
+    keys = cb.KeyPool(key_rotator, api_key or "", label="URLScan")
+    breaker = _urlscan_breaker()
     url = f"{URLSCAN_API_BASE}/search/"
 
-    # page.domain: matches the actual page domain (not a full-text index)
-    # Wildcard *.domain requires authentication (403 for anonymous users)
-    if effective_key:
-        query = f"page.domain:{domain} OR page.domain:*.{domain}"
-    else:
-        query = f"page.domain:{domain}"
-
-    params = {
-        "q": query,
-        "size": min(max_results, 10000),
-    }
-    headers = {}
-    if effective_key:
-        headers["API-Key"] = effective_key
-
-    all_results = []
-
-    try:
-        resp = requests.get(url, params=params, headers=headers, timeout=60)
-        if key_rotator:
-            key_rotator.tick()
-        if resp.status_code == 200:
-            data = resp.json()
-            results = data.get("results", [])
-            logger.info(f"URLScan search returned {len(results)} results for {domain}")
-            all_results.extend(results)
-        elif resp.status_code == 429:
-            logger.warning("URLScan rate limit hit")
-            print("[!][URLScan] Rate limit hit -- try adding an API key in Global Settings")
-            return RateLimitedResults()
+    def send(key):
+        # page.domain: matches the actual page domain (not a full-text index)
+        # Wildcard *.domain requires authentication (403 for anonymous users)
+        if key:
+            query = f"page.domain:{domain} OR page.domain:*.{domain}"
         else:
-            logger.warning(f"URLScan {resp.status_code}: {resp.text[:200]}")
-            print(f"[!][URLScan] API returned {resp.status_code}")
-            return []
-    except requests.RequestException as e:
-        logger.warning(f"URLScan request failed: {e}")
-        print(f"[!][URLScan] Request failed: {e}")
-        return []
+            query = f"page.domain:{domain}"
+        params = {"q": query, "size": min(max_results, 10000)}
+        headers = {"API-Key": key} if key else {}
+        return requests.get(url, params=params, headers=headers, timeout=60), bool(key)
 
-    return all_results
+    def classify(sent):
+        resp, keyed = sent
+        return cb.json_result(resp, keyed=keyed)
+
+    res = cb.guarded_call(breaker, send, classify, keys=keys)
+    if res.ok:
+        results = (res.data or {}).get("results", []) if isinstance(res.data, dict) else []
+        logger.info(f"URLScan search returned {len(results)} results")
+        return list(results or [])
+    if res.answered:
+        return []
+    rate_limited = res.outcome is cb.Outcome.RATE_LIMIT or (
+        res.outcome is cb.Outcome.SKIPPED and not breaker.is_fatal
+        and (breaker.open_outcome is cb.Outcome.RATE_LIMIT
+             or (breaker.parent is not None and breaker.parent.open_outcome is cb.Outcome.RATE_LIMIT)))
+    if rate_limited:
+        print("[!][URLScan] Rate limit hit -- try adding an API key in Global Settings")
+        return RateLimitedResults()
+    if res.outcome is not cb.Outcome.SKIPPED:
+        print(f"[!][URLScan] Search failed ({res.detail})")
+    return []
 
 
 def _parse_url_path(full_url: str) -> dict | None:
@@ -176,6 +179,8 @@ def run_urlscan_enrichment(combined_result: dict, settings: dict[str, Any]) -> d
         print(f"[*][URLScan] No API key — using public results only")
     print(f"[*][URLScan] Querying for domain: {domain} (max {max_results} results)")
 
+    from recon.helpers import circuit_breaker as cb
+    urlscan_scope = cb.scope("urlscan", label="URLScan", unit="search(es)")
     results = _urlscan_search(domain, api_key, max_results, key_rotator=key_rotator)
 
     if not results:
@@ -188,6 +193,7 @@ def run_urlscan_enrichment(combined_result: dict, settings: dict[str, Any]) -> d
             "entries": [],
             "rate_limited": isinstance(results, RateLimitedResults),
         }
+        urlscan_scope.finish("urlscan_enrich", payload=combined_result["urlscan"])
         return combined_result
 
     # Parse results
@@ -316,6 +322,7 @@ def run_urlscan_enrichment(combined_result: dict, settings: dict[str, Any]) -> d
     if domain_age_days is not None:
         print(f"[+][URLScan] Domain age: {domain_age_days} days")
 
+    urlscan_scope.finish("urlscan_enrich", payload=urlscan_data)
     combined_result["urlscan"] = urlscan_data
     return combined_result
 

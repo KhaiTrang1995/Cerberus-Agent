@@ -292,6 +292,12 @@ export function VersionManager({
                           No snapshot
                         </span>
                       )}
+                      {typeof v.degradedSources === 'number' && v.degradedSources > 0 && (
+                        <span className={styles.warnBadge}
+                          title="Some finding sources could not be fully re-checked when this version was scanned">
+                          partial — {v.degradedSources} source{v.degradedSources === 1 ? '' : 's'} skipped
+                        </span>
+                      )}
                     </td>
                     <td className={styles.actionsCol}>
                       <div className={styles.actions}>

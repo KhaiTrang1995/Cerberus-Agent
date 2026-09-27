@@ -30,6 +30,90 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 # =============================================================================
+# Scan-target health (recon/helpers/circuit_breaker.py HostHealth)
+# =============================================================================
+# Every request below goes through these wrappers. They RECORD what they saw -
+# any HTTP response (403/404/500/a WAF page) is life, only a connection failure
+# counts against the host - but never refuse a request: the skip decision is
+# taken once per host at each check_single_* closure (_host_down), so a leaf a
+# test drives with a fixed side_effect list sends exactly the requests it did.
+
+# The run's report scope while run_security_checks runs (one scan per process).
+_HH_SCOPE = None
+
+
+def _hh_alive(url) -> None:
+    try:
+        from recon.helpers import circuit_breaker as cb
+        if _HH_SCOPE is not None:
+            _HH_SCOPE.host_alive(url)
+        else:
+            cb.host_health.record_alive(url)
+    except Exception:  # noqa: BLE001 - recording must never break a check
+        pass
+
+
+def _hh_failed(url, exc) -> None:
+    try:
+        from recon.helpers import circuit_breaker as cb
+        if _HH_SCOPE is not None:
+            _HH_SCOPE.host_failed(url, exc)
+        else:
+            cb.host_health.record_failure(url, exc)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _hh_get(url, *args, **kwargs):
+    try:
+        resp = requests.get(url, *args, **kwargs)
+    except Exception as exc:
+        _hh_failed(url, exc)
+        raise
+    _hh_alive(url)
+    return resp
+
+
+def _hh_post(url, *args, **kwargs):
+    try:
+        resp = requests.post(url, *args, **kwargs)
+    except Exception as exc:
+        _hh_failed(url, exc)
+        raise
+    _hh_alive(url)
+    return resp
+
+
+def _hh_request(method, url, *args, **kwargs):
+    try:
+        resp = requests.request(method, url, *args, **kwargs)
+    except Exception as exc:
+        _hh_failed(url, exc)
+        raise
+    _hh_alive(url)
+    return resp
+
+
+def _host_down(host: str) -> bool:
+    """True when both :443 and :80 of `host` are known unreachable this run.
+
+    A hostname gives two keys; a host that only lost HTTPS still has checks
+    that apply over HTTP, so it is skipped only when both are down. Uses
+    is_down, which never takes a probe: a later request that gets through
+    (another check's) is what revives it.
+    """
+    try:
+        from recon.helpers import circuit_breaker as cb
+        down = (cb.host_health.is_down(f"https://{host}")
+                and cb.host_health.is_down(f"http://{host}"))
+        if down and _HH_SCOPE is not None:
+            _HH_SCOPE.note_host_skipped(cb.host_key(f"https://{host}"))
+        return down
+    except Exception:  # noqa: BLE001 - a fault here scans as today
+        return False
+
+
+# =============================================================================
 # Direct IP Access Security Checks
 # =============================================================================
 
@@ -67,7 +151,7 @@ def _analyze_redirect_chain(ip: str, scheme: str, timeout: int = 10) -> Dict:
     
     try:
         # First, check initial response without following redirects
-        initial_response = requests.get(
+        initial_response = _hh_get(
             url,
             timeout=timeout,
             allow_redirects=False,
@@ -82,7 +166,7 @@ def _analyze_redirect_chain(ip: str, scheme: str, timeout: int = 10) -> Dict:
             
             # Now follow redirects to see where it goes
             try:
-                final_response = requests.get(
+                final_response = _hh_get(
                     url,
                     timeout=timeout,
                     allow_redirects=True,
@@ -220,7 +304,7 @@ def _is_bare_origin_match(ip: str, hostnames: List[str], scheme: str, timeout: i
     that bare-origin equivalence cannot be claimed.
     """
     try:
-        ip_resp = requests.get(
+        ip_resp = _hh_get(
             f"{scheme}://{ip}",
             timeout=timeout,
             allow_redirects=False,
@@ -237,7 +321,7 @@ def _is_bare_origin_match(ip: str, hostnames: List[str], scheme: str, timeout: i
 
     for hostname in hostnames:
         try:
-            host_resp = requests.get(
+            host_resp = _hh_get(
                 f"{scheme}://{hostname}",
                 timeout=timeout,
                 allow_redirects=False,
@@ -287,7 +371,7 @@ def check_direct_ip_http(ip: str, hostnames: Optional[List[str]] = None, timeout
     """
     try:
         url = f"http://{ip}"
-        response = requests.get(
+        response = _hh_get(
             url,
             timeout=timeout,
             allow_redirects=False,
@@ -381,7 +465,7 @@ def check_direct_ip_https(ip: str, hostnames: Optional[List[str]] = None, timeou
     """
     try:
         url = f"https://{ip}"
-        response = requests.get(
+        response = _hh_get(
             url,
             timeout=timeout,
             allow_redirects=False,
@@ -479,7 +563,7 @@ def check_ip_api_exposed(ip: str, timeout: int = 10) -> Optional[Dict]:
     for path in api_paths:
         try:
             url = f"http://{ip}{path}"
-            response = requests.get(
+            response = _hh_get(
                 url,
                 timeout=timeout,
                 allow_redirects=False,
@@ -547,9 +631,9 @@ def _waf_payload_differential(subdomain: str, ip: str, timeout: int = 10) -> Opt
     for kind, payload in _WAF_PROBES:
         q = f"?{_WAF_PROBE_PARAM}={quote(payload)}"
         try:
-            edge = requests.get(f"https://{subdomain}/{q}", timeout=timeout, verify=False,
+            edge = _hh_get(f"https://{subdomain}/{q}", timeout=timeout, verify=False,
                                 allow_redirects=False, headers=ua)
-            origin = requests.get(f"https://{ip}/{q}", timeout=timeout, verify=False,
+            origin = _hh_get(f"https://{ip}/{q}", timeout=timeout, verify=False,
                                   allow_redirects=False, headers={**ua, "Host": subdomain})
         except requests.exceptions.RequestException:
             continue
@@ -592,7 +676,7 @@ def check_cache_purge_exposed(ip: str, hostnames: Optional[List[str]] = None,
     for scheme in ("http", "https"):
         base = f"{scheme}://{ip}/"
         try:
-            control = requests.request("RDMNNOOP", base, timeout=timeout, verify=False,
+            control = _hh_request("RDMNNOOP", base, timeout=timeout, verify=False,
                                        allow_redirects=False, headers=headers)
         except requests.exceptions.RequestException:
             continue
@@ -600,7 +684,7 @@ def check_cache_purge_exposed(ip: str, hostnames: Optional[List[str]] = None,
             continue  # server 2xx's an arbitrary method -> cannot distinguish; no claim
         for method in ("PURGE", "BAN"):
             try:
-                r = requests.request(method, base, timeout=timeout, verify=False,
+                r = _hh_request(method, base, timeout=timeout, verify=False,
                                      allow_redirects=False, headers=headers)
             except requests.exceptions.RequestException:
                 continue
@@ -650,7 +734,7 @@ def check_waf_bypass(
     try:
         # Try accessing via subdomain (through WAF/CDN)
         subdomain_url = f"https://{subdomain}"
-        subdomain_response = requests.get(
+        subdomain_response = _hh_get(
             subdomain_url,
             timeout=timeout,
             allow_redirects=False,
@@ -660,7 +744,7 @@ def check_waf_bypass(
 
         # Try accessing via direct IP with Host header
         ip_url = f"https://{ip}"
-        ip_response = requests.get(
+        ip_response = _hh_get(
             ip_url,
             timeout=timeout,
             allow_redirects=False,
@@ -792,6 +876,8 @@ def run_direct_ip_checks(
             ip_to_hostnames.setdefault(ip, []).append(host)
 
     def check_single_ip(ip: str) -> List[Dict]:
+        if _host_down(ip):
+            return []
         ip_findings = []
         hostnames = ip_to_hostnames.get(ip) or None
 
@@ -982,6 +1068,8 @@ def run_tls_checks(
     findings = []
 
     def check_single_host(hostname: str) -> List[Dict]:
+        if _host_down(hostname):
+            return []
         host_findings = []
 
         if enabled_checks.get("tls_expiring_soon", True):
@@ -1369,7 +1457,7 @@ def check_security_headers(
     url = f"{protocol}://{hostname}" if port in [80, 443] else f"{protocol}://{hostname}:{port}"
 
     try:
-        response = requests.get(
+        response = _hh_get(
             url,
             timeout=timeout,
             allow_redirects=True,
@@ -1428,7 +1516,7 @@ def check_cache_control_missing(hostname: str, port: int = 443, timeout: int = 1
     url = f"{protocol}://{hostname}" if port in [80, 443] else f"{protocol}://{hostname}:{port}"
 
     try:
-        response = requests.get(
+        response = _hh_get(
             url,
             timeout=timeout,
             allow_redirects=True,
@@ -1498,7 +1586,7 @@ def check_login_no_https(hostname: str, timeout: int = 10) -> List[Dict]:
     for path in login_paths:
         url = f"http://{hostname}{path}"
         try:
-            response = requests.get(
+            response = _hh_get(
                 url,
                 timeout=timeout,
                 allow_redirects=False,
@@ -1552,7 +1640,7 @@ def check_session_cookies(hostname: str, timeout: int = 10) -> List[Dict]:
     url = f"https://{hostname}/"
 
     try:
-        response = requests.get(
+        response = _hh_get(
             url,
             timeout=timeout,
             allow_redirects=True,
@@ -1627,7 +1715,7 @@ def check_basic_auth_no_tls(hostname: str, timeout: int = 10) -> Optional[Dict]:
     url = f"http://{hostname}/"
 
     try:
-        response = requests.get(
+        response = _hh_get(
             url,
             timeout=timeout,
             allow_redirects=False,
@@ -1677,6 +1765,8 @@ def run_auth_checks(
     findings = []
 
     def check_single_host(hostname: str) -> List[Dict]:
+        if _host_down(hostname):
+            return []
         host_findings = []
 
         if enabled_checks.get("login_no_https", True):
@@ -2093,7 +2183,7 @@ def check_kubernetes_api_exposed(ip: str, timeout: int = 10) -> Optional[Dict]:
     for port in k8s_ports:
         url = f"https://{ip}:{port}/api"
         try:
-            response = requests.get(
+            response = _hh_get(
                 url,
                 timeout=timeout,
                 verify=False,
@@ -2209,6 +2299,8 @@ def run_port_service_checks(
     port_scan = recon_data.get("port_scan", {})
 
     def check_single_ip(ip: str, ports_data: Dict) -> List[Dict]:
+        if _host_down(ip):
+            return []
         ip_findings = []
 
         # Extract open ports
@@ -2281,7 +2373,7 @@ def check_csp_unsafe_inline(hostname: str, timeout: int = 10) -> Optional[Dict]:
     url = f"https://{hostname}/"
 
     try:
-        response = requests.get(
+        response = _hh_get(
             url,
             timeout=timeout,
             allow_redirects=True,
@@ -2335,7 +2427,7 @@ def check_insecure_form_action(hostname: str, timeout: int = 10) -> List[Dict]:
     url = f"https://{hostname}/"
 
     try:
-        response = requests.get(
+        response = _hh_get(
             url,
             timeout=timeout,
             allow_redirects=True,
@@ -2391,6 +2483,8 @@ def run_app_security_checks(
     findings = []
 
     def check_single_host(hostname: str) -> List[Dict]:
+        if _host_down(hostname):
+            return []
         host_findings = []
 
         if enabled_checks.get("csp_unsafe_inline", True):
@@ -2482,7 +2576,7 @@ def check_no_rate_limiting(urls: List[str], hostname: str, timeout: int = 5) -> 
             endpoint = parsed.path
 
             # First check if endpoint exists
-            response = requests.get(
+            response = _hh_get(
                 url,
                 timeout=timeout,
                 verify=False,
@@ -2500,7 +2594,7 @@ def check_no_rate_limiting(urls: List[str], hostname: str, timeout: int = 5) -> 
 
             for i in range(10):
                 try:
-                    resp = requests.post(
+                    resp = _hh_post(
                         url,
                         timeout=timeout,
                         verify=False,
@@ -2600,6 +2694,8 @@ def run_rate_limit_checks(
     discovered_urls = list(set(discovered_urls))
 
     def check_single_host(hostname: str) -> List[Dict]:
+        if _host_down(hostname):
+            return []
         host_findings = check_no_rate_limiting(
             urls=discovered_urls,
             hostname=hostname,
@@ -2640,6 +2736,8 @@ def run_security_headers_checks(
     findings = []
 
     def check_single_host(hostname: str) -> List[Dict]:
+        if _host_down(hostname):
+            return []
         host_findings = []
 
         # Check missing security headers (HTTPS)
@@ -2723,6 +2821,19 @@ def run_security_checks(
     Returns:
         Dictionary with security check findings
     """
+    global _HH_SCOPE
+    from recon.helpers import circuit_breaker as _cb
+    _HH_SCOPE = _cb.scope((), label="SecurityCheck", unit="host(s)")
+    try:
+        return _run_security_checks(
+            recon_data, enabled_checks, timeout, tls_expiry_days, max_workers,
+            ai_classifier_enabled, ai_model, ai_user_id, ai_project_id)
+    finally:
+        _HH_SCOPE = None
+
+
+def _run_security_checks(recon_data, enabled_checks, timeout, tls_expiry_days, max_workers,
+                         ai_classifier_enabled, ai_model, ai_user_id, ai_project_id):
     _set_ai_ctx(ai_classifier_enabled, ai_model, ai_user_id, ai_project_id)
     if _AI_CTX["enabled"]:
         print(f"[*][WAF-AI] Classifier cascade enabled, model={_AI_CTX['model']}")
@@ -2939,6 +3050,11 @@ def run_security_checks(
     # Organize findings by type and severity
     result = _assemble_security_result(
         all_findings, enabled_checks, len(hostnames), len(ips))
+    # Hosts skipped as unreachable: their previous findings are kept by the
+    # prune (keep_hosts), and the payload lists them only when there are any.
+    if _HH_SCOPE is not None:
+        _HH_SCOPE.finish("security_checks", host_source="security_check",
+                         payload=result["security_checks"])
     by_type = result["security_checks"]["by_type"]
     severity_counts = {k: v for k, v in result["security_checks"]["summary"].items()
                        if k != "total_findings"}

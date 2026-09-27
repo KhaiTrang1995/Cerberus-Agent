@@ -37,6 +37,38 @@ class DomainMixin:
             ).single()
         return record["seeded"] if record else 0
 
+    def update_graph_coverage(self, user_id: str, project_id: str, domain: str,
+                              record: dict) -> int:
+        """Stamp on this run's Domain what the run could NOT check; return nodes matched.
+
+        Written for every full-run group, clean or not: `recon_coverage_at` on
+        a Domain the run re-created is what separates "known clean" (gaps
+        "[]") from "unknown" (a crashed run, a down graph, an older recon).
+        The clear deletes Domain nodes on every full run, so a record never
+        outlives its run and nothing removes it. A MATCH, not a MERGE: the
+        record belongs to the Domain this run wrote, and 0 matched means the
+        write failed, which the caller treats as "coverage unknown".
+
+        ``record``: {"at": ISO-8601, "gaps_json": JSON array string,
+        "skipped_hosts": [host:port, ...], "nuclei_truncated": bool}.
+        """
+        with self.driver.session() as session:
+            result = session.run(
+                """
+                MATCH (d:Domain {name: $name, user_id: $user_id, project_id: $project_id})
+                SET d.recon_coverage_at = datetime($at),
+                    d.recon_coverage_gaps = $gaps_json,
+                    d.recon_skipped_hosts = $skipped_hosts,
+                    d.recon_nuclei_truncated = $nuclei_truncated
+                RETURN count(d) AS n
+                """,
+                name=domain, user_id=user_id, project_id=project_id,
+                at=record["at"], gaps_json=record.get("gaps_json") or "[]",
+                skipped_hosts=list(record.get("skipped_hosts") or []),
+                nuclei_truncated=bool(record.get("nuclei_truncated")),
+            ).single()
+        return int(result["n"]) if result else 0
+
     def update_graph_from_domain_discovery(self, recon_data: dict, user_id: str, project_id: str) -> dict:
         """
         Initialize the Neo4j graph database with reconnaissance data after domain_discovery.

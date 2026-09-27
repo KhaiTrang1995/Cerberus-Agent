@@ -433,6 +433,7 @@ ${renderCover(projectName, targetDomain, generatedAt, clientName, engagementType
 ${renderTOC(data)}
 ${renderExecutiveSummary(data, n.executiveSummary)}
 ${renderScope(data, n.scopeNarrative)}
+${renderCoverageLimitations(data)}
 ${renderRiskSummary(data, n.riskNarrative)}
 ${renderFindings(data, n.findingsNarrative)}
 ${renderVulnerabilityDetails(data)}
@@ -464,6 +465,31 @@ ${renderAppendix(data)}
 }
 
 // ── Section Renderers ───────────────────────────────────────────────────────
+
+/**
+ * Coverage limitations (circuit breakers): finding sources the recon run could
+ * not fully re-check. Rendered only when there were any, so a clean run's report
+ * is unchanged. Source and reason are operator-facing data, escaped as text.
+ */
+function renderCoverageLimitations(data: ReportData): string {
+  const gaps = data.coverageLimitations || []
+  if (gaps.length === 0) return ''
+  const rows = gaps
+    .map(g => `<tr><td>${esc(g.source)}</td><td>${esc(g.reason || 'not fully re-checked')}</td></tr>`)
+    .join('')
+  return `
+<section class="section">
+  <h2>Coverage Limitations</h2>
+  <p>The reconnaissance run could not fully re-check the following sources this
+  scan (a data provider was rate-limited or unreachable, a host stopped
+  responding, or a scan was time-capped). Findings from a prior run are retained,
+  but results for these sources may be incomplete.</p>
+  <table class="data-table">
+    <thead><tr><th>Source</th><th>Reason</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table>
+</section>`
+}
 
 function renderCover(name: string, domain: string, date: string, client: string, engType: string, riskScore: number, riskLabel: string): string {
   return `

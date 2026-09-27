@@ -18,12 +18,14 @@ Features:
 """
 
 import json
+import math
 import subprocess
 import shutil
 import os
 import socket
 import ssl
 import re
+import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Set, Tuple, Optional
@@ -784,8 +786,21 @@ def get_host_path(container_path: str) -> str:
     return container_path
 
 
+def httpx_budget(url_count: int, threads: int, timeout: int, retries: int) -> int:
+    """Worst-case seconds for one httpx run (after hakrawler_job_budget).
+
+    httpx works through the URLs `threads` at a time, each taking up to
+    `timeout * (retries + 1)`, plus 60s of startup/parse slack. The old
+    `url_count * timeout` was ~2.8h for 1,000 URLs, so it never fired and a hung
+    probe ran for hours.
+    """
+    per_url = max(1, int(timeout)) * (max(0, int(retries)) + 1)
+    waves = math.ceil(max(0, int(url_count)) / max(1, int(threads)))
+    return waves * per_url + 60
+
+
 def build_httpx_command(targets_file: str, output_file: str, settings: dict,
-                        probe_hosts: List[str] = None) -> List[str]:
+                        probe_hosts: List[str] = None, container_name: str = None) -> List[str]:
     """
     Build the Docker command for running httpx.
 
@@ -855,10 +870,17 @@ def build_httpx_command(targets_file: str, output_file: str, settings: dict,
         # Real-world public scans still work — host network can route to any
         # external IP. Same pattern naabu uses.
         "--net=host",
+    ]
+    # A name so the budget watchdog can `docker kill` this exact container
+    # instead of only the docker CLI (which leaves the daemon-owned httpx
+    # running). The caller passes a per-run uuid.
+    if container_name:
+        cmd.extend(["--name", container_name])
+    cmd.extend([
         # Note: Don't use -i (interactive) when reading from file, causes deadlock
         "-v", f"{targets_host_path}:/targets:ro",
         "-v", f"{output_host_path}:/output",
-    ]
+    ])
 
     # Add image
     cmd.append(HTTPX_DOCKER_IMAGE)
@@ -1841,8 +1863,9 @@ def run_http_probe(recon_data: dict, output_file: Path = None, settings: dict = 
         # The auth scope is checked against the hosts actually in targets.txt.
         from urllib.parse import urlparse as _urlparse
         _probe_hosts = sorted({h for h in (_urlparse(u).hostname for u in urls) if h})
+        httpx_container = f"redamon-httpx-{uuid.uuid4().hex[:12]}"
         cmd = build_httpx_command(str(targets_file), str(httpx_output), settings,
-                                  probe_hosts=_probe_hosts)
+                                  probe_hosts=_probe_hosts, container_name=httpx_container)
 
         print(f"\n[*][httpx] Starting httpx probe...")
         print(f"[*][httpx] URLs to probe: {len(urls)}")
@@ -1869,9 +1892,8 @@ def run_http_probe(recon_data: dict, output_file: Path = None, settings: dict = 
             text=True
         )
 
-        # Safety-net timeout: num_urls * per-url timeout (worst case if all sequential)
-        # Under normal parallel operation this will never trigger
-        safety_timeout = len(urls) * HTTPX_TIMEOUT
+        safety_timeout = httpx_budget(len(urls), HTTPX_THREADS, HTTPX_TIMEOUT,
+                                      settings.get('HTTPX_RETRIES', 2))
         _, stderr = process.communicate(timeout=safety_timeout)
 
         end_time = datetime.now()
@@ -1996,7 +2018,21 @@ def run_http_probe(recon_data: dict, output_file: Path = None, settings: dict = 
 
     except subprocess.TimeoutExpired:
         process.kill()
-        print(f"[!][httpx] Probe hit safety timeout ({len(urls)} urls * {HTTPX_TIMEOUT}s = {safety_timeout}s)")
+        # process.kill() reaps the docker CLI, not the daemon-owned container;
+        # kill it by name so the probe actually stops.
+        try:
+            subprocess.run(["docker", "kill", httpx_container],
+                           capture_output=True, text=True, timeout=15, check=False)
+        except Exception as _kill_err:  # noqa: BLE001
+            print(f"[!][httpx] failed to kill container: {type(_kill_err).__name__}")
+        print(f"[!][httpx] Probe hit its {safety_timeout}s budget over {len(urls)} URL(s) "
+              f"- stopping it; downstream phases run on what it found")
+        try:
+            from recon.helpers import circuit_breaker
+            circuit_breaker.note_degraded("http_probe", sources=["http_probe"],
+                                          reason="httpx runtime budget reached")
+        except Exception:  # noqa: BLE001
+            pass
         return recon_data
     except Exception as e:
         print(f"[!][httpx] Error during probe: {e}")

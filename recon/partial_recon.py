@@ -243,6 +243,8 @@ def main():
 
     print(f"[*][Partial Recon] Starting partial recon for tool: {tool_id}")
     print(f"[*][Partial Recon] Timestamp: {datetime.now().isoformat()}")
+    from recon.helpers import circuit_breaker
+    circuit_breaker.announce_mode()
 
     user_id = os.environ.get("USER_ID", "")
     project_id = os.environ.get("PROJECT_ID", "")

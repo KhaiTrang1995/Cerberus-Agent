@@ -43,6 +43,7 @@ from even importing the heavier integration/live files.
 
 import asyncio
 import os
+import sys
 
 import pytest
 
@@ -68,6 +69,24 @@ def _ensure_event_loop():
     except RuntimeError:
         asyncio.set_event_loop(asyncio.new_event_loop())
     yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_circuit_breakers():
+    """Forget recon circuit-breaker state before and after every test.
+
+    recon/helpers/circuit_breaker.py keeps process-wide state by design (one
+    scan is one process), so a breaker a test opened would otherwise skip the
+    next test's calls. Only resets when the module is already loaded, so an
+    unrelated test never pulls in the recon.helpers package.
+    """
+    mod = sys.modules.get("recon.helpers.circuit_breaker")
+    if mod is not None:
+        mod.reset_registry()
+    yield
+    mod = sys.modules.get("recon.helpers.circuit_breaker")
+    if mod is not None:
+        mod.reset_registry()
 
 
 # Filename fragments that route a test file to a non-unit tier. Matched against

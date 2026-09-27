@@ -501,16 +501,19 @@ class TestFofaEnrichIpMode(unittest.TestCase):
         self.assertLessEqual(len(out["fofa"]["results"]), 3)
         self.assertLessEqual(mock_get.call_count, 2)
 
-    @pytest.mark.skip(reason="Part H (bucket-3): flaky/nondeterministic - fofa IP mode uses a worker pool, so with multiple IPs a 2nd request can fire before the 429 stops the loop (call_count 1 or 2 by race). Same 'extra call after rate-limit' finding as netlas/criminalip - see green-up report")
     @patch("fofa_enrich.time.sleep")
     @patch("fofa_enrich.requests.get")
     def test_ip_mode_rate_limit_stops_all_queries(self, mock_get, _sleep):
+        """A first 429 waits and retries once; a second in a row stops FOFA,
+        so the second IP is never requested. One worker keeps it deterministic
+        (the old version raced a worker pool)."""
         mock_get.return_value = _mock_response(429, {}, text="rate limited")
         cr = _combined_result(ip_mode=True, ips=["1.2.3.4", "5.6.7.8"])
-        out = run_fofa_enrichment(cr, _settings())
-        # Only one request made before stopping on 429
-        self.assertEqual(mock_get.call_count, 1)
+        out = run_fofa_enrichment(cr, _settings(FOFA_WORKERS=1))
+        self.assertEqual(mock_get.call_count, 2)
         self.assertEqual(out["fofa"]["results"], [])
+        (entry,) = out["fofa"]["degraded"]
+        self.assertEqual((entry["source"], entry["outcome"], entry["skipped"]), ("fofa", "rate_limit", 1))
 
     @patch("fofa_enrich.time.sleep")
     @patch("fofa_enrich.requests.get")
@@ -608,6 +611,95 @@ class TestFofaEnrichIsolated(unittest.TestCase):
         sub = run_fofa_enrichment_isolated(_combined_result(), _settings(FOFA_ENABLED=False))
         self.assertEqual(sub, {})
         mock_get.assert_not_called()
+
+
+class TestFofaCircuitBreaker(unittest.TestCase):
+    def _ips(self, n):
+        return _combined_result(ip_mode=True, ips=[f"1.2.3.{i}" for i in range(1, n + 1)])
+
+    @patch("fofa_enrich.time.sleep")
+    @patch("fofa_enrich.requests.get")
+    def test_one_failure_no_longer_stops_fofa_for_the_run(self, mock_get, _sleep):
+        """FOFA used to stop for the whole run on the FIRST failure of any kind."""
+        responses = [_mock_response(503, {}, text="busy")] + [
+            _mock_response(200, _fofa_success_body()) for _ in range(4)]
+        mock_get.side_effect = responses
+        out = run_fofa_enrichment(self._ips(5), _settings(FOFA_WORKERS=1))
+        self.assertEqual(mock_get.call_count, 5)
+        self.assertNotIn("degraded", out["fofa"])
+
+    @patch("fofa_enrich.time.sleep")
+    @patch("fofa_enrich.requests.get")
+    def test_five_timeouts_mean_the_sixth_ip_is_never_requested(self, mock_get, _sleep):
+        import requests as req_mod
+        mock_get.side_effect = req_mod.exceptions.ReadTimeout("x")
+        out = run_fofa_enrichment(self._ips(10), _settings(FOFA_WORKERS=1))
+        self.assertEqual(mock_get.call_count, 5)
+        (entry,) = out["fofa"]["degraded"]
+        self.assertEqual((entry["source"], entry["skipped"]), ("fofa:search", 5))
+
+    @patch("fofa_enrich.time.sleep")
+    @patch("fofa_enrich.requests.get")
+    def test_ten_empty_answers_never_trip_it(self, mock_get, _sleep):
+        mock_get.return_value = _mock_response(200, {"error": False, "size": 0, "results": []})
+        out = run_fofa_enrichment(self._ips(10), _settings(FOFA_WORKERS=1))
+        self.assertEqual(mock_get.call_count, 10)
+        self.assertNotIn("degraded", out["fofa"])
+
+    @patch("fofa_enrich.time.sleep")
+    @patch("fofa_enrich.requests.get")
+    def test_a_refused_key_in_a_200_body_means_exactly_one_call(self, mock_get, _sleep):
+        body = {"error": True, "errmsg": "[-700] Account Invalid, SECRETTEXT"}
+        mock_get.return_value = _mock_response(200, body)
+        with patch("builtins.print") as fake_print:
+            out = run_fofa_enrichment(self._ips(10), _settings(FOFA_WORKERS=1))
+        self.assertEqual(mock_get.call_count, 1)
+        printed = "\n".join(" ".join(map(str, c.args)) for c in fake_print.call_args_list)
+        self.assertIn("FOFA error -700: key rejected - stopped for the rest of this run", printed)
+        self.assertNotIn("SECRETTEXT", printed)
+        self.assertNotIn("fofa-key", printed)
+        (entry,) = out["fofa"]["degraded"]
+        self.assertEqual((entry["source"], entry["outcome"]), ("fofa", "fatal"))
+
+    @patch("fofa_enrich.time.sleep")
+    @patch("fofa_enrich.requests.get")
+    def test_exhausted_credit_is_fatal(self, mock_get, _sleep):
+        body = {"error": True, "errmsg": "[820031] F点余额不足"}
+        mock_get.return_value = _mock_response(200, body)
+        run_fofa_enrichment(self._ips(4), _settings(FOFA_WORKERS=1))
+        self.assertEqual(mock_get.call_count, 1)
+
+    @patch("fofa_enrich.time.sleep")
+    @patch("fofa_enrich.requests.get")
+    def test_the_key_never_reaches_the_log(self, mock_get, _sleep):
+        """Bug 8: requests' error text carries the full URL with ?key=."""
+        import io
+        import logging
+        import requests as req_mod
+        from contextlib import redirect_stdout
+        mock_get.side_effect = req_mod.exceptions.ConnectionError(
+            "HTTPSConnectionPool(host='fofa.info', port=443): Max retries exceeded "
+            "with url: /api/v1/search/all?key=SECRETFOFAKEY")
+        buf, log_buf = io.StringIO(), io.StringIO()
+        handler = logging.StreamHandler(log_buf)
+        logging.getLogger().addHandler(handler)
+        try:
+            with redirect_stdout(buf):
+                run_fofa_enrichment(_combined_result(), _settings(FOFA_API_KEY="SECRETFOFAKEY"))
+        finally:
+            logging.getLogger().removeHandler(handler)
+        self.assertNotIn("SECRETFOFAKEY", buf.getvalue() + log_buf.getvalue())
+
+    @patch("fofa_enrich.time.sleep")
+    @patch("fofa_enrich.requests.get")
+    def test_rotation_happens_per_request(self, mock_get, _sleep):
+        """Bug 5: the key used to be read once per run."""
+        from recon.helpers.key_rotation import KeyRotator
+        mock_get.return_value = _mock_response(200, _fofa_success_body())
+        rotator = KeyRotator(["key-a", "key-b"], rotate_every_n=1)
+        run_fofa_enrichment(self._ips(2), _settings(FOFA_KEY_ROTATOR=rotator, FOFA_WORKERS=1))
+        self.assertEqual([c.kwargs["params"]["key"] for c in mock_get.call_args_list],
+                         ["key-a", "key-b"])
 
 
 if __name__ == "__main__":

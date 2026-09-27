@@ -625,6 +625,8 @@ model Project {
   nucleiConcurrency           Int      @default(25) @map("nuclei_concurrency")
   nucleiTimeout               Int      @default(10) @map("nuclei_timeout")
   nucleiRetries               Int      @default(1) @map("nuclei_retries")
+  nucleiMaxRuntime            Int      @default(86400) @map("nuclei_max_runtime")
+  nucleiMaxHostError          Int      @default(30) @map("nuclei_max_host_error")
   nucleiTags                  String[] @default(["cve", "xss", "sqli", "rce", "lfi", "ssrf", "xxe", "ssti"]) @map("nuclei_tags")
   nucleiExcludeTags           String[] @default(["dos", "fuzz"]) @map("nuclei_exclude_tags")
   nucleiDastMode              Boolean  @default(false) @map("nuclei_dast_mode")
@@ -1630,6 +1632,13 @@ model ScanJob {
   /// them. A Domain-batch partial recon can cover several; empty for the kinds
   /// that do not report theirs.
   targets            String[]     @default([])
+  /// How many finding sources this full_recon run could not fully re-check
+  /// (a dependency circuit breaker opened, a host went unreachable, Nuclei was
+  /// truncated). Read from the graph coverage record at close, since the
+  /// orchestrator cannot count log lines reliably. null = unknown (older rows,
+  /// or a run that wrote no coverage), 0 = complete, N = N degraded sources.
+  /// full_recon only; other kinds leave it null.
+  degradedSources    Int?         @map("degraded_sources")
   createdAt          DateTime     @default(now()) @map("created_at")
   updatedAt          DateTime     @updatedAt @map("updated_at")
 

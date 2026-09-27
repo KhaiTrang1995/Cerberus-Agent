@@ -592,6 +592,11 @@ export async function POST(request: NextRequest) {
             finishedAt: j.finishedAt ? new Date(j.finishedAt as string) : null,
             ramReason: j.ramReason ? String(j.ramReason) : null,
             nodeCount: j.nodeCount === null || j.nodeCount === undefined ? null : Number(j.nodeCount),
+            // Untrusted bundle input: a non-negative integer or null, nothing else.
+            degradedSources: (() => {
+              const n = Number(j.degradedSources)
+              return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null
+            })(),
           },
         })
         ;(stats as Record<string, number>).scanJobs =

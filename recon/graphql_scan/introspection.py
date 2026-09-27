@@ -103,6 +103,24 @@ SIMPLE_INTROSPECTION_QUERY = """
 """
 
 
+def _host_alive(url) -> None:
+    """Any response is life (recon/helpers/circuit_breaker.py HostHealth)."""
+    try:
+        from recon.helpers import circuit_breaker as cb
+        cb.host_health.record_alive(url)
+    except Exception:  # noqa: BLE001 - recording never breaks a probe
+        pass
+
+
+def _host_failed(url, exc) -> None:
+    """Only a connection failure counts against the host; HostHealth decides."""
+    try:
+        from recon.helpers import circuit_breaker as cb
+        cb.host_health.record_failure(url, exc)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def test_introspection(endpoint: str, headers: Dict[str, str] = None,
                       timeout: int = 30, verify_ssl: bool = True,
                       session: Optional[requests.Session] = None,
@@ -149,6 +167,7 @@ def test_introspection(endpoint: str, headers: Dict[str, str] = None,
             verify=verify_ssl,
             allow_redirects=False
         )
+        _host_alive(endpoint)
 
         if response.status_code != 200:
             return False, None, f"Non-200 status code: {response.status_code}"
@@ -226,9 +245,11 @@ def test_introspection(endpoint: str, headers: Dict[str, str] = None,
 
         return False, None, "No introspection data in response"
 
-    except Timeout:
+    except Timeout as e:
+        _host_failed(endpoint, e)
         return False, None, f"Request timeout after {timeout}s"
     except RequestException as e:
+        _host_failed(endpoint, e)
         return False, None, f"Request error: {str(e)}"
     except Exception as e:
         return False, None, f"Unexpected error: {str(e)}"

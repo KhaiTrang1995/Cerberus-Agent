@@ -64,38 +64,38 @@ def _extract_ips_from_recon(combined_result: dict) -> list[str]:
     return sorted(ips)
 
 
-def _netlas_effective_key(settings: dict, key_rotator) -> str:
-    api_key = settings.get("NETLAS_API_KEY", "") or ""
-    if key_rotator and getattr(key_rotator, "has_keys", False):
-        return key_rotator.current_key or api_key
-    return api_key
+def _netlas_breaker():
+    from recon.helpers import circuit_breaker as cb
+    return cb.get_breaker("netlas:responses", label="Netlas", parent="netlas")
 
 
-def _netlas_responses_get(
-    q: str,
-    api_key: str,
-    size: int,
-    key_rotator=None,
-) -> dict | None:
-    """GET /responses/ with X-API-Key. Returns body dict or None on 429 / errors."""
+def _netlas_classify(resp):
+    """Netlas refuses an unknown key with HTTP 400 "API key not found", not 401.
+
+    The body is read only to tell that 400 from a malformed query; it is never kept.
+    """
+    from recon.helpers import circuit_breaker as cb
+    if cb.status_of(resp) == 400:
+        try:
+            refused = "api key" in str(resp.text or "").lower()
+        except Exception:  # noqa: BLE001
+            refused = False
+        if refused:
+            return cb.CallResult(None, cb.Outcome.FATAL, "400 key rejected")
+    return cb.json_result(resp, keyed=True)
+
+
+def _netlas_responses_get(q: str, keys, size: int, *, admitted: bool = False):
+    """GET /responses/ with X-API-Key through the Netlas breaker; returns a CallResult."""
+    from recon.helpers import circuit_breaker as cb
     url = f"{NETLAS_API_BASE}/responses/"
-    headers = {"X-API-Key": api_key}
     params = {"q": q, "size": max(1, min(int(size), 1000))}
-    try:
-        resp = requests.get(url, headers=headers, params=params, timeout=30)
-        if key_rotator:
-            key_rotator.tick()
-        if resp.status_code == 429:
-            logger.warning("Netlas rate limit (429)")
-            print("[!][Netlas] Rate limit hit — stopping Netlas queries for this run")
-            return None
-        if resp.status_code != 200:
-            logger.warning(f"Netlas {resp.status_code}: {resp.text[:200]}")
-            return None
-        return resp.json()
-    except requests.RequestException as e:
-        logger.warning(f"Netlas request failed: {e}")
-        return None
+
+    def send(key):
+        return requests.get(url, headers={"X-API-Key": key}, params=params, timeout=30)
+
+    return cb.guarded_call(_netlas_breaker(), send, _netlas_classify, keys=keys,
+                           admitted=admitted)
 
 
 def _netlas_item_to_result(data: dict) -> dict | None:
@@ -233,9 +233,10 @@ def run_netlas_enrichment(combined_result: dict, settings: dict[str, Any]) -> di
         ],
     )
 
-    key_rotator = settings.get("NETLAS_KEY_ROTATOR")
-    api_key = _netlas_effective_key(settings, key_rotator)
-    if not api_key:
+    from recon.helpers import circuit_breaker as cb
+    keys = cb.KeyPool(settings.get("NETLAS_KEY_ROTATOR"), settings.get("NETLAS_API_KEY", "") or "",
+                      label="Netlas")
+    if not keys.has_key:
         logger.warning("Netlas API key missing — skipping enrichment")
         print("[!][Netlas] NETLAS_API_KEY not configured — skipping")
         return combined_result
@@ -253,18 +254,23 @@ def run_netlas_enrichment(combined_result: dict, settings: dict[str, Any]) -> di
     netlas_data: dict[str, Any] = {"results": [], "total": 0}
     all_rows: list[dict] = []
     total_hint = 0
+    netlas_scope = cb.scope("netlas", label="Netlas", unit="query(ies)")
+    breaker = _netlas_breaker()
 
     try:
         if is_ip_mode:
             print(f"[+][Netlas] IP mode — querying host: for {len(ips)} IP(s)")
 
             def _enrich_single_ip_netlas(ip, rate_limiter):
+                # Before the wait: the limiter reserves a slot before sleeping.
+                if not breaker.allow():
+                    return ip, [], 0
                 rate_limiter.wait()
                 q = f"host:{ip}"
-                body = _netlas_responses_get(q, api_key, max_results, key_rotator=key_rotator)
-                if body is None:
+                res = _netlas_responses_get(q, keys, max_results, admitted=True)
+                if not res.ok:
                     return ip, [], 0
-                rows, t = _parse_netlas_body(body)
+                rows, t = _parse_netlas_body(res.data)
                 return ip, rows, t
 
             max_workers = settings.get('NETLAS_WORKERS', 5)
@@ -279,8 +285,7 @@ def run_netlas_enrichment(combined_result: dict, settings: dict[str, Any]) -> di
                         total_hint = max(total_hint, t)
                         all_rows.extend(rows)
                     except Exception as e:
-                        ip = futures[fut]
-                        logger.warning(f"Netlas worker error for {ip}: {e}")
+                        logger.warning(f"Netlas worker error: {type(e).__name__}")
             # Preserve original IP ordering
             ip_order = {ip: i for i, ip in enumerate(ips)}
             all_rows.sort(key=lambda r: ip_order.get(r.get("ip", ""), 0))
@@ -290,9 +295,9 @@ def run_netlas_enrichment(combined_result: dict, settings: dict[str, Any]) -> di
             else:
                 print(f"[+][Netlas] Domain mode — host:{domain}")
                 q = f"host:{domain}"
-                body = _netlas_responses_get(q, api_key, max_results, key_rotator=key_rotator)
-                if body is not None:
-                    rows, total_hint = _parse_netlas_body(body)
+                res = _netlas_responses_get(q, keys, max_results)
+                if res.ok:
+                    rows, total_hint = _parse_netlas_body(res.data)
                     all_rows = rows[:max_results]
                 time.sleep(1)
 
@@ -301,12 +306,13 @@ def run_netlas_enrichment(combined_result: dict, settings: dict[str, Any]) -> di
         print(f"[+][Netlas] Collected {len(netlas_data['results'])} row(s) (total: {netlas_data['total']})")
 
     except Exception as e:
-        logger.error(f"Netlas enrichment failed: {e}")
-        print(f"[!][Netlas] Enrichment error: {e}")
+        logger.error(f"Netlas enrichment failed: {type(e).__name__}")
+        print(f"[!][Netlas] Enrichment error: {type(e).__name__}")
         print(f"[!][Netlas] Pipeline continues with partial or empty Netlas data")
         netlas_data["results"] = all_rows[:max_results]
         netlas_data["total"] = total_hint if total_hint else len(netlas_data["results"])
 
+    netlas_scope.finish("netlas_enrich", payload=netlas_data)
     combined_result["netlas"] = netlas_data
     return combined_result
 

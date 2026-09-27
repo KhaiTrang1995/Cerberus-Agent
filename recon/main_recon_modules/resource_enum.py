@@ -30,7 +30,7 @@ import os
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import sys
 
@@ -216,6 +216,62 @@ def _annotate_ai_endpoint_classifier(
 # =============================================================================
 # Main Function
 # =============================================================================
+
+# The cheapest request each archive answers, for the preflight below.
+_ARCHIVE_PROBES = {
+    "wayback": "https://web.archive.org/cdx/search/cdx?url={domain}&limit=1",
+    "commoncrawl": "https://index.commoncrawl.org/collinfo.json",
+}
+
+# The breakers that say a GAU provider is paused: its own archive's, or the
+# OSINT enricher's for the same service.
+_GAU_PROVIDER_BREAKERS = {
+    "wayback": ("wayback",),
+    "commoncrawl": ("commoncrawl",),
+    "otx": ("otx", "otx:url_list"),
+    "urlscan": ("urlscan", "urlscan:search"),
+}
+
+
+def _archive_preflight(domain: str, archives) -> None:
+    """HEAD each archive GAU or ParamSpider is about to use: two tries, 10s each.
+
+    One hung archive used to stall every domain for its full per-domain
+    timeout. Both tries failing pauses the archive's breaker (non-fatal), so
+    no tool spends time on it; a later batch group re-checks it once the
+    cooldown has passed. Only the root domain GAU would send anyway is sent.
+    Never raises.
+    """
+    import requests
+    from recon.helpers import circuit_breaker as cb
+    for archive in archives:
+        url = _ARCHIVE_PROBES.get(archive)
+        if not url:
+            continue
+        breaker = cb.get_breaker(archive, label="Archive", threshold=cb.INTERNAL_THRESHOLD)
+        if not breaker.allow():
+            continue
+        alive = False
+        for _ in range(2):
+            try:
+                resp = requests.head(url.format(domain=quote(domain, safe="")), timeout=10,
+                                     allow_redirects=True)
+            except Exception:  # noqa: BLE001 - a failed try, never a failed scan
+                continue
+            status = cb.status_of(resp)
+            if status is not None and status < 500:
+                alive = True
+                break
+        if alive:
+            breaker.record(cb.Outcome.OK)
+        else:
+            breaker.force_open("archive unreachable (preflight)")
+
+
+def _gau_provider_paused(provider: str) -> bool:
+    from recon.helpers import circuit_breaker as cb
+    return any(cb.is_open(key) for key in _GAU_PROVIDER_BREAKERS.get(provider, ()))
+
 
 def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, settings: dict = None) -> dict:
     """
@@ -524,16 +580,44 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
             zap_ajax_future = executor.submit(pull_zap_ajax_docker_image, ZAP_AJAX_SPIDER_DOCKER_IMAGE)
         if KITERUNNER_ENABLED and KITERUNNER_WORDLISTS:
             kr_future = executor.submit(ensure_kiterunner_binary, KITERUNNER_WORDLISTS[0])
-        if KATANA_ENABLED:
-            katana_future.result()
-        if HAKRAWLER_ENABLED:
-            hakrawler_future.result()
-        if GAU_ENABLED:
-            gau_future.result()
-        if ZAP_AJAX_SPIDER_ENABLED:
-            zap_ajax_future.result()
+        # Capture each pull result. A failed pull used to be discarded, so the
+        # tool then ran anyway and every docker invocation died on the missing
+        # image; instead the tool is disabled and the gap is noted (informational
+        # -- other crawlers still feed source 'resource_enum', so this must not
+        # prune-protect it).
+        from recon.helpers import circuit_breaker as _cb_pulls
+
+        def _pull_ok(future, tool_flag: str, label: str) -> bool:
+            try:
+                ok = bool(future.result())
+            except Exception as e:  # noqa: BLE001
+                ok = False
+                print(f"[!][{label}] Image setup raised: {e}")
+            if not ok:
+                print(f"[!][{label}] Image/setup unavailable -- skipping {label} this run")
+                _cb_pulls.note_degraded("resource_enum", entries=[
+                    {"source": tool_flag, "reason": "image pull failed", "skipped": 0}])
+            return ok
+
+        if KATANA_ENABLED and not _pull_ok(katana_future, "katana", "Katana"):
+            KATANA_ENABLED = False
+        if HAKRAWLER_ENABLED and not _pull_ok(hakrawler_future, "hakrawler", "Hakrawler"):
+            HAKRAWLER_ENABLED = False
+        if GAU_ENABLED and not _pull_ok(gau_future, "gau", "GAU"):
+            GAU_ENABLED = False
+        if ZAP_AJAX_SPIDER_ENABLED and not _pull_ok(zap_ajax_future, "zap_ajax", "ZAP Ajax"):
+            ZAP_AJAX_SPIDER_ENABLED = False
         if KITERUNNER_ENABLED and KITERUNNER_WORDLISTS:
-            kr_binary_path, _ = kr_future.result()
+            try:
+                kr_binary_path, _ = kr_future.result()
+            except Exception as e:  # noqa: BLE001
+                kr_binary_path = None
+                print(f"[!][Kiterunner] Binary setup raised: {e}")
+            if not kr_binary_path:
+                print("[!][Kiterunner] Binary unavailable -- skipping Kiterunner this run")
+                KITERUNNER_ENABLED = False
+                _cb_pulls.note_degraded("resource_enum", entries=[
+                    {"source": "kiterunner", "reason": "binary download failed", "skipped": 0}])
 
     # Build target URLs as the UNION of every available source (deduplicated).
     # Sources merged:
@@ -698,6 +782,30 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
             print(f"[*][Arjun] Custom headers: {len(ARJUN_CUSTOM_HEADERS)}")
     print("=" * 70)
 
+    # Archive health for GAU and ParamSpider (they share Wayback): a paused
+    # archive is left out before any tool spends its per-domain timeout on it.
+    paramspider_paused = False
+    if (GAU_ENABLED or PARAMSPIDER_ENABLED) and target_domains:
+        from recon.helpers import circuit_breaker as _cb
+        archives = [p for p in GAU_PROVIDERS if p in _ARCHIVE_PROBES] if GAU_ENABLED else []
+        if PARAMSPIDER_ENABLED and "wayback" not in archives:
+            archives.append("wayback")
+        _archive_preflight(recon_data.get("domain") or sorted(target_domains)[0], archives)
+        if GAU_ENABLED:
+            paused = [p for p in GAU_PROVIDERS if _gau_provider_paused(p)]
+            if paused:
+                GAU_PROVIDERS = [p for p in GAU_PROVIDERS if p not in paused]
+                print(f"[!][GAU] Paused source(s) left out this run: {', '.join(paused)}")
+                _cb.note_degraded("resource_enum", entries=[
+                    {"source": f"gau:{p}", "reason": "source paused", "skipped": len(target_domains)}
+                    for p in paused])
+        if PARAMSPIDER_ENABLED and _cb.is_open("wayback"):
+            paramspider_paused = True
+            print("[!][ParamSpider] Wayback archive is paused - ParamSpider skipped this run")
+            _cb.note_degraded("resource_enum", entries=[
+                {"source": "paramspider:wayback", "reason": "archive paused",
+                 "skipped": len(target_domains)}])
+
     start_time = datetime.now()
 
     # Initialize results
@@ -780,7 +888,7 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
             )
 
         # Submit GAU discovery if enabled
-        if GAU_ENABLED and target_domains:
+        if GAU_ENABLED and target_domains and GAU_PROVIDERS:
             futures['gau'] = executor.submit(
                 run_gau_discovery,
                 target_domains,
@@ -797,7 +905,7 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
             )
 
         # Submit ParamSpider discovery if enabled
-        if PARAMSPIDER_ENABLED and target_domains:
+        if PARAMSPIDER_ENABLED and target_domains and not paramspider_paused:
             futures['paramspider'] = executor.submit(
                 run_paramspider_discovery,
                 target_domains,

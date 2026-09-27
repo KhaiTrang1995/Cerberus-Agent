@@ -122,7 +122,7 @@ echo "== orchestrator knobs are wired in compose (it has NO env_file) =="
 # the operator sets it, nothing happens, and nothing says why.
 for k in OSV_DB_AUTO_REFRESH OSV_DB_ECOSYSTEMS OSV_DB_TTL_SECONDS OSV_DB_REFRESH_TIMEOUT \
          SUPPLY_CHAIN_ANALYZER_MEM SUPPLY_CHAIN_ANALYZER_PIDS SUPPLY_CHAIN_ANALYZER_NANOCPUS \
-         MCP_TOKEN_PRUNE_INTERVAL; do
+         MCP_TOKEN_PRUNE_INTERVAL RECON_CIRCUIT_BREAKERS; do
   grep -qE "^ +${k}: \\\$\{${k}" "$COMPOSE" && pass "$k wired into compose" || fail "$k not wired into compose (inert in .env)"
 done
 

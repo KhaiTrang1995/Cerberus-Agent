@@ -6,8 +6,6 @@ Mock responses use the real API format (tags/count+data wrappers).
 """
 from __future__ import annotations
 
-import pytest
-
 import sys
 import unittest
 from pathlib import Path
@@ -31,6 +29,7 @@ def _mock_response(status_code: int = 200, json_data: dict | None = None, text: 
     m = MagicMock()
     m.status_code = status_code
     m.text = text or ""
+    m.headers = {}
     if json_data is not None:
         m.json.return_value = json_data
     return m
@@ -225,8 +224,10 @@ class TestCriminalipEnrich(unittest.TestCase):
     @patch("criminalip_enrich.requests.get")
     def test_auth_error_stops_early(self, mock_get, _sleep):
         """401/403 on the first request stops all further requests."""
+        from recon.helpers import circuit_breaker as cb
         for code in (401, 403):
             with self.subTest(code=code):
+                cb.reset_registry()  # a refused key stops Criminal IP for the whole process
                 mock_get.reset_mock()
                 mock_get.return_value = _mock_response(code, {}, text="err")
                 cr = _combined_result()
@@ -243,7 +244,9 @@ class TestCriminalipEnrich(unittest.TestCase):
         out = run_criminalip_enrichment(cr, self._settings())
         self.assertIsNone(out["criminalip"]["domain_report"])
         self.assertEqual(out["criminalip"]["ip_reports"], [])
-        backoff = [c for c in mock_sleep.call_args_list if c[0] and c[0][0] == 2]
+        # The retry sleeps out what is left of the shared 2s pause (Retry-After
+        # absent), a hair under 2s by the time it is admitted.
+        backoff = [c for c in mock_sleep.call_args_list if c[0] and 1.5 <= c[0][0] <= 2]
         self.assertGreaterEqual(len(backoff), 1)
 
     @patch("criminalip_enrich.time.sleep")
@@ -368,7 +371,6 @@ class TestCriminalipEnrich(unittest.TestCase):
 
     @patch("criminalip_enrich.time.sleep")
     @patch("criminalip_enrich.requests.get")
-    @pytest.mark.skip(reason="Part H (bucket-3): intra-file order-dependent enrichment rate-limit/counter test (shared state leaks between tests in the file); behavior/correctness unconfirmed - see green-up report")
     def test_consecutive_data_failures_stop(self, mock_get, _sleep):
         """After 3 consecutive IPs returning no data, remaining IPs are skipped."""
         cr = {
@@ -381,13 +383,12 @@ class TestCriminalipEnrich(unittest.TestCase):
         mock_get.return_value = _mock_response(
             400, {}, text='{"status":400,"message":"Invalid IP Address","data":{}}'
         )
-        out = run_criminalip_enrichment(cr, self._settings())
+        out = run_criminalip_enrichment(cr, self._settings(CRIMINALIP_WORKERS=1))
         self.assertEqual(out["criminalip"]["ip_reports"], [])
         self.assertEqual(mock_get.call_count, 3, "Should stop after 3 consecutive failures")
 
     @patch("criminalip_enrich.time.sleep")
     @patch("criminalip_enrich.requests.get")
-    @pytest.mark.skip(reason="Part H (bucket-3): intra-file order-dependent enrichment rate-limit/counter test (shared state leaks between tests in the file); behavior/correctness unconfirmed - see green-up report")
     def test_consecutive_counter_resets_on_success(self, mock_get, _sleep):
         """A successful response resets the consecutive failure counter."""
         call_count = {"n": 0}
@@ -409,14 +410,13 @@ class TestCriminalipEnrich(unittest.TestCase):
             ]},
             "dns": {"domain": {}, "subdomains": {}},
         }
-        out = run_criminalip_enrichment(cr, self._settings())
+        out = run_criminalip_enrichment(cr, self._settings(CRIMINALIP_WORKERS=1))
         self.assertEqual(len(out["criminalip"]["ip_reports"]), 1)
         self.assertEqual(mock_get.call_count, 5,
                          "1 fail, 1 success (reset), 3 more fails then stop")
 
     @patch("criminalip_enrich.time.sleep")
     @patch("criminalip_enrich.requests.get")
-    @pytest.mark.skip(reason="Part H (bucket-3): intra-file order-dependent enrichment rate-limit/counter test (shared state leaks between tests in the file); behavior/correctness unconfirmed - see green-up report")
     def test_rate_limit_stops_ip_loop(self, mock_get, mock_sleep):
         """429 on an IP request stops all further IP queries."""
         def side_effect(url, **_kwargs):
@@ -430,7 +430,7 @@ class TestCriminalipEnrich(unittest.TestCase):
             "metadata": {"ip_mode": False},
             "dns": {"domain": {"ips": {"ipv4": ["1.2.3.1", "1.2.3.2", "1.2.3.3"]}}, "subdomains": {}},
         }
-        out = run_criminalip_enrichment(cr, self._settings())
+        out = run_criminalip_enrichment(cr, self._settings(CRIMINALIP_WORKERS=1))
         self.assertIsNotNone(out["criminalip"]["domain_report"])
         self.assertEqual(out["criminalip"]["ip_reports"], [])
         ip_calls = [c for c in mock_get.call_args_list if "ip/data" in str(c)]
@@ -446,6 +446,58 @@ class TestCriminalipEnrich(unittest.TestCase):
         out = run_criminalip_enrichment(cr, self._settings())
         self.assertIsNone(out["criminalip"]["domain_report"])
         self.assertEqual(mock_get.call_count, 1)
+
+
+def _ip_mode(n: int) -> dict:
+    return {"domain": "", "dns": {"domain": {}, "subdomains": {}},
+            "metadata": {"ip_mode": True, "expanded_ips": [f"1.2.3.{i}" for i in range(1, n + 1)]}}
+
+
+class TestCriminalipCircuitBreaker(unittest.TestCase):
+    def _settings(self, **overrides) -> dict:
+        base = {"CRIMINALIP_ENABLED": True, "CRIMINALIP_API_KEY": "cip-key",
+                "CRIMINALIP_KEY_ROTATOR": None, "CRIMINALIP_WORKERS": 1}
+        base.update(overrides)
+        return base
+
+    @patch("criminalip_enrich.time.sleep")
+    @patch("criminalip_enrich.requests.get")
+    def test_ten_404s_never_trip_it(self, mock_get, _sleep):
+        """Bug 8: a no-data 404 used to count as a failure and stop the run."""
+        mock_get.return_value = _mock_response(404, {})
+        out = run_criminalip_enrichment(_ip_mode(10), self._settings())
+        self.assertEqual(mock_get.call_count, 10)
+        self.assertNotIn("degraded", out["criminalip"])
+
+    @patch("criminalip_enrich.time.sleep")
+    @patch("criminalip_enrich.requests.get")
+    def test_empty_200_bodies_never_trip_it(self, mock_get, _sleep):
+        mock_get.return_value = _mock_response(200, {})
+        out = run_criminalip_enrichment(_ip_mode(10), self._settings())
+        self.assertEqual(mock_get.call_count, 10)
+        self.assertEqual(out["criminalip"]["ip_reports"], [])
+
+    @patch("criminalip_enrich.time.sleep")
+    @patch("criminalip_enrich.requests.get")
+    def test_three_timeouts_mean_the_fourth_ip_is_never_requested(self, mock_get, _sleep):
+        import requests as req_lib
+        mock_get.side_effect = req_lib.exceptions.ReadTimeout("x")
+        out = run_criminalip_enrichment(_ip_mode(10), self._settings())
+        self.assertEqual(mock_get.call_count, 3)
+        (entry,) = out["criminalip"]["degraded"]
+        self.assertEqual((entry["source"], entry["skipped"]), ("criminalip:ip", 7))
+
+    @patch("criminalip_enrich.time.sleep")
+    @patch("criminalip_enrich.requests.get")
+    def test_a_refused_key_means_exactly_one_call_and_no_body_in_the_log(self, mock_get, _sleep):
+        mock_get.return_value = _mock_response(401, {}, text='{"message":"Invalid API Key SECRETBODY"}')
+        with patch("builtins.print") as fake_print:
+            run_criminalip_enrichment(_ip_mode(10), self._settings())
+        self.assertEqual(mock_get.call_count, 1)
+        printed = "\n".join(" ".join(map(str, c.args)) for c in fake_print.call_args_list)
+        self.assertIn("401 key rejected - stopped for the rest of this run", printed)
+        self.assertNotIn("SECRETBODY", printed)
+        self.assertNotIn("cip-key", printed)
 
 
 if __name__ == "__main__":

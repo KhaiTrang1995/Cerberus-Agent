@@ -20,7 +20,7 @@ from typing import Dict, List, Optional
 
 import requests
 
-from recon.helpers.ai_planner import internal_key_headers
+from recon.helpers.ai_planner import agent_llm_gate, internal_key_headers
 
 TEMPLATES_STATS_PATH = '/opt/nuclei-templates-official/TEMPLATES-STATS.json'
 MIN_TEMPLATE_COUNT = 50
@@ -147,12 +147,18 @@ def get_ai_tags(
     endpoint = f"{agent_api_url}/llm/nuclei-tags"
     print(f"[*][Nuclei-AI] Calling agent {endpoint} with model={model} ({len(payload['technologies'])} techs, {len(payload['servers'])} servers, {len(candidates)} candidates)")
 
+    gate = agent_llm_gate()
+    if not gate.allowed:
+        print(f"[!][Nuclei-AI] Agent LLM paused (breaker open) - using the fallback.")
+        return current_tags
     try:
         resp = requests.post(endpoint, json=payload, headers=internal_key_headers(), timeout=LLM_TIMEOUT)
     except requests.RequestException as e:
+        gate.record(exc=e)
         print(f"[!][Nuclei-AI] Agent request failed: {e}. Using current tags as fallback.")
         return current_tags
 
+    gate.record(resp=resp)
     if resp.status_code != 200:
         print(f"[!][Nuclei-AI] Agent returned HTTP {resp.status_code}: {resp.text[:200]}. Using current tags as fallback.")
         return current_tags
