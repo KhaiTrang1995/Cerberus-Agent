@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.20.0] - 2026-09-27
+
+### Added
+
+- **Web cache poisoning gains native detectors across the taxonomy.** The recon cache scanner now has its own vectors for **fat GET / parameter cloaking** (the parameter rides in the GET body, which a URL-keyed cache never sees), **cache-key normalization** (a matrix path-parameter the cache strips from its key but the origin still reads), and **auth-aware web cache deception** (an authenticated page served from cache to an anonymous visitor via a static-suffix URL). Each is confirmed against a real cache with the poison-then-victim sequence and written to the graph.
+- **Unauthenticated cache-purge endpoint check.** A direct-IP probe flags a cache that accepts an unauthenticated `PURGE` or `BAN` (cache denial-of-service, forced origin re-fetch), using a method differential to stay low false-positive.
+
+### Changed
+
+- **WAF bypass is now proven, not inferred.** The direct-origin check sends a signature probe to the WAF-fronted host and to the origin IP with the real Host header, and reports a bypass only when the edge blocks it and the origin serves it — a concrete differential rather than a `Server`-header comparison alone.
+
+### Fixed
+
+- **The Nuxt `_payload.json` cache vector is actually exercised.** It was appended after the `?cb=` cache-buster and never reached the route as a real path, so the Nuxt path-confusion case was never tested.
+
 ## [6.19.0] - 2026-09-25
 
 ### Added
