@@ -574,11 +574,13 @@ def lookup_cves_vulners(product: str, version: str, api_key: str = None, key_rot
 
     effective_key = key_rotator.current_key if key_rotator and key_rotator.has_keys else api_key
     params = {"software": f"{product} {version}", "version": version, "type": "software"}
-    if effective_key:
-        params["apiKey"] = effective_key
+    # Vulners accepts the key only in the X-Api-Key header since 2025-10-02. A key
+    # in the query string gets the same Cloudflare challenge page (403 HTML) as no
+    # key at all, and it would also land in URLs and logs.
+    headers = {"X-Api-Key": effective_key} if effective_key else {}
 
     try:
-        response = requests.get(VULNERS_API_URL, params=params, timeout=30)
+        response = requests.get(VULNERS_API_URL, params=params, headers=headers, timeout=30)
         if key_rotator:
             key_rotator.tick()
         response.raise_for_status()
