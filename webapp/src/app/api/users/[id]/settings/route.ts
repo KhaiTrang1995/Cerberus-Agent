@@ -18,6 +18,73 @@ function maskSecret(value: string): string {
 
 const TUNNEL_FIELDS = ['ngrokAuthtoken', 'chiselServerUrl', 'chiselAuth'] as const
 
+/**
+ * Every secret column, masked to its last 4 characters for any caller that is
+ * not the internal/scanner principal. The GET and the PUT response share this
+ * list: a column missing here is returned in cleartext. githubEnterpriseHost
+ * and chiselServerUrl are configuration, not secrets, and stay readable.
+ */
+const SECRET_FIELDS = [
+  'githubAccessToken',
+  'supplyChainGithubToken',
+  'githubEnterpriseToken',
+  'tavilyApiKey',
+  'shodanApiKey',
+  'serpApiKey',
+  'nvdApiKey',
+  'vulnersApiKey',
+  'urlscanApiKey',
+  'censysApiToken',
+  'censysOrgId',
+  'fofaApiKey',
+  'otxApiKey',
+  'netlasApiKey',
+  'virusTotalApiKey',
+  'zoomEyeApiKey',
+  'criminalIpApiKey',
+  'securitytrailsApiKey',
+  'viewdnsApiKey',
+  'quakeApiKey',
+  'hunterApiKey',
+  'publicWwwApiKey',
+  'hunterHowApiKey',
+  'googleApiKey',
+  'googleApiCx',
+  'onypheApiKey',
+  'driftnetApiKey',
+  'wpscanApiToken',
+  'pdcpApiKey',
+  'ngrokAuthtoken',
+  'chiselAuth',
+  'trufflehogGithubToken',
+  'trufflehogGitlabToken',
+  'trufflehogDockerToken',
+  'trufflehogHuggingfaceToken',
+  'trufflehogAwsAccessKeyId',
+  'trufflehogAwsSecretKey',
+  'trufflehogAwsSessionToken',
+  'trufflehogGcpServiceAccount',
+  'trufflehogPostmanToken',
+  'trufflehogJenkinsUsername',
+  'trufflehogJenkinsPassword',
+  'trufflehogElasticUsername',
+  'trufflehogElasticPassword',
+  'trufflehogElasticApiKey',
+  'trufflehogElasticServiceToken',
+  'trufflehogCircleciToken',
+  'trufflehogTravisciToken',
+  'trufflehogGitUsername',
+  'trufflehogGitToken',
+] as const
+
+function maskSecrets<T extends Record<string, unknown>>(row: T): T {
+  const out: Record<string, unknown> = { ...row }
+  for (const f of SECRET_FIELDS) {
+    if (typeof out[f] === 'string') out[f] = maskSecret(out[f] as string)
+  }
+  return out as T
+}
+
 // GET /api/users/[id]/settings
 export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
@@ -122,63 +189,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     }
 
     if (!internal) {
-      settings = {
-        ...settings,
-        githubAccessToken: maskSecret(settings.githubAccessToken),
-        supplyChainGithubToken: maskSecret(settings.supplyChainGithubToken),
-        // The host is not a secret (the operator has to read it back to confirm
-        // what is allowlisted); its token is.
-        githubEnterpriseToken: maskSecret(settings.githubEnterpriseToken),
-        tavilyApiKey: maskSecret(settings.tavilyApiKey),
-        shodanApiKey: maskSecret(settings.shodanApiKey),
-        serpApiKey: maskSecret(settings.serpApiKey),
-        nvdApiKey: maskSecret(settings.nvdApiKey),
-        vulnersApiKey: maskSecret(settings.vulnersApiKey),
-        urlscanApiKey: maskSecret(settings.urlscanApiKey),
-        censysApiToken: maskSecret(settings.censysApiToken),
-        censysOrgId: maskSecret(settings.censysOrgId),
-        fofaApiKey: maskSecret(settings.fofaApiKey),
-        otxApiKey: maskSecret(settings.otxApiKey),
-        netlasApiKey: maskSecret(settings.netlasApiKey),
-        virusTotalApiKey: maskSecret(settings.virusTotalApiKey),
-        zoomEyeApiKey: maskSecret(settings.zoomEyeApiKey),
-        criminalIpApiKey: maskSecret(settings.criminalIpApiKey),
-        securitytrailsApiKey: maskSecret(settings.securitytrailsApiKey),
-        viewdnsApiKey: maskSecret(settings.viewdnsApiKey),
-        quakeApiKey: maskSecret(settings.quakeApiKey),
-        hunterApiKey: maskSecret(settings.hunterApiKey),
-        publicWwwApiKey: maskSecret(settings.publicWwwApiKey),
-        hunterHowApiKey: maskSecret(settings.hunterHowApiKey),
-        googleApiKey: maskSecret(settings.googleApiKey),
-        googleApiCx: maskSecret(settings.googleApiCx),
-        onypheApiKey: maskSecret(settings.onypheApiKey),
-        driftnetApiKey: maskSecret(settings.driftnetApiKey),
-        wpscanApiToken: maskSecret(settings.wpscanApiToken),
-        pdcpApiKey: maskSecret(settings.pdcpApiKey),
-        ngrokAuthtoken: maskSecret(settings.ngrokAuthtoken),
-        chiselAuth: maskSecret(settings.chiselAuth),
-        // TruffleHog per-source credentials. Unmasked they would be readable by
-        // anyone who can open the settings page.
-        trufflehogGithubToken: maskSecret(settings.trufflehogGithubToken),
-        trufflehogGitlabToken: maskSecret(settings.trufflehogGitlabToken),
-        trufflehogDockerToken: maskSecret(settings.trufflehogDockerToken),
-        trufflehogHuggingfaceToken: maskSecret(settings.trufflehogHuggingfaceToken),
-        trufflehogAwsAccessKeyId: maskSecret(settings.trufflehogAwsAccessKeyId),
-        trufflehogAwsSecretKey: maskSecret(settings.trufflehogAwsSecretKey),
-        trufflehogAwsSessionToken: maskSecret(settings.trufflehogAwsSessionToken),
-        trufflehogGcpServiceAccount: maskSecret(settings.trufflehogGcpServiceAccount),
-        trufflehogPostmanToken: maskSecret(settings.trufflehogPostmanToken),
-        trufflehogJenkinsUsername: maskSecret(settings.trufflehogJenkinsUsername),
-        trufflehogJenkinsPassword: maskSecret(settings.trufflehogJenkinsPassword),
-        trufflehogElasticUsername: maskSecret(settings.trufflehogElasticUsername),
-        trufflehogElasticPassword: maskSecret(settings.trufflehogElasticPassword),
-        trufflehogElasticApiKey: maskSecret(settings.trufflehogElasticApiKey),
-        trufflehogElasticServiceToken: maskSecret(settings.trufflehogElasticServiceToken),
-        trufflehogCircleciToken: maskSecret(settings.trufflehogCircleciToken),
-        trufflehogTravisciToken: maskSecret(settings.trufflehogTravisciToken),
-        trufflehogGitUsername: maskSecret(settings.trufflehogGitUsername),
-        trufflehogGitToken: maskSecret(settings.trufflehogGitToken),
-      }
+      settings = maskSecrets(settings)
     }
 
     return NextResponse.json({ ...settings, rotationConfigs })
@@ -471,42 +482,8 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       }
     }
 
-    // Return masked (chiselServerUrl is not a secret)
-    return NextResponse.json({
-      ...settings,
-      githubAccessToken: maskSecret(settings.githubAccessToken),
-      supplyChainGithubToken: maskSecret(settings.supplyChainGithubToken),
-      githubEnterpriseToken: maskSecret(settings.githubEnterpriseToken),
-      tavilyApiKey: maskSecret(settings.tavilyApiKey),
-      shodanApiKey: maskSecret(settings.shodanApiKey),
-      serpApiKey: maskSecret(settings.serpApiKey),
-      nvdApiKey: maskSecret(settings.nvdApiKey),
-      vulnersApiKey: maskSecret(settings.vulnersApiKey),
-      urlscanApiKey: maskSecret(settings.urlscanApiKey),
-      censysApiToken: maskSecret(settings.censysApiToken),
-      censysOrgId: maskSecret(settings.censysOrgId),
-      fofaApiKey: maskSecret(settings.fofaApiKey),
-      otxApiKey: maskSecret(settings.otxApiKey),
-      netlasApiKey: maskSecret(settings.netlasApiKey),
-      virusTotalApiKey: maskSecret(settings.virusTotalApiKey),
-      zoomEyeApiKey: maskSecret(settings.zoomEyeApiKey),
-      criminalIpApiKey: maskSecret(settings.criminalIpApiKey),
-      securitytrailsApiKey: maskSecret(settings.securitytrailsApiKey),
-      viewdnsApiKey: maskSecret(settings.viewdnsApiKey),
-      quakeApiKey: maskSecret(settings.quakeApiKey),
-      hunterApiKey: maskSecret(settings.hunterApiKey),
-      publicWwwApiKey: maskSecret(settings.publicWwwApiKey),
-      hunterHowApiKey: maskSecret(settings.hunterHowApiKey),
-      googleApiKey: maskSecret(settings.googleApiKey),
-      googleApiCx: maskSecret(settings.googleApiCx),
-      onypheApiKey: maskSecret(settings.onypheApiKey),
-      driftnetApiKey: maskSecret(settings.driftnetApiKey),
-      wpscanApiToken: maskSecret(settings.wpscanApiToken),
-      pdcpApiKey: maskSecret(settings.pdcpApiKey),
-      ngrokAuthtoken: maskSecret(settings.ngrokAuthtoken),
-      chiselAuth: maskSecret(settings.chiselAuth),
-      rotationConfigs,
-    })
+    // Masked on the way out, like the GET: the browser never gets a secret back.
+    return NextResponse.json({ ...maskSecrets(settings), rotationConfigs })
   } catch (error) {
     console.error('Failed to update user settings:', error)
     return NextResponse.json(

@@ -9,7 +9,7 @@ import { useVersionCheck } from '@/hooks/useVersionCheck'
 // Shared with the inline shortcuts the scan sections render, so a key cannot be
 // described one way here and another way on the card that asks for it.
 import { CredentialDrawer } from '@/components/settings/CredentialDrawer'
-import { githubKeyGroups, trufflehogKeyGroups } from '@/lib/credentialFields'
+import { githubKeyGroups, trufflehogKeyGroups, TRUFFLEHOG_KEY_FIELDS } from '@/lib/credentialFields'
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard'
 import { LlmProviderForm } from '@/components/settings/LlmProviderForm'
 import McpServersTab from '@/components/settings/mcp/McpServersTab'
@@ -26,7 +26,12 @@ import { buildTemplate, templateToJson, validateAndParse, isValidationError } fr
 import type { ParsedImport } from '@/lib/apiKeysTemplate'
 import { ROTATION_TOOL_BY_FIELD, ROTATION_TOOL_NAMES } from '@/lib/rotationTools'
 
+/** A Secret Multiscanner credential column (TRUFFLEHOG_KEY_FIELDS). */
+type TrufflehogField = `trufflehog${string}`
+
 interface UserSettings {
+  // Secret Multiscanner credentials, masked like every key.
+  [key: TrufflehogField]: string
   githubAccessToken: string
   supplyChainGithubToken: string
   githubEnterpriseHost: string
@@ -86,7 +91,17 @@ interface UserSettings {
   captureEgressBlockUnspecified: boolean
 }
 
+/**
+ * The Secret Multiscanner credentials as the settings GET returns them (masked).
+ * Loaded into state so the drawer shows which ones are saved, and so a save
+ * sends the masked values back (the PUT keeps a masked value as stored).
+ */
+function trufflehogValues(data: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(TRUFFLEHOG_KEY_FIELDS.map(f => [f.name, typeof data[f.name] === 'string' ? data[f.name] as string : '']))
+}
+
 const EMPTY_SETTINGS: UserSettings = {
+  ...trufflehogValues({}),
   githubAccessToken: '',
   supplyChainGithubToken: '',
   githubEnterpriseHost: '',
@@ -556,6 +571,7 @@ export default function SettingsPage() {
       if (resp.ok) {
         const data = await resp.json()
         setSettings({
+          ...trufflehogValues(data),
           githubAccessToken: data.githubAccessToken || '',
           supplyChainGithubToken: data.supplyChainGithubToken || '',
           githubEnterpriseHost: data.githubEnterpriseHost || '',
@@ -682,6 +698,7 @@ export default function SettingsPage() {
       if (resp.ok) {
         const data = await resp.json()
         setSettings({
+          ...trufflehogValues(data),
           githubAccessToken: data.githubAccessToken || '',
           supplyChainGithubToken: data.supplyChainGithubToken || '',
           githubEnterpriseHost: data.githubEnterpriseHost || '',

@@ -479,9 +479,15 @@ class TestSourceIntegrity(unittest.TestCase):
 
     def test_settings_route_handles_urlscan(self):
         source = (REPO_ROOT / "webapp" / "src" / "app" / "api" / "users" / "[id]" / "settings" / "route.ts").read_text()
-        self.assertIn("urlscanApiKey", source)
-        # Should appear in fields array, GET defaults, and masking
-        self.assertGreater(source.count("urlscanApiKey"), 3)
+
+        def block(start):
+            i = source.index(start)
+            return source[i:source.index("] as const", i)]
+
+        # Persisted (writable fields), defaulted for a user with no row, and masked on read.
+        self.assertIn("'urlscanApiKey'", block("const fields = ["))
+        self.assertIn("urlscanApiKey: ''", source)
+        self.assertIn("'urlscanApiKey'", block("const SECRET_FIELDS = ["))
 
     def test_settings_page_has_urlscan_field(self):
         source = (REPO_ROOT / "webapp" / "src" / "app" / "settings" / "page.tsx").read_text()

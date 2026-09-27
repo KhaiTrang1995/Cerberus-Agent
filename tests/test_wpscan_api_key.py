@@ -53,8 +53,11 @@ class TestSettingsAPIRoute(unittest.TestCase):
             self.content = f.read()
 
     def test_get_masking(self):
-        """wpscanApiToken must be masked in GET response."""
-        self.assertIn('wpscanApiToken: maskSecret(settings.wpscanApiToken)', self.content)
+        """wpscanApiToken must be masked in GET response (the shared SECRET_FIELDS list)."""
+        match = re.search(r"const SECRET_FIELDS = \[([^\]]+)\]", self.content)
+        self.assertIsNotNone(match)
+        self.assertIn("'wpscanApiToken'", match.group(1))
+        self.assertIn('settings = maskSecrets(settings)', self.content)
 
     def test_put_whitelist(self):
         """wpscanApiToken must be in PUT fields whitelist."""
