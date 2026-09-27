@@ -20,7 +20,7 @@ import { ROTATION_TOOL_NAMES } from './rotationTools'
 
 const MAX_FILE_SIZE = 100 * 1024 // 100 KB
 
-const ALLOWED_KEY_FIELDS = [
+export const ALLOWED_KEY_FIELDS = [
   // GitHub & Supply Chain
   'githubAccessToken',
   'supplyChainGithubToken',
@@ -77,7 +77,7 @@ const ALLOWED_KEY_FIELDS = [
   'trufflehogGitToken',
 ] as const
 
-const ALLOWED_TUNNEL_FIELDS = [
+export const ALLOWED_TUNNEL_FIELDS = [
   'ngrokAuthtoken',
   'chiselServerUrl',
   'chiselAuth',

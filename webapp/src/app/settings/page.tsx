@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useSearchParams } from 'next/navigation'
 import { Plus, Pencil, Trash2, Loader2, Eye, EyeOff, Upload, Download, Swords, RotateCw, Copy, Check, ExternalLink, ChevronDown, ChevronRight, Info, BookOpen, Server, KeyRound } from 'lucide-react'
 import { useProject } from '@/providers/ProjectProvider'
@@ -25,6 +25,10 @@ import styles from '@/components/settings/Settings.module.css'
 import { buildTemplate, templateToJson, validateAndParse, isValidationError } from '@/lib/apiKeysTemplate'
 import type { ParsedImport } from '@/lib/apiKeysTemplate'
 import { ROTATION_TOOL_BY_FIELD, ROTATION_TOOL_NAMES } from '@/lib/rotationTools'
+import { useApiUsageReport } from '@/components/settings/api-usage/useApiUsageReport'
+import { ApiUsageControls } from '@/components/settings/api-usage/ApiUsageControls'
+import { ApiUsageReportModal } from '@/components/settings/api-usage/ApiUsageReportModal'
+import { ApiUsageLlmChip } from '@/components/settings/api-usage/ApiUsageLlmChip'
 
 /** A Secret Multiscanner credential column (TRUFFLEHOG_KEY_FIELDS). */
 type TrufflehogField = `trufflehog${string}`
@@ -661,9 +665,10 @@ export default function SettingsPage() {
     }
   }, [userId, fetchProviders])
 
-  // Save user settings
-  const saveSettings = useCallback(async () => {
-    if (!userId) return
+  // Save user settings. Resolves true once the PUT succeeded, so a caller (the
+  // API usage check's "Save and check") only proceeds on saved keys.
+  const saveSettings = useCallback(async (): Promise<boolean> => {
+    if (!userId) return false
     setSettingsSaving(true)
     try {
       // Build rotation configs payload from pending state
@@ -762,10 +767,15 @@ export default function SettingsPage() {
         }
         setSettingsDirty(false)
         toast.success('Settings saved')
+        return true
       }
+      const err = await resp.json().catch(() => ({}))
+      toast.error(err.error || 'Failed to save settings')
+      return false
     } catch (err) {
       console.error('Failed to save settings:', err)
       toast.error('Failed to save settings')
+      return false
     } finally {
       setSettingsSaving(false)
     }
@@ -926,6 +936,30 @@ export default function SettingsPage() {
     setActiveTab(next)
   }, [activeTab, settingsDirty, childDirty, confirmDiscard])
 
+  // API usage report: one report for every saved key, reachable from the API
+  // Keys tab and the LLM Providers tab.
+  const extraKeyCounts = useMemo(
+    () => Object.fromEntries(Object.entries(rotationConfigs).map(([tool, r]) => [tool, r.extraKeyCount])),
+    [rotationConfigs],
+  )
+  const llmUsageRows = useMemo(
+    () => providers.filter(p => p.id).map(p => ({
+      id: p.id!, providerType: p.providerType, name: p.name, apiKey: p.apiKey, baseUrl: p.baseUrl,
+      awsRegion: p.awsRegion, awsAccessKeyId: p.awsAccessKeyId, awsBearerToken: p.awsBearerToken,
+    })),
+    [providers],
+  )
+  const apiUsage = useApiUsageReport({
+    userId,
+    active: activeTab === 'keys' || activeTab === 'providers',
+    settingsDirty,
+    saveSettings,
+    values: settings as unknown as Record<string, unknown>,
+    extraKeyCounts,
+    llmRows: llmUsageRows,
+    llmLabel: getProviderLabel,
+  })
+
   // Tradecraft Resources state
   type TcResource = import('@/components/settings/TradecraftResourceForm').TradecraftResource & {
     crawlStoppedBecause?: string
@@ -1079,11 +1113,14 @@ export default function SettingsPage() {
             <span>LLM Providers</span>
             <WikiInfoButton target="https://github.com/samugit83/redamon/wiki/AI-Model-Providers" title="Open AI Model Providers wiki page" />
           </h2>
-          {!showProviderForm && !editingProvider && (
-            <button className="primaryButton" onClick={() => setShowProviderForm(true)}>
-              <Plus size={14} /> Add Provider
-            </button>
-          )}
+          <div className={styles.sectionHeaderActions}>
+            <ApiUsageControls controller={apiUsage} buttonClassName={styles.sectionHeaderBtn} />
+            {!showProviderForm && !editingProvider && (
+              <button className="primaryButton" onClick={() => setShowProviderForm(true)}>
+                <Plus size={14} /> Add Provider
+              </button>
+            )}
+          </div>
         </div>
         <p className={styles.sectionHint}>
           Models from all providers appear in every project&apos;s LLM selector. Key-based providers auto-discover available models.
@@ -1129,6 +1166,7 @@ export default function SettingsPage() {
                       {getProviderLabel(p.providerType)}
                       {p.providerType === 'openai_compatible' && p.modelIdentifier && ` - ${p.modelIdentifier}`}
                     </div>
+                    {p.id && <ApiUsageLlmChip report={apiUsage.meta?.report} providerId={p.id} />}
                   </div>
                   <div className={styles.providerActions}>
                     <button className="iconButton" title="Edit" onClick={() => setEditingProvider(p)}>
@@ -1344,6 +1382,7 @@ export default function SettingsPage() {
             <WikiInfoButton target="settings" title="Open Global Settings wiki page" />
           </h2>
           <div className={styles.sectionHeaderActions}>
+            <ApiUsageControls controller={apiUsage} buttonClassName={styles.sectionHeaderBtn} />
             <button className={styles.sectionHeaderBtn} onClick={downloadKeysTemplate} title="Download a JSON template to fill in your API keys offline">
               <Download size={13} /> Download Template
             </button>
@@ -2002,6 +2041,8 @@ export default function SettingsPage() {
           </span>
         </div>
       </Modal>
+
+      <ApiUsageReportModal controller={apiUsage} />
 
       {/* Key Rotation Modal */}
       <Modal

@@ -136,6 +136,7 @@ graph TD
 | Reports (`reports`, `report_data` volume) | Generated deliverables | MEDIUM | Aggregated findings |
 | Fireteam member state (`fireteam_members.resultBlob`, `errorMessage`) | Multi-agent state | MEDIUM | Exploitation results per member |
 | Agent / orchestrator logs (`agentic/logs`) | Logs | MEDIUM | May contain tokens/target detail |
+| API usage reports (`api_usage_reports`, one row per user) | Account metadata | MEDIUM | Plan names, usage numbers, last-4 key hints, token expiry dates; never a key, email or raw provider body |
 
 ### 3. Infrastructure Assets
 
@@ -243,6 +244,7 @@ graph LR
 - **Found secrets** flow target → secret scanners → Neo4j (`GithubSecret`/`MultiscannerFinding`/`Secret`) and `*/output/*.json` on disk.
 - **Graph reads from the worker** are funneled through `agent /graph/exec`, which enforces read-only + tenant scoping; the worker holds no Neo4j credentials.
 - **Outbound to external LLM/OSINT providers** carries prompts, target context, and operator-supplied keys off-host.
+- **API usage check** (on demand, Settings > API Keys): the webapp itself reads the stored keys and calls each provider's account/usage endpoint, so keys also leave the host from the webapp container, not only from the agent and the scanners. The GitHub Enterprise probe only reaches the saved, validated GHE host; an OpenAI-compatible `baseUrl` is contacted only when it matches a public preset host. The report (`api_usage_reports`) keeps numbers and last-4 hints, never a key or a raw provider body.
 
 ---
 
@@ -445,6 +447,7 @@ Webapp server-side routes under `webapp/src/app/api/` (all behind `middleware.ts
 | Graph | `/api/graph`, `/api/graph-views/*` | JWT; Neo4j basic auth server-side |
 | LLM / models | `/api/users/[id]/llm-providers`, `/api/models` | JWT; `?internal=true` returns **unmasked** keys |
 | Settings | `/api/users/[id]/settings` | JWT; ~35 OSINT keys (masked on read) |
+| API usage report | `/api/users/[id]/settings/api-usage` (GET the saved report, POST run a check) | JWT; effective-user check (the owner, or an admin only while acting as that user); POST refuses the internal and scanner keys; the POST sends the user's stored keys to fixed provider account/usage endpoints (no redirect followed, 10 s, 256 KB); only numbers, plan names and last-4 hints are returned or stored; one audit row per run; off with `API_USAGE_CHECK_ENABLED=false` |
 | Reports / analytics | `/api/reports/*`, `/api/analytics/redzone/*`, `/api/projects/[id]/reports` | JWT |
 | **File uploads** | `/api/projects/[id]/wordlists` (≤50 MB `.txt`), `/api/nuclei-templates` (≤1 MB `.yaml`), `/api/js-recon/[projectId]/upload` (≤10 MB), `/api/roe/parse` (≤20 MB PDF/DOCX → LLM) | JWT; extension allowlist + `path.basename` sanitization |
 | Projects | `/api/projects/*` (CRUD, import/export, presets) | JWT |
@@ -587,7 +590,7 @@ Notable internal reachability: the webapp is the only container multi-homed onto
 
 ### 6.9 Egress (outbound)
 
-Outbound connections leave the host to: external **LLM providers** (agent, per-user keys), ~35 **OSINT/recon APIs** (scanners), **scan targets** (Kali tools and recon probes, on the host network / `pentest-net`), **upstream feeds** (KB ingestion, MSF/Nuclei/image updates), and **tunnel edges** (ngrok cloud / chisel server) when `TUNNELS_ENABLED` and a tunnel is configured. The reverse-shell catcher (`4444`) accepts inbound from engagement targets only when opened per-engagement (`./deploy.sh revshell-open`).
+Outbound connections leave the host to: external **LLM providers** (agent, per-user keys), ~35 **OSINT/recon APIs** (scanners; and the webapp, which calls provider account/usage endpoints on demand for the API usage report, off with `API_USAGE_CHECK_ENABLED=false`), **scan targets** (Kali tools and recon probes, on the host network / `pentest-net`), **upstream feeds** (KB ingestion, MSF/Nuclei/image updates), and **tunnel edges** (ngrok cloud / chisel server) when `TUNNELS_ENABLED` and a tunnel is configured. The reverse-shell catcher (`4444`) accepts inbound from engagement targets only when opened per-engagement (`./deploy.sh revshell-open`).
 
 ---
 

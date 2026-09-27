@@ -388,6 +388,7 @@ Replace `TOOL_NAME` with the tool name (e.g. `execute_httpx`) and `PHASE1`, `PHA
 - [ ] **`webapp/src/lib/apiKeysTemplate.ts`** — Add new key to `ALLOWED_KEY_FIELDS`. It must stay in sync with the `UserSettings` interface in `settings/page.tsx`.
 - [ ] **`webapp/src/lib/rotationTools.ts`** — If the key supports rotation, add one `ROTATION_TOOLS` entry (`tool`, `field`, `label`). The settings page (Key Rotation button), the settings PUT (which rows it saves) and the template all read this list, so there is no second copy to update; `rotationTools.test.ts` fails if the page has no Key Rotation button for the field.
 - [ ] **`webapp/src/lib/apiKeysTemplate.test.ts`** — Update test counts to match (key count, rotation count, round-trip test).
+- [ ] **`webapp/src/lib/apiUsage/registry.ts`** — Register a usage probe for the new key (a `providers/<id>.ts` with its `<id>.test.ts`, written from the provider's account/usage endpoint), or add the field to `NOT_PROBED` with the reason it cannot be checked for free. `registry.drift.test.ts` fails until the new field is covered, so the **Check API usage** report never silently skips a key.
 
 #### Progress Streaming (if long-running tool, >60s typical)
 

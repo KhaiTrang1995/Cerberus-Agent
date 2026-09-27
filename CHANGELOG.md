@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **API usage report.** A **Check API usage** button on Settings > API Keys (and on the LLM Providers tab) checks every saved credential in one click, each rotation key on its own, and reports per key the plan, used, limit, remaining and next reset, or why a key cannot be checked. It calls only account and usage endpoints, never a search; the keys never reach the browser, and the saved report keeps numbers and last-4 hints only. The report is saved and reopens from **Last report**; a new check replaces it after you confirm. It warns before checking while a scan or the agent is running, since its calls share their rate limits. An admin can run it for a user only while acting as that user, and every run is audited. Set `API_USAGE_CHECK_ENABLED=false` on an air-gapped host. Three checks use a little quota and say so: NVD (1 request of its 30 s window), ProjectDiscovery (1 vulnx request) and Postman (1 monthly API call).
+
 ### Fixed
 
 - **Vulners CVE lookups sent the key where Vulners no longer reads it.** Since 2025-10-02 Vulners accepts the key only in the `X-Api-Key` header; recon sent it as a query parameter, so every lookup hit a Cloudflare challenge and scans using the Vulners source found no CVEs. The key now goes in the header, and no longer appears in URLs. Once lookups succeed they spend Vulners credits: about 3 per technology looked up (Free plan: 100 credits a month), so a scan with many versioned technologies can use up a free plan.

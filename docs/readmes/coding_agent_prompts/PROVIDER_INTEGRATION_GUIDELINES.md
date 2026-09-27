@@ -485,6 +485,7 @@ Follow this order exactly. Each step is small enough to verify in isolation.
 
 11. Update [`presets/generate/route.ts`](../../../webapp/src/app/api/presets/generate/route.ts): `resolveProviderType`, `defaultBaseUrlFor`, `friendlyNames`. For non-OpenAI-compatible providers, add a dedicated `call<Myprovider>()` function and branch.
 12. In dev mode the webapp hot-reloads. In prod: `docker compose build webapp && docker compose up -d webapp`.
+12a. Register a usage probe for the new `providerType` in `LLM_PROBES` ([`webapp/src/lib/apiUsage/registry.ts`](../../../webapp/src/lib/apiUsage/registry.ts)), with its provider test next to it: a models listing that proves the key (see `providers/llm/validity.ts`), or a balance endpoint when the provider exposes one to a normal key. Never ask for an admin or management key just to show a number. `registry.drift.test.ts` fails until every `PROVIDER_TYPES` id has a probe.
 
 ### Phase D - End-to-end verification
 
