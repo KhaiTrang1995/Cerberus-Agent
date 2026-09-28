@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'vitest'
 import { parse, request, tavilyProbe } from './tavily'
-import { NOW, html, res, runProbe } from '../testUtils'
+import { NOW, html, res, runProbe, reportRow } from '../testUtils'
 
 const KEY = 'tvly-TESTKEY-0000'
 
@@ -45,6 +45,25 @@ describe('parse', () => {
     const r = parse(res(status, payload), NOW)
     expect(r.error?.kind).toBe(kind)
     expect(r.error?.httpStatus).toBe(status)
+  })
+
+  // Pay-as-you-go is what the account runs on once the plan credits are gone.
+  const USED_UP = { current_plan: 'Researcher', plan_usage: 1000, plan_limit: 1000 }
+  test('REGRESSION topup-balance-reads-exhausted: plan used up, pay-as-you-go room -> low, not exhausted', async () => {
+    const row = await reportRow(tavilyProbe, { tavilyApiKey: KEY }, [
+      res(200, { key: { usage: 1010, limit: null }, account: { ...USED_UP, paygo_usage: 10, paygo_limit: 500 } }),
+    ])
+    expect(row.health).toBe('low')
+    expect(row.notes).toContain('Plan credits are used up; calls now spend pay-as-you-go credits')
+  })
+
+  test.each([
+    ['pay-as-you-go off', { paygo_usage: 0, paygo_limit: null }, { usage: 1000, limit: null }],
+    ['pay-as-you-go cap reached', { paygo_usage: 500, paygo_limit: 500 }, { usage: 1500, limit: null }],
+    ['this key\'s own cap reached', { paygo_usage: 10, paygo_limit: 500 }, { usage: 200, limit: 200 }],
+  ])('plan used up, %s -> exhausted', async (_n, paygo, key) => {
+    const row = await reportRow(tavilyProbe, { tavilyApiKey: KEY }, [res(200, { key, account: { ...USED_UP, ...paygo } })])
+    expect(row.health).toBe('exhausted')
   })
 
   test('the detail.error message is surfaced', () => {

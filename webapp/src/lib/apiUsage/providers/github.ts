@@ -162,6 +162,10 @@ export const githubSupplyChainProbe: ProbeDef = {
   run: ctx => run(ctx, apiBaseForHost('github.com')),
 }
 
+/** A Multiscanner scan picks its GitHub endpoint per scan, so Settings can only ask github.com. */
+export const MULTISCANNER_HOST_NOTE =
+  'Checked against api.github.com; a token for a GitHub Enterprise endpoint set in a Multiscanner scan cannot be checked from Settings'
+
 export const githubMultiscannerProbe: ProbeDef = {
   ...COMMON,
   id: 'github-multiscanner',
@@ -171,7 +175,10 @@ export const githubMultiscannerProbe: ProbeDef = {
   field: 'trufflehogGithubToken',
   dashboardUrl: 'https://github.com/settings/tokens',
   endpoint: 'GET api.github.com/rate_limit',
-  run: ctx => run(ctx, apiBaseForHost('github.com')),
+  run: async ctx => {
+    const r = await run(ctx, apiBaseForHost('github.com'))
+    return r.error?.kind === 'invalid_key' ? { ...r, notes: [...(r.notes ?? []), MULTISCANNER_HOST_NOTE] } : r
+  },
 }
 
 export const githubEnterpriseProbe: ProbeDef = {

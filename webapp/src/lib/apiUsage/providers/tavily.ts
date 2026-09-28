@@ -49,7 +49,18 @@ export function parse(res: ProbeResponse, now: Date): ProbeResult {
     used: keyUsed, limit: keyLimit, remaining: keyLimit == null ? null : clampRemaining(keyLimit, keyUsed ?? 0),
     primary: keyLimit != null, note: keyLimit == null ? 'no per-key cap' : undefined,
   }))
-  return usageResult(meters, { account: { plan: str(a.current_plan) } })
+
+  // Pay-as-you-go takes over when the plan credits are gone, up to its own cap
+  // (null = uncapped, known to be on only once it has been used). The key's own
+  // cap still stops it.
+  const planOut = planLimit != null && planLimit > 0 && (planUsed ?? 0) >= planLimit
+  const paygoRoom = paygoLimit != null ? paygoLimit - (paygoUsed ?? 0) > 0 : (paygoUsed ?? 0) > 0
+  const keyOut = keyLimit != null && keyLimit > 0 && (keyUsed ?? 0) >= keyLimit
+  const onPaygo = planOut && paygoRoom && !keyOut
+  return usageResult(meters, {
+    account: { plan: str(a.current_plan) },
+    ...(onPaygo ? { notes: ['Plan credits are used up; calls now spend pay-as-you-go credits'], healthOverride: 'low' as const } : {}),
+  })
 }
 
 export const tavilyProbe: ProbeDef = {

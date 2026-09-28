@@ -208,6 +208,73 @@ describe('the report', () => {
     expect(report.results[0].error?.message).toBe('bad pair ***')
   })
 
+  // A top-up can carry an account whose plan meter is used up (SerpAPI extra
+  // credits, Tavily pay-as-you-go). The probe says so with healthOverride, which
+  // the runner used to apply only when it made the health WORSE.
+  test('REGRESSION topup-balance-reads-exhausted: the probe verdict replaces what the primary meters say', async () => {
+    const { clock, deps } = setup()
+    const carried = probe('carried', {
+      run: async () => usageResult(
+        [meter({ id: 'plan', label: 'Plan', unit: 'searches', window: 'month', limit: 100, remaining: 0, primary: true })],
+        { healthOverride: 'low' },
+      ),
+    })
+    const stopped = probe('stopped', {
+      run: async () => usageResult(
+        [meter({ id: 'bal', label: 'Balance', unit: 'usd', window: 'balance', remaining: 12, primary: true })],
+        { healthOverride: 'exhausted' },
+      ),
+    })
+    const plan = buildJobs({ settings: { carriedKey: 'C', stoppedKey: 'S' }, rotationRows: [], probes: [carried, stopped] })
+    const report = await clock.drive(runJobs(plan, deps))
+    expect(report.results.map(r => r.health)).toEqual(['low', 'exhausted'])
+    expect(report.counts).toMatchObject({ low: 1, exhausted: 1 })
+  })
+
+  test('REGRESSION provider-code-unscrubbed: the provider code is scrubbed and clipped like the message', async () => {
+    const { clock, deps } = setup()
+    const p = probe('code', {
+      run: async ctx => errorResult('forbidden', 'denied', { httpStatus: 403, providerCode: `denied_for_${ctx.key}_${'x'.repeat(200)}` }),
+    })
+    const plan = buildJobs({ settings: { codeKey: 'CODE-SECRET-KEY-0001' }, rotationRows: [], probes: [p] })
+    const report = await clock.drive(runJobs(plan, deps))
+    // Scrubbed to "denied_for_***_xx…", which then reads as a masked echo too.
+    expect(report.results[0].error?.providerCode).toBe(`[masked key]${'x'.repeat(47)}…`)
+  })
+
+  test('REGRESSION label-email-check-after-clip: an address cut by the length limit still drops the label', async () => {
+    const { clock, deps } = setup()
+    // The address straddles character 80: cut first, it no longer looks like one.
+    const label = `${'Token for the platform team, rotated every quarter, owner'.padEnd(60, '.')} alice.smith@acme-corporation.example`
+    const p = probe('named', {
+      run: async () => usageResult(
+        [meter({ id: 'm', label: 'M', unit: 'credits', window: 'month', remaining: 1, primary: true })],
+        { account: { plan: 'Pro', label } },
+      ),
+    })
+    const plan = buildJobs({ settings: { namedKey: 'N' }, rotationRows: [], probes: [p] })
+    const report = await clock.drive(runJobs(plan, deps))
+    expect(report.results[0].account).toEqual({ plan: 'Pro' })
+    expect(JSON.stringify(report)).not.toContain('alice.smith@')
+  })
+
+  test('REGRESSION email-in-notes-and-messages: an address in a note, a meter or a message is redacted', async () => {
+    const { clock, deps } = setup()
+    const noted = probe('noted', {
+      run: async () => usageResult(
+        [meter({ id: 'm', label: 'Seats of ops@example.test', unit: 'count', window: 'month', remaining: 1, primary: true, note: 'billed to billing@example.test' })],
+        { notes: ['Token: alice@example.test (read)'] },
+      ),
+    })
+    const refused = probe('refused', { run: async () => errorResult('forbidden', 'account bob@example.test is suspended') })
+    const plan = buildJobs({ settings: { notedKey: 'N', refusedKey: 'R' }, rotationRows: [], probes: [noted, refused] })
+    const report = await clock.drive(runJobs(plan, deps))
+    expect(JSON.stringify(report)).not.toContain('@example.test')
+    expect(report.results[0].notes).toEqual(['Token: [email] (read)'])
+    expect(report.results[0].meters[0]).toMatchObject({ label: 'Seats of [email]', note: 'billed to [email]' })
+    expect(report.results[1].error?.message).toBe('account [email] is suspended')
+  })
+
   test('counts, health and a stable order', async () => {
     const { clock, deps } = setup()
     const low = probe('low', {

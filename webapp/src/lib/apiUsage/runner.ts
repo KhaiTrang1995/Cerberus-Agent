@@ -11,9 +11,10 @@
  * not trip it for each other.
  *
  * Every string a provider could have put in a result is scrubbed of every secret
- * of the run before it leaves here, and an email-shaped account label is dropped.
+ * of the run before it leaves here, email addresses in it become "[email]", and
+ * an email-shaped account label is dropped.
  */
-import { computeHealth, worseHealth } from './health'
+import { computeHealth } from './health'
 import { probeFetch, ProbeTransportError, scrub } from './http'
 import { errorResult, notCheckedResult } from './results'
 import type { JobPlan, ProbeJob } from './credentials'
@@ -28,10 +29,12 @@ export const RUN_BUDGET_MS = 90_000
 export const DEFAULT_MIN_INTERVAL_MS = 250
 
 const EMAIL = /[^\s@]+@[^\s@]+\.[^\s@]+/
+const EMAILS = new RegExp(EMAIL.source, 'g')
 // A provider's own masked echo of the key ("sk-proj-****…abcd", "xa***gA"):
 // the full key is scrubbed, but this still carries its first and last characters.
 const MASKED_ECHO = /[A-Za-z0-9_-]{2,16}\*{3,}[A-Za-z0-9_-]{0,8}/g
 const MAX_PLAN = 80
+const MAX_CODE = 60
 const MAX_NOTE = 300
 const MAX_NOTES = 10
 const MAX_METERS = 60
@@ -74,17 +77,18 @@ function clip(s: string | undefined, max: number): string | undefined {
   return s.length > max ? `${s.slice(0, max - 1)}…` : s
 }
 
+/** A plan or account label, or nothing when it is an email address (checked before the cut hides one). */
 function safeLabel(s: string | undefined, secrets: string[]): string | undefined {
   if (!s) return undefined
-  const cleaned = clip(scrub(s, secrets), MAX_PLAN)
-  return cleaned && !EMAIL.test(cleaned) ? cleaned : undefined
+  const cleaned = scrub(s, secrets)
+  return cleaned && !EMAIL.test(cleaned) ? clip(cleaned, MAX_PLAN) : undefined
 }
 
 /** The row: the probe's findings + the job's identity, with every provider string scrubbed. */
 export function toKeyResult(
   job: ProbeJob, result: ProbeResult, latencyMs: number | null, checkedAt: string, secrets: string[],
 ): KeyResult {
-  const s = (v: string) => scrub(v, secrets).replace(MASKED_ECHO, '[masked key]')
+  const s = (v: string) => scrub(v, secrets).replace(MASKED_ECHO, '[masked key]').replace(EMAILS, '[email]')
   const meters = result.meters.slice(0, MAX_METERS).map(m => ({
     ...m,
     label: clip(s(m.label), MAX_PLAN)!,
@@ -99,9 +103,7 @@ export function toKeyResult(
     : undefined
   const notes = [...job.notes, ...(result.notes ?? [])].map(n => clip(s(n), MAX_NOTE)!).slice(0, MAX_NOTES)
   const warnings = [...job.warnings]
-  const health = result.outcome === 'usage'
-    ? (result.healthOverride ? worseHealth(computeHealth(meters), result.healthOverride) : computeHealth(meters))
-    : undefined
+  const health = result.outcome === 'usage' ? result.healthOverride ?? computeHealth(meters) : undefined
   return {
     serviceId: job.probe.id,
     serviceLabel: job.probe.label,
@@ -115,7 +117,13 @@ export function toKeyResult(
     ...(health ? { health } : {}),
     ...(account && Object.keys(account).length ? { account } : {}),
     meters,
-    ...(result.error ? { error: { ...result.error, message: clip(s(result.error.message), MAX_NOTE)! } } : {}),
+    ...(result.error ? {
+      error: {
+        ...result.error,
+        message: clip(s(result.error.message), MAX_NOTE)!,
+        ...(result.error.providerCode ? { providerCode: clip(s(result.error.providerCode), MAX_CODE) } : {}),
+      },
+    } : {}),
     ...(result.notCheckedReason ? { notCheckedReason: result.notCheckedReason } : {}),
     ...(notes.length ? { notes } : {}),
     ...(warnings.length ? { warnings } : {}),

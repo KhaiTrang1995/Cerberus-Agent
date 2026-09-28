@@ -26,8 +26,10 @@ export function parse(res: ProbeResponse, orgMode: boolean): ProbeResult {
       ? "your Censys role cannot read the organization's credits"
       : 'Censys refused the credit lookup for this token', { httpStatus: 403 })
   }
+  // Censys accepted the token; the Organization ID is what is missing or wrong.
+  // "Key rejected" would tell the user to delete a working token.
   if (res.status === 404 || res.status === 422) {
-    return errorResult('invalid_key', orgMode
+    return errorResult('forbidden', orgMode
       ? 'the Censys Organization ID is wrong (or this token is not a member of it)'
       : "Censys found no Free account for this token. A Starter or Enterprise account needs its Organization ID saved to read the organization's credits",
     { httpStatus: res.status })

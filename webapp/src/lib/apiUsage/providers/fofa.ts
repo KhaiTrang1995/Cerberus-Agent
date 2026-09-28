@@ -108,5 +108,6 @@ export const fofaProbe: ProbeDef = {
   endpoint: 'GET fofa.info/api/v1/info/my',
   // GoFOFA spaces requests 1 s apart and treats code 45012 as throttling.
   minIntervalMs: 1100,
+  secretParts: stored => [...authParams(stored).values()],
   run: async ctx => parse(await ctx.http(request(ctx.key))),
 }

@@ -4,7 +4,7 @@
  */
 import { describe, test, expect } from 'vitest'
 import { huggingfaceProbe, itemParams, parse, rateLimitMeter, request } from './huggingface'
-import { NOW, html, res, runProbe, allStrings } from '../../testUtils'
+import { NOW, html, res, runProbe, allStrings, reportRow } from '../../testUtils'
 
 const TOKEN = 'hf_TESTKEY0000huggingface0000'
 
@@ -75,6 +75,16 @@ describe('parse: success', () => {
   test('the email is never copied anywhere', () => {
     expect(allStrings(parse(res(200, WHOAMI, { headers: RATE }), NOW)).join(' ')).not.toContain('someone@example.test')
   })
+})
+
+// The token's display name is the user's free text and lands in a note, which
+// (unlike the account label) was never checked for an address.
+test('REGRESSION email-in-notes-and-messages: a token named after an address is saved without it', async () => {
+  const named = { ...WHOAMI, auth: { ...WHOAMI.auth, accessToken: { displayName: 'alice@corp.example', role: 'read' } } }
+  const row = await reportRow(huggingfaceProbe, { trufflehogHuggingfaceToken: TOKEN }, [res(200, named, { headers: RATE })])
+  expect(row.outcome).toBe('valid_no_usage')
+  expect(row.notes).toContain('Token: [email] (read)')
+  expect(JSON.stringify(row)).not.toContain('alice@corp.example')
 })
 
 describe('rate-limit headers', () => {

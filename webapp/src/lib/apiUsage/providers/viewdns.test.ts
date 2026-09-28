@@ -6,7 +6,7 @@
  */
 import { describe, test, expect } from 'vitest'
 import { parse, request, viewdnsProbe } from './viewdns'
-import { html, res, runProbe, allStrings } from '../testUtils'
+import { html, res, runProbe, allStrings, reportRow } from '../testUtils'
 
 const KEY = 'TESTKEY0000viewdns00000000000000'
 const QUERY = { tool: 'account_PRO', action: 'balance' }
@@ -46,6 +46,23 @@ describe('parse: success', () => {
       ['prepaid', null, 250, true],
     ])
     expect(parse(res(200, balance({ monthly: { limit: '0', usage: '0' }, prepaid: { balance: '0' } }))).account?.plan).toBe('No credits')
+  })
+
+  // ViewDNS refuses only when "the monthly query limit [is reached] and/or you
+  // have no prepaid queries remaining": the prepaid balance carries the account.
+  test('REGRESSION topup-balance-reads-exhausted: monthly queries used up, prepaid left -> low, not exhausted', async () => {
+    const row = await reportRow(viewdnsProbe, { viewdnsApiKey: KEY }, [
+      res(200, balance({ monthly: { limit: '10000', usage: '10000' }, prepaid: { balance: '2000' } })),
+    ])
+    expect(row.health).toBe('low')
+    expect(row.notes).toContain('Monthly queries are used up; queries now spend the prepaid balance')
+  })
+
+  test('monthly queries used up and no prepaid balance -> exhausted', async () => {
+    const row = await reportRow(viewdnsProbe, { viewdnsApiKey: KEY }, [
+      res(200, balance({ monthly: { limit: '10000', usage: '10000' }, prepaid: { balance: '0' } })),
+    ])
+    expect(row.health).toBe('exhausted')
   })
 
   test('usage past the limit never makes remaining negative', () => {

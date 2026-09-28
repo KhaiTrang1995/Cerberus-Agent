@@ -164,6 +164,7 @@ export function buildJobs(input: {
     keys.forEach((key, index) => {
       if (!key) return
       secrets.add(key)
+      for (const part of probe.secretParts?.(key) ?? []) if (part) secrets.add(part)
       const earlier = firstIndexOf.get(key)
       if (earlier !== undefined) {
         const kept = jobs.find(j => j.probe === probe && j.keyIndex === earlier)

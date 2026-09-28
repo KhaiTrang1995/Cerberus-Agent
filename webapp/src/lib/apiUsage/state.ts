@@ -10,12 +10,16 @@
  */
 
 /**
- * The air-gap switch. Default ON, like the other egress switches
- * (OSV_DB_AUTO_REFRESH, SCA_INTEL_AUTO_REFRESH): only an explicit `false` turns
- * the check off. Read per request from the server env, never by the browser.
+ * The air-gap switch. Default ON, and read like the other egress switches
+ * (OSV_DB_AUTO_REFRESH, SCA_INTEL_AUTO_REFRESH): false, 0, no or off, in any
+ * case, turn the check off. An operator who writes `FALSE` on an air-gapped
+ * host must not keep the egress on. Read per request from the server env,
+ * never by the browser.
  */
+const OFF_VALUES = new Set(['false', '0', 'no', 'off'])
+
 export function checksEnabled(): boolean {
-  return process.env.API_USAGE_CHECK_ENABLED !== 'false'
+  return !OFF_VALUES.has((process.env.API_USAGE_CHECK_ENABLED ?? '').trim().toLowerCase())
 }
 
 export const MAX_CONCURRENT_RUNS = 3

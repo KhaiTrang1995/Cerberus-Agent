@@ -85,7 +85,12 @@ export interface ProbeResult {
   error?: ProbeError
   notCheckedReason?: NotCheckedReason
   notes?: string[]
-  /** Forces a health the meters cannot express (DeepSeek `is_available: false`). */
+  /**
+   * The probe's own verdict where the primary meters cannot express it, and
+   * REPLACES theirs: DeepSeek `is_available: false` is exhausted whatever the
+   * balances say; a used-up plan still carried by a top-up balance is low, not
+   * exhausted.
+   */
   healthOverride?: Health
 }
 
@@ -225,5 +230,7 @@ export interface ProbeDef {
   limitScope?: 'key' | 'ip'
   /** Undocumented endpoint: any unrecognised answer is "not checked", never an error. */
   experimental?: boolean
+  /** Parts of a stored value the probe sends separately (FOFA's `email:key`): scrubbed like the key. */
+  secretParts?: (stored: string) => string[]
   run?: (ctx: ProbeContext) => Promise<ProbeResult>
 }

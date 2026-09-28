@@ -49,12 +49,16 @@ export function parse(res: ProbeResponse): ProbeResult {
   const notes: string[] = []
   const status = str(b.account_status)
   if (status && status !== 'Active') notes.push(`Account status: ${status}`)
-  const totalLeft = num(b.total_searches_left)
+  // total_searches_left = plan_searches_left + extra_credits: plan searches can
+  // be 0 while extra credits still carry the account.
+  const planLeft = num(b.plan_searches_left)
+  const totalLeft = num(b.total_searches_left) ?? (planLeft != null && extra != null ? planLeft + extra : null)
+  const onExtra = planLeft != null && planLeft <= 0 && totalLeft != null && totalLeft > 0
+  if (onExtra) notes.push(`Plan searches are used up; searches now spend the ${totalLeft} extra credits`)
   return usageResult(meters, {
     account: { plan: str(b.plan_name) ?? str(b.plan_id) },
     notes: notes.length ? notes : undefined,
-    // Plan searches can be 0 while extra credits still carry the account.
-    healthOverride: totalLeft != null && totalLeft <= 0 ? 'exhausted' : undefined,
+    healthOverride: totalLeft != null && totalLeft <= 0 ? 'exhausted' : onExtra ? 'low' : undefined,
   })
 }
 

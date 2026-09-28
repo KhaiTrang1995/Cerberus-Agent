@@ -1,9 +1,12 @@
 /**
  * Test helpers for the usage probes. Not a test file and never imported by the
  * app: provider tests build synthetic responses with `res()` and drive a probe
- * end to end with `runProbe()`, which records every request it makes.
+ * end to end with `runProbe()`, which records every request it makes, and
+ * `reportRow()` shows the row the runner saves from those answers.
  */
-import type { ProbeContext, ProbeDef, ProbeRequest, ProbeResponse, ProbeResult } from './types'
+import { buildJobs } from './credentials'
+import { runJobs } from './runner'
+import type { KeyResult, ProbeContext, ProbeDef, ProbeRequest, ProbeResponse, ProbeResult } from './types'
 
 /** A fixed clock for the tests: Sat 26 Sep 2026, 14:32:05 UTC. */
 export const NOW = new Date('2026-09-26T14:32:05.000Z')
@@ -63,6 +66,31 @@ export async function runProbe(
   if (!probe.run) throw new Error(`${probe.id} has no run()`)
   const result = await probe.run(ctx)
   return { result, requests }
+}
+
+/**
+ * The saved report row one probe's answers become: the real job building and
+ * runner, so health, scrubbing and notes are what the user would see.
+ */
+export async function reportRow(
+  probe: ProbeDef,
+  settings: Record<string, string>,
+  responses: ProbeResponse[],
+): Promise<KeyResult> {
+  const queue = [...responses]
+  const plan = buildJobs({ settings, rotationRows: [], probes: [probe] })
+  const report = await runJobs(plan, {
+    http: async req => {
+      const next = queue.shift()
+      if (!next) throw new Error(`unexpected extra request: ${req.method} ${req.url}`)
+      return next
+    },
+    now: () => NOW.getTime(),
+    sleep: async () => {},
+    log: () => {},
+    ipGates: new Map(),
+  })
+  return report.results[0]
 }
 
 /** Every string anywhere in the value, for "the secret never appears" assertions. */

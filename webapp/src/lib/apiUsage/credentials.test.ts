@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'vitest'
 import { buildJobs, splitExtraKeys, trackedFields, WHITESPACE_WARNING, type LlmProviderRow } from './credentials'
-import { inventoryChanges, buildInventory } from './inventory'
+import { inventoryChanges, buildInventory, llmInventoryHint, type LlmInventoryRow } from './inventory'
 import type { ProbeDef } from './types'
 
 const probe = (over: Partial<ProbeDef>): ProbeDef => ({
@@ -198,6 +198,33 @@ describe('inventory', () => {
     expect(inventoryChanges(saved, buildInventory({ shodanApiKey: 'KEY-9999' }, { shodan: 1 }, tracked))).toEqual(['shodanApiKey'])
     expect(inventoryChanges(saved, buildInventory({ shodanApiKey: 'KEY-1234' }, { shodan: 2 }, tracked))).toEqual(['shodanApiKey'])
     expect(inventoryChanges(saved, buildInventory({}, {}, tracked))).toEqual(['shodanApiKey'])
+  })
+
+  // The page holds LLM rows as the LLM providers GET returns them (keys masked,
+  // region and base URL plain), the server reads them raw. If the two hints ever
+  // differ, every report opens with a false "your keys changed" banner.
+  test('an LLM row hints the same raw (server) and masked (page): bedrock, openai_compatible', () => {
+    const raw: LlmInventoryRow[] = [
+      { id: 'b1', providerType: 'bedrock', apiKey: '', awsAccessKeyId: 'AKIDTEST0001', awsBearerToken: '', awsRegion: 'eu-west-1' },
+      { id: 'b2', providerType: 'bedrock', apiKey: '', awsAccessKeyId: 'AKIDTEST0002', awsBearerToken: 'ABSK-TEST-7777', awsRegion: 'us-east-1' },
+      { id: 'c1', providerType: 'openai_compatible', apiKey: 'sk-local-TEST-4242', baseUrl: 'http://host.docker.internal:11434/v1' },
+      { id: 'c2', providerType: 'openai_compatible', apiKey: '', baseUrl: 'http://llm.example.test/v1' },
+    ]
+    const masked: LlmInventoryRow[] = [
+      { id: 'b1', providerType: 'bedrock', apiKey: '', awsAccessKeyId: '••••••••0001', awsBearerToken: '', awsRegion: 'eu-west-1' },
+      { id: 'b2', providerType: 'bedrock', apiKey: '', awsAccessKeyId: '••••••••0002', awsBearerToken: '••••••••7777', awsRegion: 'us-east-1' },
+      { id: 'c1', providerType: 'openai_compatible', apiKey: '••••••••4242', baseUrl: 'http://host.docker.internal:11434/v1' },
+      { id: 'c2', providerType: 'openai_compatible', apiKey: '', baseUrl: 'http://llm.example.test/v1' },
+    ]
+    raw.forEach((r, i) => expect(llmInventoryHint(r)).toBe(llmInventoryHint(masked[i])))
+    expect(inventoryChanges(buildInventory({}, {}, [], raw), buildInventory({}, {}, [], masked))).toEqual([])
+    expect(llmInventoryHint(raw[0])).toBe('••••••••0001|eu-west-1')
+    expect(llmInventoryHint(raw[1])).toBe('••••••••7777|us-east-1')
+    expect(llmInventoryHint(raw[2])).toBe('••••••••4242|http://host.docker.internal:11434/v1')
+
+    // Not equal by accident: what decides the probe is part of the hint.
+    expect(llmInventoryHint({ ...masked[0], awsRegion: 'us-west-2' })).not.toBe(llmInventoryHint(raw[0]))
+    expect(llmInventoryHint({ ...masked[2], baseUrl: 'http://other.example.test/v1' })).not.toBe(llmInventoryHint(raw[2]))
   })
 
   test('buildJobs stores the inventory it ran on', () => {

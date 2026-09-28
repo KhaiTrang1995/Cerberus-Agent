@@ -4,7 +4,7 @@
  */
 import { describe, test, expect } from 'vitest'
 import { authParams, fofaCode, fofaProbe, parse, request } from './fofa'
-import { html, res, runProbe, allStrings } from '../testUtils'
+import { html, res, runProbe, allStrings, reportRow } from '../testUtils'
 
 const KEY = 'TESTKEY0000fofa0000000000000000a'
 
@@ -25,6 +25,18 @@ describe('request: the same auth params recon sends', () => {
   test('surrounding whitespace is trimmed like recon does', () => {
     expect(authParams('  abc  ').get('key')).toBe('abc')
   })
+})
+
+// A legacy `email:key` value is SENT as two parameters. The run's scrub list had
+// only the whole stored string, so an answer quoting either half kept it.
+test('REGRESSION fofa-split-key-not-scrubbed: an answer quoting the key half or the email of email:key is scrubbed', async () => {
+  const stored = `owner@example.test:${KEY}`
+  const row = await reportRow(fofaProbe, { fofaApiKey: stored }, [
+    res(200, { error: true, errmsg: `[-700] Account Invalid: key ${KEY} for owner@example.test` }),
+  ])
+  expect(row.error?.kind).toBe('invalid_key')
+  expect(JSON.stringify(row)).not.toContain(KEY)
+  expect(JSON.stringify(row)).not.toContain('owner@example.test')
 })
 
 describe('fofaCode', () => {

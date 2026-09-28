@@ -33,7 +33,3 @@ export function computeHealth(meters: Meter[]): Health {
   }
   return worst
 }
-
-export function worseHealth(a: Health, b: Health): Health {
-  return RANK[a] >= RANK[b] ? a : b
-}

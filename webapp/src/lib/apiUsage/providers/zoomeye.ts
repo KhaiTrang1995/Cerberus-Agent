@@ -89,6 +89,8 @@ export function parse(res: ProbeResponse, now: Date): ProbeResult {
       remaining: topUp, primary: false, note: 'expire 12 months after purchase',
     }))
   }
+  // ZoomEye-Points are spent once the Basic Points are gone.
+  const onTopUp = points != null && points <= 0 && topUp != null && topUp > 0
   return usageResult(meters, {
     account: {
       plan: plan ?? 'Free',
@@ -96,6 +98,7 @@ export function parse(res: ProbeResponse, now: Date): ProbeResult {
       // "" means no subscription.
       expiresAt: isoOrNull(s.end_date) ?? undefined,
     },
+    ...(onTopUp ? { notes: ['Basic points are used up; queries now spend ZoomEye-Points'], healthOverride: 'low' as const } : {}),
   })
 }
 

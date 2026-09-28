@@ -65,7 +65,12 @@ export function parse(res: ProbeResponse): ProbeResult {
   if (meters.length === 0) return shapeError(res)
 
   const plan = subscribed ? `Subscription ${limit}/mo` : prepaid != null && prepaid > 0 ? 'Prepaid / trial' : 'No credits'
-  return usageResult(meters, { account: { plan } })
+  // ViewDNS refuses only when the monthly queries AND the prepaid ones are gone.
+  const onPrepaid = subscribed && limit != null && (used ?? 0) >= limit && prepaid != null && prepaid > 0
+  return usageResult(meters, {
+    account: { plan },
+    ...(onPrepaid ? { notes: ['Monthly queries are used up; queries now spend the prepaid balance'], healthOverride: 'low' as const } : {}),
+  })
 }
 
 export const viewdnsProbe: ProbeDef = {

@@ -68,8 +68,10 @@ const FIXTURE_KEY = 'SHODAN-FIXTURE-KEY-7777'
 
 const params = (id: string) => ({ params: Promise.resolve({ id }) })
 const get = (id = OWNER) => GET(new NextRequest(`http://x/api/users/${id}/settings/api-usage`), params(id))
-const post = (body: unknown = {}, id = OWNER) =>
-  POST(new NextRequest(`http://x/api/users/${id}/settings/api-usage`, { method: 'POST', body: JSON.stringify(body) }), params(id))
+const post = (body: unknown = {}, id = OWNER, contentType = 'application/json') =>
+  POST(new NextRequest(`http://x/api/users/${id}/settings/api-usage`, {
+    method: 'POST', body: typeof body === 'string' ? body : JSON.stringify(body), headers: { 'Content-Type': contentType },
+  }), params(id))
 
 function report(over: Partial<ApiUsageReportV1> = {}): ApiUsageReportV1 {
   return {
@@ -225,6 +227,26 @@ describe('POST guards, in order', () => {
     expect(h.settingsFind).not.toHaveBeenCalled()
   })
 
+  // The switch exists for air-gapped hosts. The other egress switches it is
+  // modelled on (OSV_DB_AUTO_REFRESH, SCA_INTEL_AUTO_REFRESH) read 0/false/no in
+  // any case; an operator who writes the same here must not keep egress on.
+  test.each(['FALSE', 'False', ' false ', '0', 'no', 'off'])(
+    'REGRESSION kill-switch-fails-open: API_USAGE_CHECK_ENABLED=%j turns the check off',
+    async value => {
+      process.env.API_USAGE_CHECK_ENABLED = value
+      expect((await (await get()).json()).enabled).toBe(false)
+      const res = await post({ overwrite: true })
+      expect(res.status).toBe(409)
+      expect(await res.json()).toEqual({ error: 'disabled' })
+      expect(h.runJobs).not.toHaveBeenCalled()
+    },
+  )
+
+  test.each(['', 'true', 'TRUE', '1', 'yes', 'on'])('API_USAGE_CHECK_ENABLED=%j leaves the check on', async value => {
+    process.env.API_USAGE_CHECK_ENABLED = value
+    expect((await (await get()).json()).enabled).toBe(true)
+  })
+
   test('a second POST while one runs -> 409 run_in_progress; the lock is released afterwards', async () => {
     const d = deferred<ApiUsageReportV1>()
     h.runJobs.mockReturnValue(d.promise)
@@ -320,6 +342,24 @@ describe('POST guards, in order', () => {
     expect(h.runJobs).not.toHaveBeenCalled()
     expect(h.reportUpsert).not.toHaveBeenCalled()
   })
+
+  // The session cookie is SameSite=lax, so a same-site page can submit a plain
+  // form with it. An enctype=text/plain form can carry a body that parses as
+  // JSON, overwrite flags included: only the Content-Type tells it from the
+  // page's own fetch (lib/jsonBody.ts).
+  test.each(['text/plain', 'application/x-www-form-urlencoded', 'multipart/form-data; boundary=x'])(
+    'REGRESSION csrf-form-post: a %s POST is refused (415) before anything runs',
+    async type => {
+      h.reportFind.mockResolvedValue({ finishedAt: new Date(Date.now() - 3_600_000) })
+      const res = await post('{"overwrite":true,"ignoreRunningScans":true,"x":"="}', OWNER, type)
+      expect(res.status).toBe(415)
+      expect(h.runJobs).not.toHaveBeenCalled()
+      expect(h.reportUpsert).not.toHaveBeenCalled()
+      expect(h.writeAudit).not.toHaveBeenCalled()
+      // Nothing was left locked: the page's own JSON POST still runs.
+      expect((await post({ overwrite: true })).status).toBe(200)
+    },
+  )
 
   test('only the two booleans of the body are read; anything else is ignored', async () => {
     h.reportFind.mockResolvedValue({ finishedAt: new Date(Date.now() - 3_600_000) })

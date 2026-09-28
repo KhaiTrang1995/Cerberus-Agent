@@ -9,13 +9,16 @@
  * - the caller must be the EFFECTIVE user: the owner, or an admin while acting
  *   as that user. `requireUserAccess` is not used because its admin bypass is
  *   exactly what this refuses: an admin who is not acting as the user cannot
- *   read their report or send their keys anywhere.
+ *   read their report or send their keys anywhere;
+ * - the POST body must be JSON, so a same-site HTML form cannot start a run with
+ *   the user's cookie (lib/jsonBody.ts).
  * Only numbers, plan names and last-4 hints ever leave this route.
  */
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { getEffectiveUser, getSession, isInternalRequest, isScannerRequest } from '@/lib/session'
 import { writeAudit } from '@/lib/audit'
+import { readJsonBody } from '@/lib/jsonBody'
 import { LLM_PROBES, PROBES } from '@/lib/apiUsage/registry'
 import { buildJobs, trackedFields, type LlmProviderRow } from '@/lib/apiUsage/credentials'
 import { runJobs } from '@/lib/apiUsage/runner'
@@ -132,9 +135,10 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
   if (!checksEnabled()) return json({ error: 'disabled' }, 409)
 
-  const reqBody = await request.json().catch(() => ({})) as { overwrite?: unknown; ignoreRunningScans?: unknown }
-  const overwrite = reqBody?.overwrite === true
-  const ignoreRunningScans = reqBody?.ignoreRunningScans === true
+  const parsed = await readJsonBody(request)
+  if (parsed instanceof NextResponse) return parsed
+  const overwrite = parsed.body.overwrite === true
+  const ignoreRunningScans = parsed.body.ignoreRunningScans === true
 
   const lock = tryAcquire(id, new Date().toISOString())
   if (!lock.ok) {

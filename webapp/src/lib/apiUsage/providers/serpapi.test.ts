@@ -1,6 +1,6 @@
 import { describe, test, expect } from 'vitest'
 import { parse, request, serpapiProbe } from './serpapi'
-import { html, res, runProbe, allStrings } from '../testUtils'
+import { html, res, runProbe, allStrings, reportRow } from '../testUtils'
 
 const KEY = 'TESTKEY0000serpapi000000000000000000000000000000000000000000000'
 
@@ -39,6 +39,23 @@ describe('parse', () => {
     const r = parse(res(200, { ...ACCOUNT, plan_renewal_date: null, plan_next_renewal_date: '2026-11-01', extra_credits: 250 }))
     expect(r.meters[0].resetsAt).toBe('2026-11-01T00:00:00.000Z')
     expect(r.meters.find(m => m.id === 'extra')).toMatchObject({ window: 'balance', remaining: 250, primary: false })
+  })
+
+  // total_searches_left = plan_searches_left + extra_credits: the account keeps
+  // searching on its extra credits once the plan's are gone.
+  test('REGRESSION topup-balance-reads-exhausted: plan used up, extra credits left -> low, not exhausted', async () => {
+    const row = await reportRow(serpapiProbe, { serpApiKey: KEY }, [
+      res(200, { ...ACCOUNT, plan_searches_left: 0, this_month_usage: 30000, extra_credits: 250, total_searches_left: 250 }),
+    ])
+    expect(row.health).toBe('low')
+    expect(row.notes).toContain('Plan searches are used up; searches now spend the 250 extra credits')
+  })
+
+  test('plan used up and no extra credits -> exhausted', async () => {
+    const row = await reportRow(serpapiProbe, { serpApiKey: KEY }, [
+      res(200, { ...ACCOUNT, plan_searches_left: 0, this_month_usage: 30000, extra_credits: 0, total_searches_left: 0 }),
+    ])
+    expect(row.health).toBe('exhausted')
   })
 
   test('no searches left at all -> exhausted override; a non-Active status becomes a note', () => {

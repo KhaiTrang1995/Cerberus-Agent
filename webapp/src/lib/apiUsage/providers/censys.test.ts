@@ -43,7 +43,7 @@ describe('parse: organization', () => {
   test('403 -> forbidden (role cannot read the org credits); 404/422 -> the org id is wrong', () => {
     expect(parse(res(403, { title: 'Forbidden', status: 403 }), true).error).toMatchObject({ kind: 'forbidden' })
     expect(parse(res(404, { title: 'Not Found', status: 404 }), true).error?.message).toMatch(/Organization ID is wrong/)
-    expect(parse(res(422, { title: 'Unprocessable Entity', status: 422 }), true).error?.kind).toBe('invalid_key')
+    expect(parse(res(422, { title: 'Unprocessable Entity', status: 422 }), true).error?.kind).toBe('forbidden')
   })
 })
 
@@ -62,8 +62,23 @@ describe('parse: free', () => {
 
   test('404 on the Free endpoint tells a paid user to set the Organization ID', () => {
     const r = parse(res(404, { title: 'Not Found', detail: 'user not found' }), false)
-    expect(r.error?.kind).toBe('invalid_key')
+    expect(r.error?.kind).toBe('forbidden')
     expect(r.error?.message).toMatch(/Organization ID/)
+  })
+})
+
+// Censys answers a token it ACCEPTED with 404/422 when the Organization ID is
+// missing or wrong. "Key rejected, re-enter the key or remove it" would send the
+// user to delete a working token: the row must blame the org ID, not the key.
+describe('REGRESSION censys-org-id-reads-key-rejected', () => {
+  test.each([
+    ['org id saved but wrong', ORG, 404],
+    ['org id saved but wrong', ORG, 422],
+    ['org id missing on a paid account', '', 404],
+  ])('%s (%s) -> forbidden, never invalid_key', async (_n, org, status) => {
+    const { result } = await runProbe(censysProbe, TOKEN, [res(status, { title: 'Not Found', status })], { censysOrgId: org })
+    expect(result.error?.kind).toBe('forbidden')
+    expect(result.error?.message).toMatch(/Organization ID/)
   })
 })
 

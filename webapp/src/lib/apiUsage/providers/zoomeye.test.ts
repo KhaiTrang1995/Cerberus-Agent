@@ -5,7 +5,7 @@
  */
 import { describe, test, expect } from 'vitest'
 import { parse, request, zoomeyeProbe } from './zoomeye'
-import { NOW, html, res, runProbe, allStrings } from '../testUtils'
+import { NOW, html, res, runProbe, allStrings, reportRow } from '../testUtils'
 
 const KEY = 'TESTKEY-0000-zoomeye-000000000000'
 const EMAIL = 'someone@example.test'
@@ -54,6 +54,22 @@ describe('parse: success', () => {
     expect(r.meters[0]).toMatchObject({ limit: 100000, remaining: 40000, used: 60000, note: 'allotment from the plan table' })
     expect(r.meters[1]).toMatchObject({ id: 'zoomeye_points', remaining: 0 })
     expect(r.account?.expiresAt).toBe('2027-03-01T00:00:00.000Z')
+  })
+
+  // "ZoomEye-Points ... spent after Basic Points" (catalogue A15).
+  test('REGRESSION topup-balance-reads-exhausted: Basic points used up, ZoomEye-Points left -> low, not exhausted', async () => {
+    const row = await reportRow(zoomeyeProbe, { zoomEyeApiKey: KEY }, [
+      res(200, withSubscription({ plan: 'Personal', end_date: '2027-03-01', points: 0, zoomeye_points: 1000000 })),
+    ])
+    expect(row.health).toBe('low')
+    expect(row.notes).toContain('Basic points are used up; queries now spend ZoomEye-Points')
+  })
+
+  test('Basic points used up and no ZoomEye-Points -> exhausted', async () => {
+    const row = await reportRow(zoomeyeProbe, { zoomEyeApiKey: KEY }, [
+      res(200, withSubscription({ plan: 'Personal', end_date: '2027-03-01', points: 0, zoomeye_points: 0 })),
+    ])
+    expect(row.health).toBe('exhausted')
   })
 
   test('JSON served as application/octet-stream is still read', () => {

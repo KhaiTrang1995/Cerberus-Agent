@@ -7,7 +7,7 @@ import {
   githubEnterpriseProbe, githubHuntProbe, githubMultiscannerProbe, githubSupplyChainProbe,
   parse, parseGithubExpiry, request, tokenKind,
 } from './github'
-import { html, res, runProbe, allStrings } from '../testUtils'
+import { html, res, runProbe, allStrings, reportRow } from '../testUtils'
 
 const TOKEN = 'ghp_TESTTOKEN000000000000000000000000'
 
@@ -87,6 +87,31 @@ describe('parse', () => {
   test('5xx -> provider_error; unexpected 200 -> unexpected_response', () => {
     expect(parse(html(503), TOKEN).error?.kind).toBe('provider_error')
     expect(parse(res(200, { foo: 1 }), TOKEN).error?.kind).toBe('unexpected_response')
+  })
+})
+
+// A Multiscanner scan can point this token at a GitHub Enterprise endpoint (set
+// per scan, unknown to Settings). api.github.com rejects such a token although it
+// works, so a bare "Key rejected" row would be a false alarm.
+describe('REGRESSION multiscanner-ghe-token-false-alarm', () => {
+  const REJECTED = res(401, { message: 'Bad credentials', documentation_url: 'https://docs.github.com/rest', status: '401' })
+
+  test('a rejected Multiscanner token says where it was checked and why that may not mean it is bad', async () => {
+    const row = await reportRow(githubMultiscannerProbe, { trufflehogGithubToken: TOKEN }, [REJECTED])
+    expect(row.error?.kind).toBe('invalid_key')
+    expect(row.notes?.join(' ')).toMatch(/Checked against api\.github\.com.*GitHub Enterprise endpoint/)
+  })
+
+  test('a working Multiscanner token carries no such note', async () => {
+    const row = await reportRow(githubMultiscannerProbe, { trufflehogGithubToken: TOKEN }, [res(200, RATE)])
+    expect(row.outcome).toBe('usage')
+    expect(row.notes ?? []).not.toContainEqual(expect.stringMatching(/GitHub Enterprise endpoint/))
+  })
+
+  test('the github.com-only tokens carry no such note', async () => {
+    const row = await reportRow(githubHuntProbe, { githubAccessToken: TOKEN }, [REJECTED])
+    expect(row.error?.kind).toBe('invalid_key')
+    expect(row.notes).toBeUndefined()
   })
 })
 

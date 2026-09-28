@@ -29,6 +29,7 @@ import { useApiUsageReport } from '@/components/settings/api-usage/useApiUsageRe
 import { ApiUsageControls } from '@/components/settings/api-usage/ApiUsageControls'
 import { ApiUsageReportModal } from '@/components/settings/api-usage/ApiUsageReportModal'
 import { ApiUsageLlmChip } from '@/components/settings/api-usage/ApiUsageLlmChip'
+import { llmInventoryHint } from '@/lib/apiUsage/inventory'
 
 /** A Secret Multiscanner credential column (TRUFFLEHOG_KEY_FIELDS). */
 type TrufflehogField = `trufflehog${string}`
@@ -949,6 +950,10 @@ export default function SettingsPage() {
     })),
     [providers],
   )
+  const llmUsageHints = useMemo(
+    () => Object.fromEntries(llmUsageRows.map(r => [r.id, llmInventoryHint(r)])),
+    [llmUsageRows],
+  )
   const apiUsage = useApiUsageReport({
     userId,
     active: activeTab === 'keys' || activeTab === 'providers',
@@ -1166,7 +1171,7 @@ export default function SettingsPage() {
                       {getProviderLabel(p.providerType)}
                       {p.providerType === 'openai_compatible' && p.modelIdentifier && ` - ${p.modelIdentifier}`}
                     </div>
-                    {p.id && <ApiUsageLlmChip report={apiUsage.meta?.report} providerId={p.id} />}
+                    {p.id && <ApiUsageLlmChip report={apiUsage.meta?.report} providerId={p.id} hint={llmUsageHints[p.id]} />}
                   </div>
                   <div className={styles.providerActions}>
                     <button className="iconButton" title="Edit" onClick={() => setEditingProvider(p)}>
