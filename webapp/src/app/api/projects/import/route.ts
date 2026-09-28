@@ -19,6 +19,23 @@ import { pickProjectColumns } from '@/lib/projectColumns'
 
 const MUTEABLE_LABELS = new Set<string>(MUTEABLE_FINDING_LABELS)
 
+/**
+ * Coerce a bundle's `degradedSources` to a non-negative integer or null.
+ *
+ * The import bundle is untrusted input, so this accepts only a value that
+ * parses to a finite number >= 0 (floored), and maps everything else -
+ * negatives, NaN, strings that are not numbers, null, undefined, Infinity - to
+ * null (unknown). Exported for the unit test that pins these boundaries.
+ */
+export function coerceDegradedSources(value: unknown): number | null {
+  if (value === null || value === undefined) return null
+  // Number('') and Number('  ') are 0, which would read a blank as "clean"
+  // rather than "unknown"; reject empty/whitespace strings up front.
+  if (typeof value === 'string' && value.trim() === '') return null
+  const n = Number(value)
+  return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null
+}
+
 export const maxDuration = 300
 
 const RECON_ORCHESTRATOR_URL = process.env.RECON_ORCHESTRATOR_URL || 'http://localhost:8010'
@@ -593,10 +610,7 @@ export async function POST(request: NextRequest) {
             ramReason: j.ramReason ? String(j.ramReason) : null,
             nodeCount: j.nodeCount === null || j.nodeCount === undefined ? null : Number(j.nodeCount),
             // Untrusted bundle input: a non-negative integer or null, nothing else.
-            degradedSources: (() => {
-              const n = Number(j.degradedSources)
-              return Number.isFinite(n) && n >= 0 ? Math.floor(n) : null
-            })(),
+            degradedSources: coerceDegradedSources(j.degradedSources),
           },
         })
         ;(stats as Record<string, number>).scanJobs =
