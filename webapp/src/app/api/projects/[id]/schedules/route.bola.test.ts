@@ -128,6 +128,35 @@ describe('GET — BOLA', () => {
       }),
     }))
   })
+
+  // The ScanScheduleTable's "partial — N sources skipped" badge reads this field;
+  // if the handler drops it the badge can never appear.
+  test('a full_recon job carries its degradedSources; a queue run reports null', async () => {
+    h.jobFindMany.mockResolvedValue([
+      { id: 'j1', kind: 'full_recon', trigger: 'manual', mode: 'new', status: 'completed',
+        startedAt: null, finishedAt: null, createdAt: new Date('2026-08-09T10:00:00Z'),
+        nodeCount: 5, ramReason: null, degradedSources: 3, scheduleId: null, version: null },
+    ])
+    h.queueFindMany.mockResolvedValue([
+      { id: 'q1', kind: 'trufflehog', status: 'failed', error: 'exit 2', blockedReason: '',
+        enqueuedAt: new Date('2026-08-09T12:00:00Z'), startedAt: null, finishedAt: null,
+        scheduleId: null },
+    ])
+    const body = await (await GET(get(), params('p1'))).json()
+    const byId = Object.fromEntries(body.jobs.map((j: { id: string }) => [j.id, j]))
+    expect(byId.j1.degradedSources).toBe(3)
+    expect(byId.q1.degradedSources).toBeNull()
+  })
+
+  test('a clean full_recon job reports degradedSources as-is (0 or null)', async () => {
+    h.jobFindMany.mockResolvedValue([
+      { id: 'j0', kind: 'full_recon', trigger: 'manual', mode: 'new', status: 'completed',
+        startedAt: null, finishedAt: null, createdAt: new Date(), nodeCount: 5, ramReason: null,
+        degradedSources: 0, scheduleId: null, version: null },
+    ])
+    const body = await (await GET(get(), params('p1'))).json()
+    expect(body.jobs[0].degradedSources).toBe(0)
+  })
 })
 
 describe('POST — BOLA', () => {

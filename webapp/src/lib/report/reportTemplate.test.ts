@@ -738,3 +738,52 @@ describe('Scope section: Domain batch', () => {
     expect(html).toContain('&lt;img')
   })
 })
+
+describe('Coverage Limitations (circuit breakers)', () => {
+  test('clean run omits the section entirely', () => {
+    const html = generateReportHtml(makeReportData({ coverageLimitations: [] }), null)
+    expect(html).not.toContain('Coverage Limitations')
+  })
+
+  test('undefined coverage (older ReportData shape) omits the section', () => {
+    const data = makeReportData()
+    delete (data as { coverageLimitations?: unknown }).coverageLimitations
+    const html = generateReportHtml(data, null)
+    expect(html).not.toContain('Coverage Limitations')
+  })
+
+  test('renders one row per gap source with its reason', () => {
+    const html = generateReportHtml(makeReportData({
+      coverageLimitations: [
+        { source: 'shodan', reason: 'rate limited' },
+        { source: 'nuclei', reason: 'runtime cap' },
+      ],
+    }), null)
+    expect(html).toContain('Coverage Limitations')
+    expect(html).toContain('shodan')
+    expect(html).toContain('rate limited')
+    expect(html).toContain('nuclei')
+    expect(html).toContain('runtime cap')
+    // one <tr> per source inside the section's tbody
+    const section = html.slice(html.indexOf('Coverage Limitations'))
+    const body = section.slice(section.indexOf('<tbody>'), section.indexOf('</tbody>'))
+    expect((body.match(/<tr>/g) || []).length).toBe(2)
+  })
+
+  test('a gap with no reason falls back to a default phrase', () => {
+    const html = generateReportHtml(makeReportData({
+      coverageLimitations: [{ source: 'otx', reason: '' }],
+    }), null)
+    expect(html).toContain('not fully re-checked')
+  })
+
+  test('source and reason are HTML-escaped (operator-facing text)', () => {
+    const html = generateReportHtml(makeReportData({
+      coverageLimitations: [{ source: '<img src=x>', reason: '<script>alert(1)</script>' }],
+    }), null)
+    expect(html).not.toContain('<img src=x>')
+    expect(html).not.toContain('<script>alert(1)</script>')
+    expect(html).toContain('&lt;img')
+    expect(html).toContain('&lt;script&gt;')
+  })
+})
