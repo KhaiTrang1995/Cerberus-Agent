@@ -788,5 +788,61 @@ class TestBatchUnmute(unittest.TestCase):
         self.assertEqual(len(client.params[-1]["keys"]), MAX_UNMUTE_BATCH)
 
 
+class TestRowsCarryTheGraphNodeIdForDisplayOnly(unittest.TestCase):
+    """The Priority Board and Muted Nodes show Neo4j's internal id (the Node ID
+    column an external agent passes to `query_graph` as `WHERE id(n) = <id>`).
+
+    It changes on import and version-activate, so it must stay a DISPLAY column:
+    the row key, the paging tiebreak and every write keep using the `id` property.
+    """
+
+    READERS = {
+        "list_triage_findings": lambda c: c.list_triage_findings(UID, PID),
+        "list_muted": lambda c: c.list_muted(UID, PID, limit=50, offset=50),
+    }
+
+    def test_both_board_readers_project_it_as_a_string(self):
+        for name, call in self.READERS.items():
+            client = FakeClient(records=[])
+            call(client)
+            with self.subTest(reader=name):
+                # A string, so a 64-bit id never becomes a lossy JS float.
+                self.assertIn("last(split(elementId(n), ':'))", client.last)
+                self.assertIn("AS node_id", client.last)
+                # id() makes Neo4j 5.26 send a DEPRECATION notification that the
+                # driver logs as a WARNING on every board load.
+                self.assertNotIn("id(n)", client.last.replace("elementId(n)", ""))
+
+    def test_the_row_key_is_still_the_id_property(self):
+        for name, call in self.READERS.items():
+            client = FakeClient(records=[])
+            call(client)
+            with self.subTest(reader=name):
+                self.assertIn("coalesce(n.id, n.finding_id)        AS id", client.last)
+
+    def test_it_never_orders_or_pages_the_rows(self):
+        for name, call in self.READERS.items():
+            client = FakeClient(records=[])
+            call(client)
+            with self.subTest(reader=name):
+                order = client.last[client.last.index("ORDER BY"):]
+                self.assertNotIn("id(n)", order)
+
+    def test_no_write_is_keyed_on_it(self):
+        for call in (
+            lambda c: c.mute_finding(UID, PID, "v1", "alice"),
+            lambda c: c.unmute_finding(UID, PID, "v1"),
+            lambda c: c.unmute_findings(UID, PID, ["v1"]),
+            lambda c: c.set_human_verdict(UID, PID, "v1", "confirmed"),
+            lambda c: c.apply_triage_scores(UID, PID, [{"id": "v1", "score": 1.0}]),
+        ):
+            client = FakeClient(records=[{"label": "Vulnerability", "updated": 1,
+                                          "skipped_human": 0, "skipped_changed": 0}])
+            call(client)
+            for query in client.queries:
+                with self.subTest(query=query.strip()[:40]):
+                    self.assertNotIn("id(n)", query)
+
+
 if __name__ == "__main__":
     unittest.main()
