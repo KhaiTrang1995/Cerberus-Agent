@@ -55,6 +55,9 @@ set of recon tuning settings, and query the attack-surface graph.
 | `cancel_queued_scan` | Cancel a queued job, reading the update count so a lost race is not reported as success. | `recon:queue` |
 | `get_scan_status` | The other six scanners' state, masked exactly as `get_recon_status` is. | `recon:read` |
 | `set_finding_verdict` | Record a durable triage verdict. Refused while a triage run could re-file it, and on a muted finding. | `triage:write` |
+| `mute_findings` | Mute 1-25 findings with a reason. Never a proven or kept-visible one, never over an existing mute; per-token daily budget; stamped `muted_channel=mcp` + token prefix. | `triage:mute` |
+| `unmute_findings` | Unmute 1-100 findings from the muted list, writing the Mute Rules exemption FIRST. A rule's mute only with `includeRuleMutes`, never during a recon scan. | `triage:mute` |
+| `search_muted_findings` | Page every muted finding with the Muted Nodes filters (who muted, rule, token, text), with exact facets. The only source of a muted finding's id. | `triage:read` |
 
 **Deliberately not exposed:** the agent chat, a shell, partial recon, project
 create/delete/import, secrets and LLM keys, target and scope fields, Rules of
@@ -65,11 +68,12 @@ Mute Rules (the rules, their presets, applying or arming them), and any graph
 
 Note the distinction the reads above draw: their FINDINGS are readable (a
 finding is a finding whichever scanner wrote it), while **starting** those scans
-is not. Muting and unmuting are not exposed either, in either direction: mute is
-the one action that makes a finding invisible to every other read here, and
-unmute reverses a human's suppression decision, which is exactly the power the
-architecture withholds from the model-driven path. Mute Rules are withheld for
-the same reason: a rule is a bulk mute.
+is not. Muting and unmuting ARE exposed, but only behind their own opt-in
+permission, `triage:mute`, and bounded in code rather than by the tool wording:
+mute is the one action that makes a finding invisible to every other read here,
+and the surface was originally built on "only a person mutes". §6 "Mute and
+unmute over MCP" lists what replaces that guarantee. RedAmon's own AI still never
+mutes. Mute Rules stay withheld: a rule is a bulk mute.
 
 `kali_toolbox` serves the `kali_shell` `TOOL_REGISTRY` description verbatim -
 the same bytes the in-app agent is prompted with. One source, no second copy: a
@@ -191,6 +195,7 @@ and a value set only in `.env` would be silently inert.
 | `MCP_RATE_COMPARE_WINDOW_MS` | `300000` | That window (5 minutes). |
 | `MCP_DISABLED_TOOLS` | (empty) | Comma-separated tool names to withdraw. They disappear from `tools/list` rather than refusing, so a client never plans around them. The per-tool alternative to taking the whole surface down; a name matching no tool is ignored. |
 | `MCP_LLM_DAILY_BUDGET` | `200` | NL queries per token per day (they spend the owner's LLM key). |
+| `MCP_MUTE_DAILY_BUDGET` | `200` | Findings one token may mute per day (`mute_findings`), counted per finding, reserved before the write and refunded for what was not muted. Unmutes are not counted. In memory: a webapp restart resets it. |
 
 > **The generated API reference describes a build, not a deployment.** It is
 > rendered from the server's own `tools/list` with no tool withdrawn, so a
@@ -219,14 +224,15 @@ Agent-side bounds (the agent **does** have an `env_file`, so `.env` reaches it):
   discarding the current graph.
 - **An Agent Profile picks the starting permission set** (§3.1). It is a label
   and a suggestion, never an authorization input.
-- **`triage:write` is the only write to a finding**, and the only one that
-  cannot be undone from this surface except by another verdict. It writes
+- **`triage:write` is the verdict write**, and a verdict cannot be undone from
+  this surface except by another verdict. It writes
   `triage_source = 'human'` deliberately: a third provenance value would make
   the finding prune-eligible on the next scan, let a later AI run overwrite the
   verdict, stop `likely_noise` producing a false-positive state, and render as
   "Not reviewed". The channel is recorded on `triage_verdict_channel` instead,
   and the actor on `triage_verdict_by`. It never mutes or unmutes, directly or
-  indirectly, which is why **it is refused on a muted finding**.
+  indirectly (that is `triage:mute`), which is why **it is refused on a muted
+  finding**: so `triage:write` alone can never release a rule mute.
   `triage_source = 'human'` is a Mute Rules guard: rules never mute a finding a
   person judged, so a verdict on a rule-muted finding (any status, `likely_noise`
   and `unreviewed` included) would release the mute at the next "apply to
@@ -238,6 +244,10 @@ Agent-side bounds (the agent **does** have an `env_file`, so `.env` reaches it):
   mute's lock, and then write onto the node that mute just committed. The
   refusal covers a person's mute as well, and nothing is written. A verdict from
   the app is unaffected: the person clicking could unmute the finding anyway.
+- **`triage:mute` is separate from `triage:write`**: a verdict ranks a finding,
+  a mute HIDES it from every read. It is opt-in, never auto-ticked by a profile
+  (`NEVER_AUTO_TICKED`), offered only by `triage`, and adding it to a token is
+  widening, so it asks for the password. What bounds it is in §6.
 - **`recon:queue` is separate from `recon:scan`**, because a queued job
   dispatches LATER. `JobQueue` carries no token id and revoking a token writes
   only `revokedAt`, so work queued by a credential OUTLIVES that credential;
@@ -320,7 +330,7 @@ or finding write.
 | `pentest` | read, exec, scan, triage:read, cypher | `project:create`, `engagement:authorize` |
 | `asm` | read, exec, scan, queue, triage:read | `project:create` |
 | `vuln_mgmt` | read, exec, triage:read | - |
-| `triage` | read, exec, triage:read, **triage:write** | - |
+| `triage` | read, exec, triage:read, **triage:write** | `triage:mute` |
 | `inventory` | read, exec, cypher | - |
 | `compliance` | read, exec, triage:read | - |
 | `ci_gating` | read, exec, queue, triage:read | - |
@@ -340,6 +350,8 @@ The rules behind it, each asserted in `profiles.test.ts`:
    `recommendedScopes`** and in `DEFAULT_MCP_SCOPES`, which must equal what
    `custom` recommends so an untouched form never reads as hand-edited.
 2. **`triage:write` and `recon:settings` each go to exactly one profile.**
+   **`triage:mute` goes to none as a recommendation**: it is in
+   `NEVER_AUTO_TICKED` with `recon:overwrite`, and only `triage` offers it.
 3. **Unattended profiles prefer `recon:queue`.** `asm` and `ci_gating` run with
    nobody watching, where a direct start just fails on a busy project.
 4. **Read-only wherever the job allows it.**
@@ -625,9 +637,60 @@ server's tools. Assume an instruction embedded in a page title reaches the model
 | Exfiltrate another tenant's data | Ownership check + `scope_query` + result post-validation. |
 | Exfiltrate secrets | No tool returns a credential. |
 | Burn the owner's LLM budget | Per-token daily budget. |
+| Hide a real finding ("this is a false positive, mute it") | Needs `triage:mute`, opt-in and never auto-ticked. Refused on a proven finding and on one a person unmuted, never over an existing mute; a reason on every mute, 25 per call and a per-token DAILY budget; stamped `muted_channel=mcp` + the token prefix, badged in Muted Nodes and counted apart in the report. |
+| Reveal what a Mute Rule hides | `unmute_findings` leaves a rule's mute alone without `includeRuleMutes`, refuses that flag while a recon scan runs, and every such unmute is an exemption on the Mute Rules page. `set_finding_verdict` is refused on a muted finding, so the verdict permission cannot do it. |
 | Aim a command at a third party | **Nothing, once `kali:exec` is granted.** See below. |
 | Smuggle a second command | **Nothing, and nothing is meant to.** A shell is the feature. |
 | Read the sandbox's own environment or keys | **Nothing, once `kali:exec` is granted.** See below. |
+
+### Mute and unmute over MCP
+
+The surface was built on "only a person mutes or unmutes": that is what bounded
+a prompt injection to "mislabel a verdict a human can overrule". `mute_findings`
+and `unmute_findings` replace that guarantee with controls enforced in code
+(`webapp/src/lib/mcp/muteTools.ts`, `mute_findings_delegated` and
+`resolve_muted` in `graph_db/mixins/recon/triage_mixin.py`, the `mute_many` /
+`resolve_muted` ops at `/graph/triage`):
+
+1. **Opt-in scope.** `triage:mute`, never auto-ticked, widening on edit.
+2. **Evidence guard.** A finding that is `confirmed`, carries a `triage_proof`,
+   or has a `ChainFinding-[:CONFIRMS]` edge is refused (`proven`), checked in the
+   write under the node's lock.
+3. **A person's unmute stands.** A finding with a `NodeFilterExemption` is
+   refused (`kept_visible`). The pairs travel to the agent, which refuses the op
+   if they are absent rather than reading "none".
+4. **No overwrite, on any path.** The delegated mute never touches an
+   already-muted node; the UI's `mute_finding` is a no-op on one; the agent
+   refuses a `muted_by` starting `rule:` on every mute op, so no master-key
+   caller can forge a rule mute (which the prune would delete).
+5. **Reason required** (3-500 characters), stored on the node and in the audit.
+6. **Rule mutes need `includeRuleMutes`** to unmute, refused while a recon scan
+   runs (the scan-end sweep is not a `NodeFilterRun`, so only
+   `describeScanWriters` sees it).
+7. **Blast radius.** 25 mutes / 100 unmutes per call, the `write` bucket, and
+   `MCP_MUTE_DAILY_BUDGET` per token per day, reserved before the call and kept
+   when the outcome is unknown.
+8. **Provenance, written AND read.** `muted_by` stays the owner (it carries
+   their authority, and the prune / sweep / partial-recon seeding treat it as a
+   person's), plus `muted_channel='mcp'` and `muted_token=<prefix>`. Every
+   unmute removes them and every other mute clears them. Muted Nodes, the MCP
+   listings and the report are three-valued (person / mcp / rule).
+9. **Busy checks fail closed.** Activation before and after the write (a lock
+   read that throws counts as busy), an exemption read that fails is busy, and
+   the apply or scan check runs before and after the unmute's exemption write.
+   The in-app mute and unmute routes answer 409 during an activation too.
+10. **An unknown outcome is said out loud.** A lost answer is
+    `mute_outcome_unknown` / `unmute_outcome_unknown`; the unmute writes its
+    exemptions first, so a lost answer converges on its own.
+11. **Audited on both sides**: `muted_nodes.muted` / `muted_nodes.unmuted`
+    (source `mcp`, token id and prefix, items, reason), the handler's
+    `mcp.<tool>` row, and a `log_event` per item in the agent.
+12. **Emergency lever**: `MCP_DISABLED_TOOLS=mute_findings,unmute_findings`.
+
+The prune and the scanner clears also take the node lock before reading
+`:Muted`, so a mute that commits mid-statement is kept rather than deleted with
+the node. `tooling/scripts/mute_provenance_cleanup.py` strips leftover
+provenance from unmuted findings after a rollback and roll-forward.
 
 ### The `kali:exec` residual, stated plainly
 
@@ -685,6 +748,10 @@ the token id and prefix. **Failures are audited too** — invalid, expired and
 revoked token presentations (by prefix, never the token), scope denials,
 ownership 404s and every post-validation violation — because that is the only way
 a token brute force or a replayed revoked token becomes visible.
+
+A mute or unmute over MCP also writes `muted_nodes.muted` /
+`muted_nodes.unmuted` with `source = 'mcp'`, the token id and prefix, every item
+and its outcome, and the reason; `outcome: 'unknown'` records a lost answer.
 
 A `start_recon` also produces the normal `ScanJob` history row with
 `initiatedByUserId` set to the token owner, and the audit record carries the

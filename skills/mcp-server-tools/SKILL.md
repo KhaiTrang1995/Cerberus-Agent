@@ -58,6 +58,20 @@ the generated reference page, never by this skill.
   because every Prisma model is mocked away. A tool derived purely from constants
   (`describe_recon_settings`, `list_recon_presets`) SUCCEEDS instead, and would otherwise read
   as a failure. Do not relax the assertion; name the tool.
+- **When a capability flips from "cannot" to "can", sweep the old claims.** Add the old
+  claim's phrasing to `STALE_CLAIMS` in
+  [toolNameDrift.test.ts](../../webapp/src/lib/mcp/toolNameDrift.test.ts), and make sure
+  every file carrying agent-facing strings is in its `AGENT_FACING` list: the "nothing here
+  can mute" lines outlived the feature in `server.ts` and `profiles.ts`, which were outside it.
+- **Keep agent op names out of agent-facing files.** `TOOL_SHAPED` only knows the verbs it
+  lists, so a new tool's verb goes there; an op literal such as `list_muted` or `mute_many`
+  in an agent-facing file then reads as an unknown tool. Wrap ops in
+  [triageGraph.ts](../../webapp/src/lib/mcp/triageGraph.ts) helpers instead.
+- **Watch the `write` bucket headroom.** [apiReference.test.ts](../../webapp/src/lib/mcp/apiReference.test.ts)
+  calls every tool with ONE token inside one test, against the `write` limit (10/min by
+  default). A new write tool that overflows it must raise that test's limit, not drop a call.
+- **A required ARRAY argument needs an `EXAMPLE_EXTRA_ARGS` entry.** `placeholderFor` has no
+  array branch, so the generated example would name no item (`mute_findings`' `findingIds`).
 
 ---
 

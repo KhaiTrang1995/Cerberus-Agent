@@ -59,7 +59,12 @@ graph-write rules it depends on.
   is not a person's decision and is pruned like any stale finding.
   Reference: `prune_unseen_findings` in
   [graph_db/mixins/base_mixin.py](../../graph_db/mixins/base_mixin.py), and the
-  four clears that spare them.
+  four clears that spare them. A delete that spares muted findings takes the
+  node's write lock (`SET n._prune_lock = true REMOVE n._prune_lock`) BEFORE it
+  reads `n:Muted`, or a mute committing in between is deleted with the node.
+  An external agent's MCP mute keeps the owner's id in `muted_by`, so it is kept
+  like a person's; its `muted_channel`/`muted_token` stamp must be REMOVEd by
+  every unmute and cleared by every other mute, or a later mute inherits it.
 - **NEVER prune a source or host the run could not re-check (circuit breakers).**
   When a data provider was paused or a scan host was skipped, "not seen this run"
   does NOT mean "gone". The caller passes `keep_hosts` (anchored regexes, matched
