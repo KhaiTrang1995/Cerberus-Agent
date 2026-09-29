@@ -607,6 +607,11 @@ function evictMuteBudget(now: number): void {
   }
 }
 
+export interface MuteReservation extends BudgetDecision {
+  /** The daily window the reservation was taken from; a refund goes back only to it. */
+  windowStart: number
+}
+
 /**
  * Reserve `n` mutes BEFORE the write, all or nothing.
  *
@@ -615,7 +620,7 @@ function evictMuteBudget(now: number): void {
  * refunds what was not muted (`refundMuteBudget`), and keeps the reservation
  * when the outcome is unknown: a mute that may have landed counts.
  */
-export function reserveMuteBudget(tokenId: string, n: number): BudgetDecision {
+export function reserveMuteBudget(tokenId: string, n: number): MuteReservation {
   const limit = muteBudgetLimit()
   const now = Date.now()
   const want = Math.max(0, Math.floor(n))
@@ -627,19 +632,24 @@ export function reserveMuteBudget(tokenId: string, n: number): BudgetDecision {
     muteBudget.set(tokenId, hit)
   }
   const resetsAt = new Date(hit.firstAt + DAY_MS).toISOString()
+  const windowStart = hit.firstAt
   if (hit.count + want > limit) {
-    return { allowed: false, used: hit.count, limit, resetsAt }
+    return { allowed: false, used: hit.count, limit, resetsAt, windowStart }
   }
   hit.count += want
-  return { allowed: true, used: hit.count, limit, resetsAt }
+  return { allowed: true, used: hit.count, limit, resetsAt, windowStart }
 }
 
-/** Give back `n` of a reservation. Never below zero, never into a new window. */
-export function refundMuteBudget(tokenId: string, n: number): BudgetDecision | null {
+/**
+ * Give back `n` of the reservation taken from `windowStart`. Never below zero,
+ * and never into a later window: a call that reserved just before the rollover
+ * and finished after it would otherwise hand its refund to the new day.
+ */
+export function refundMuteBudget(tokenId: string, n: number, windowStart: number): BudgetDecision | null {
   const hit = muteBudget.get(tokenId)
   if (!hit) return null
   const limit = muteBudgetLimit()
-  if (Date.now() - hit.firstAt < DAY_MS) {
+  if (hit.firstAt === windowStart && Date.now() - hit.firstAt < DAY_MS) {
     hit.count = Math.max(0, hit.count - Math.max(0, Math.floor(n)))
   }
   return { allowed: true, used: hit.count, limit, resetsAt: new Date(hit.firstAt + DAY_MS).toISOString() }

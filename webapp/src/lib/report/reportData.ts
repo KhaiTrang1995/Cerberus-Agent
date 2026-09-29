@@ -917,8 +917,9 @@ export async function gatherReportData(projectId: string): Promise<ReportData> {
 
 // ── Neo4j Query Functions ───────────────────────────────────────────────────
 
+// Exported for reportData.integration.test.ts, which runs it on a real Neo4j.
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function queryGraphOverview(session: any, pid: string) {
+export async function queryGraphOverview(session: any, pid: string) {
   const nodeRes = await session.run(
     `MATCH (n {project_id: $pid}) WHERE ${notMuted('n')}
      RETURN labels(n)[0] AS label, count(n) AS count ORDER BY count DESC`,

@@ -161,6 +161,31 @@ describe('what a click does', () => {
     expect(mockAddToast).not.toHaveBeenCalled()
   })
 
+  test('a mute refused during a version activation says so, and does not reload the page', async () => {
+    // The route's activation 409 is not a stale node: reloading would not
+    // help, and "this finding changed" would send the person looking for it.
+    fetchMock.mockImplementation(() => ok({
+      error: 'A version activation is in progress for this project.', activationInProgress: true,
+    }, 409))
+    const onMuted = vi.fn()
+    render(<Page><MuteNodeButton name="v" graphId="7" label="Vulnerability" onMuted={onMuted} /></Page>)
+    fireEvent.click(screen.getByRole('button', { name: /Mute/ }))
+    await waitFor(() => expect(mockAlertError).toHaveBeenCalled())
+    expect(mockAlertError.mock.calls[0][0]).toBe('A version activation is in progress for this project.')
+    expect(onGraphChanged).not.toHaveBeenCalled()
+    expect(onMuted).not.toHaveBeenCalled()
+  })
+
+  test('a finding already muted is not announced as this person\'s mute', async () => {
+    fetchMock.mockImplementation(() => ok({ muted: true, already: true, label: 'Vulnerability' }))
+    render(<Page><MuteNodeButton name="v" graphId="7" label="Vulnerability" /></Page>)
+    fireEvent.click(screen.getByRole('button', { name: /Mute/ }))
+    await waitFor(() => expect(mockAddToast).toHaveBeenCalled())
+    expect(mockAddToast.mock.calls[0][0].message).toBe('This finding was already muted, so it was left as it was.')
+    // The view was stale, so it is refreshed all the same.
+    expect(onGraphChanged).toHaveBeenCalledOnce()
+  })
+
   test('a server refusal is shown as the server worded it', async () => {
     fetchMock.mockImplementation(() => ok({ error: 'IP nodes cannot be muted.' }, 422))
     render(<Page><MuteNodeButton name="10.0.0.1:443" graphId="7" /></Page>)

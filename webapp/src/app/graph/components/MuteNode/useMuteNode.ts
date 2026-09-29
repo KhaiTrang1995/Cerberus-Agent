@@ -67,7 +67,9 @@ export function useMuteNode(
           },
         )
         const body = await res.json().catch(() => ({}))
-        if (res.status === 409) {
+        // A 409 that says so is the route refusing while a version activation
+        // holds the graph: the node is fine, and reloading would not help.
+        if (res.status === 409 && !body.activationInProgress) {
           // A rescan or a version activation replaced the node this view is
           // holding an id for. Silently doing nothing looked like success.
           await callbacks.onStale?.()
@@ -82,7 +84,11 @@ export function useMuteNode(
         callbacks.onMuted?.()
         toast.addToast({
           type: 'success',
-          message: 'Finding muted. It is now hidden from the agent.',
+          // Muted meanwhile by a rule, an agent or another tab: left exactly
+          // as it was, so it is not this person's mute.
+          message: body.already
+            ? 'This finding was already muted, so it was left as it was.'
+            : 'Finding muted. It is now hidden from the agent.',
           ...(onViewMuted ? { action: { label: 'View muted', onClick: onViewMuted } } : {}),
         })
       } catch (e) {

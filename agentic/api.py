@@ -3304,11 +3304,13 @@ def _triage_request_error(body) -> Optional[str]:
             return f"reason must be 3-{_MUTE_REASON_MAX} characters"
         if not keys and not graph_ids:
             return "mute_many needs keys or graph_ids"
-        if len(keys) > _MCP_MUTE_MAX or len(graph_ids) > _MCP_MUTE_MAX:
+        # Counted together: the mixin caps the combined set, so 25 of each
+        # would drop refs that are then reported neither done nor not found.
+        if len(keys) + len(graph_ids) > _MCP_MUTE_MAX:
             return f"at most {_MCP_MUTE_MAX} findings per mute"
     if body.op in ("resolve_muted", "unmute_many"):
         ceiling = _MCP_UNMUTE_MAX if body.source == "mcp" else _UI_UNMUTE_MAX
-        if len(keys) > ceiling or len(graph_ids) > ceiling:
+        if len(keys) + len(graph_ids) > ceiling:
             return f"at most {ceiling} findings per unmute"
     if body.token is not None and not _MCP_TOKEN_PREFIX_RE.fullmatch(body.token):
         return "token must be an MCP token prefix"
@@ -3396,9 +3398,12 @@ async def graph_triage(body: GraphTriageRequest):
     # install still boots. This route writes suppression and verdict state, so
     # it refuses for itself instead of accepting unauthenticated callers.
     if master_key_is_weak():
+        # `code`: refused before any graph work, so the webapp can report a
+        # write as not done rather than as an unknown outcome.
         return JSONResponse(status_code=503, content={
             "error": "INTERNAL_API_KEY is not configured; triage operations are "
                      "disabled. Generate the secret via redamon.sh.",
+            "code": "not_configured",
         })
 
     if not body.user_id or not body.project_id:
@@ -3549,7 +3554,9 @@ async def graph_triage(body: GraphTriageRequest):
                       project_id=body.project_id, node_id=item.get("key"),
                       label=item.get("label"), reason=(body.reason or "").strip(),
                       channel=body.source or "app", token_prefix=body.token_prefix)
-    if body.op in ("mute", "unmute", "human_verdict"):
+    # An already-muted finding was left exactly as it was, so there is no
+    # mute to log, and it did match.
+    if body.op in ("mute", "unmute", "human_verdict") and not result.get("already"):
         from session_log import log_event
         # The three ops write durable operator decisions. mute/unmute report
         # `muted`/`unmuted`; a verdict reports `updated`.

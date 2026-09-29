@@ -18,6 +18,8 @@
  * @vitest-environment node
  */
 import { describe, test, expect, beforeEach, afterEach, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 
 const h = vi.hoisted(() => ({
   findProject: vi.fn(),
@@ -75,6 +77,12 @@ import { buildMcpServer } from './server'
 import type { McpContext } from './tools'
 
 const TOKEN_PREFIX = 'rdmn_mcp_ab12cd34'
+
+/** The agent's request and answer per op, shared with tests/test_triage_mixin.py. */
+const CONTRACT = JSON.parse(readFileSync(join(__dirname, 'contracts/triage_mute.json'), 'utf-8')) as Record<
+  'mute_many' | 'resolve_muted' | 'unmute_many',
+  { request: Record<string, unknown>; response: Record<string, unknown> }
+>
 
 const ctx = (scopes: string[] = ['triage:mute', 'triage:read'], tokenId = 't1'): McpContext => ({
   token: { tokenId, userId: 'owner', tokenPrefix: TOKEN_PREFIX, name: 'agent', scopes: scopes as never },
@@ -292,6 +300,105 @@ describe('mute_findings: outcomes', () => {
   })
 })
 
+describe('the agent contract (contracts/triage_mute.json)', () => {
+  // The Python side pins that the mixin answers exactly these keys. Here: the
+  // body sent has exactly the request keys, and every answer key is read.
+  const keysOf = (o: Record<string, unknown>) => Object.keys(o).sort()
+
+  test('mute_many: the body sent and the answer read', async () => {
+    const { request, response } = CONTRACT.mute_many
+    agent.mute_many = response
+    h.exemptionFind.mockResolvedValue((request.exempt_pairs as string[][]).map(([label, nodeKey]) => ({ label, nodeKey })))
+    const r = await muteFindings(ctx(), 'p1', {
+      findingIds: request.keys as string[], nodeIds: request.graph_ids as string[], reason: request.reason as string,
+    })
+    const body = sent('mute_many')[0]
+    expect(keysOf(body)).toEqual(keysOf(request))
+    expect(body).toEqual(request)
+    expect(r.muted).toEqual([{ findingId: 'v1', nodeId: '812', label: 'Vulnerability', name: 'Banner', severity: 'info' }])
+    expect(r.notFound).toEqual(['813'])
+  })
+
+  test('resolve_muted and unmute_many: the bodies sent and the answers read', async () => {
+    agent.resolve_muted = CONTRACT.resolve_muted.response
+    agent.unmute_many = CONTRACT.unmute_many.response
+    const req = CONTRACT.resolve_muted.request
+    const r = await unmuteFindings(ctx(), 'p1', {
+      findingIds: req.keys as string[], nodeIds: req.graph_ids as string[],
+    })
+    expect(sent('resolve_muted')[0]).toEqual(req)
+    expect(keysOf(sent('unmute_many')[0])).toEqual(keysOf(CONTRACT.unmute_many.request))
+    expect(r.unmuted).toEqual([{ findingId: 'v1', nodeId: '812', label: 'Vulnerability', wasMutedVia: 'mcp' }])
+    expect(r.skippedRuleMutes).toMatchObject([{ findingId: 'v2', nodeId: '813', label: 'Vulnerability' }])
+    expect(r.notFound).toEqual([])
+    expect(r.exempted).toBe(1)
+  })
+
+  test('a skipped row in the unmute answer drops the exemption made for it', async () => {
+    // `skipped` is what keeps a rule mute from carrying a stray exemption.
+    agent.resolve_muted = {
+      ...CONTRACT.resolve_muted.response,
+      to_unmute: [...(CONTRACT.resolve_muted.response.to_unmute as object[]),
+        { ref: 'v2', key: 'v2', label: 'Vulnerability', node_id: '813', muted_by: 'owner', was_via: 'mcp' }],
+      skipped_rule_mute: [],
+    }
+    agent.unmute_many = CONTRACT.unmute_many.response
+    await unmute({ findingIds: ['v1', 'v2'] })
+    expect(h.exemptionDelete).toHaveBeenCalledWith({
+      where: { projectId: 'p1', OR: [{ label: 'Vulnerability', nodeKey: 'v2' }] },
+    })
+  })
+})
+
+describe('mute_findings: a person who unmutes during the call wins', () => {
+  // The write checks a snapshot of the exemptions read before it. A person
+  // who unmutes a finding while the call waits at the agent writes one the
+  // write never sees, so without a second look the agent re-hides it.
+  const personUnmutesMidCall = () => {
+    h.exemptionFind
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ label: 'Vulnerability', nodeKey: 'v1' }])
+  }
+
+  test('a finding a person brought back during the call is unmuted again, not left re-hidden', async () => {
+    personUnmutesMidCall()
+    const r = await mute()
+    expect(sent('unmute_many')).toEqual([expect.objectContaining({ keys: ['v1'], include_rule_mutes: false })])
+    expect(r.muted).toEqual([])
+    expect(r.refused).toEqual([{ ref: 'v1', reason: 'kept_visible', label: 'Vulnerability' }])
+    expect(h.order).toEqual(['activation', 'mute_many', 'unmute_many', 'activation'])
+    // Nothing stayed muted, so nothing is charged.
+    expect(reserveMuteBudget('t1', 200).allowed).toBe(true)
+  })
+
+  test('the re-read asks only about what this call muted', async () => {
+    agent.mute_many = {
+      items: [muteItem(), muteItem({ ref: 'v2', key: 'v2', outcome: 'proven' })], not_found: [], mcp_gated: true,
+    }
+    await mute({ findingIds: ['v1', 'v2'] })
+    expect(h.exemptionFind.mock.calls[1][0]).toMatchObject({
+      where: { projectId: 'p1', OR: [{ label: 'Vulnerability', nodeKey: 'v1' }] },
+    })
+    expect(sent('unmute_many')).toEqual([])
+  })
+
+  test('a release that fails is named in a warning, never reported as done', async () => {
+    personUnmutesMidCall()
+    agent.unmute_many = { __status: 400, body: { error: 'refused' } }
+    const r = await mute()
+    expect(r.muted).toMatchObject([{ findingId: 'v1' }])
+    expect(r.warning).toMatch(/brought back v1 during this call/)
+  })
+
+  test('a re-read that fails is a warning, not a silent all-clear', async () => {
+    h.exemptionFind.mockResolvedValueOnce([]).mockRejectedValueOnce(new Error('db down'))
+    const r = await mute()
+    expect(r.muted).toMatchObject([{ findingId: 'v1' }])
+    expect(r.warning).toMatch(/could not be checked/)
+    expect(sent('unmute_many')).toEqual([])
+  })
+})
+
 describe('mute_findings: the daily budget', () => {
   test('a call past the budget is refused whole, naming the reset, with nothing sent', async () => {
     vi.stubEnv('MCP_MUTE_DAILY_BUDGET', '3')
@@ -320,10 +427,32 @@ describe('mute_findings: the daily budget', () => {
     agent.mute_many = { __throw: refused('ECONNREFUSED') }
     expect(await errorOf(mute({ findingIds: ['a', 'b', 'c'] }))).toMatchObject({ code: 'agent_unreachable' })
 
-    agent.mute_many = { __status: 500, body: { error: 'boom' } }
+    agent.mute_many = { __status: 400, body: { error: 'reason must be 3-500 characters' } }
+    expect(await errorOf(mute({ findingIds: ['a', 'b', 'c'] }))).toMatchObject({ code: 'agent_failed' })
+
+    agent.mute_many = { __status: 503, body: { error: 'locked; nothing was changed', code: 'busy' } }
     expect(await errorOf(mute({ findingIds: ['a', 'b', 'c'] }))).toMatchObject({ code: 'agent_failed' })
 
     expect(reserveMuteBudget('t1', 3).allowed).toBe(true)
+  })
+
+  test('a refund never lands in the next daily window', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    try {
+      vi.setSystemTime(new Date('2026-09-29T23:59:00Z'))
+      vi.stubEnv('MCP_MUTE_DAILY_BUDGET', '3')
+      h.fetch.mockImplementationOnce(async () => {
+        // The window rolls over while this call is at the agent, and the
+        // token spends the whole new one.
+        vi.setSystemTime(new Date('2026-09-30T23:59:30Z'))
+        expect(reserveMuteBudget('t1', 3).allowed).toBe(true)
+        return { ok: true, status: 200, json: async () => ({ items: [], not_found: ['a', 'b', 'c'], mcp_gated: true }) }
+      })
+      await mute({ findingIds: ['a', 'b', 'c'] })
+      expect(reserveMuteBudget('t1', 1).allowed).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   test('KEPT when the outcome is unknown: a mute that may have landed counts', async () => {
@@ -331,6 +460,24 @@ describe('mute_findings: the daily budget', () => {
     agent.mute_many = { __throw: timeout() }
     expect(await errorOf(mute({ findingIds: ['a', 'b', 'c'] }))).toMatchObject({ code: 'mute_outcome_unknown' })
     expect(reserveMuteBudget('t1', 1).allowed).toBe(false)
+  })
+
+  test('a 5xx after sending may follow a commit, so it is unknown and KEPT, not refunded', async () => {
+    // A lost commit acknowledgement reaches the agent as an exception after
+    // the write: its 500 does not mean "nothing was changed".
+    for (const answer of [
+      { __status: 500, body: { error: 'IncompleteCommit' } },
+      { __status: 502, body: {} },
+      { __status: 504, body: {} },
+      { __status: 503, body: { error: 'uncoded' } },
+    ]) {
+      __resetMuteBudget()
+      vi.stubEnv('MCP_MUTE_DAILY_BUDGET', '3')
+      agent.mute_many = answer
+      expect(await errorOf(mute({ findingIds: ['a', 'b', 'c'] })), String(answer.__status))
+        .toMatchObject({ code: 'mute_outcome_unknown' })
+      expect(reserveMuteBudget('t1', 1).allowed, String(answer.__status)).toBe(false)
+    }
   })
 })
 
@@ -445,9 +592,24 @@ describe('unmute_findings: the order of writes', () => {
   })
 
   test('a definite unmute failure removes the exemptions it created', async () => {
-    agent.unmute_many = { __status: 500, body: { error: 'boom' } }
-    expect(await errorOf(unmute())).toMatchObject({ code: 'agent_failed' })
-    expect(h.exemptionDelete).toHaveBeenCalledOnce()
+    for (const answer of [
+      { __status: 400, body: { error: 'at most 100 findings per unmute' } },
+      { __status: 503, body: { error: 'The graph was busy; nothing was changed.', code: 'retry' } },
+    ]) {
+      h.exemptionDelete.mockClear()
+      agent.unmute_many = answer
+      expect(await errorOf(unmute()), String(answer.__status)).toMatchObject({ code: 'agent_failed' })
+      expect(h.exemptionDelete).toHaveBeenCalledOnce()
+    }
+  })
+
+  test('a 500 after the unmute may have committed is unknown, and KEEPS the exemptions', async () => {
+    // Removing them would leave a finding the agent really unmuted with no
+    // exemption, and the next rule sweep would hide it again.
+    agent.unmute_many = { __status: 500, body: { error: 'IncompleteCommit' } }
+    expect(await errorOf(unmute())).toMatchObject({ code: 'unmute_outcome_unknown' })
+    expect(h.exemptionDelete).not.toHaveBeenCalled()
+    expect(h.writeAudit.mock.calls[0][0]).toMatchObject({ after: { outcome: 'unknown' } })
   })
 
   test('an unknown unmute outcome KEEPS them, so a lost answer converges', async () => {
@@ -639,8 +801,25 @@ describe('the advertised schema is enforced', () => {
     h.activationBusy.mockResolvedValue(true)
     const r = await call('mute_findings', { projectId: 'p1', findingIds: ['v1'], reason: 'noise, per owner' })
     expect(r.isError).toBe(true)
-    expect(r.text).toMatch(/Nothing was changed: a version activation is in progress/)
+    expect(r.text).toMatch(/^Refused \(busy\): nothing was changed: a version activation is in progress/)
     const handlerRow = h.writeAudit.mock.calls.map(c => c[0]).find(a => a.action === 'mcp.mute_findings')
     expect(handlerRow.after).toMatchObject({ outcome: 'busy', tokenPrefix: TOKEN_PREFIX })
+  })
+
+  test('the error codes the tool descriptions promise reach the client in the text', async () => {
+    // The handler sends only the message, never err.code, so a code an agent
+    // is told to branch on has to be in the message.
+    agent.mute_many = { __throw: timeout() }
+    let r = await call('mute_findings', { projectId: 'p1', findingIds: ['v1'], reason: 'noise, per owner' })
+    expect(r.text).toMatch(/\(mute_outcome_unknown\)/)
+
+    agent.unmute_many = { __throw: timeout() }
+    r = await call('unmute_findings', { projectId: 'p1', findingIds: ['v1'] })
+    expect(r.text).toMatch(/\(unmute_outcome_unknown\)/)
+
+    // The unknown mute above kept its reservation: 1 of 1 is spent.
+    vi.stubEnv('MCP_MUTE_DAILY_BUDGET', '1')
+    r = await call('mute_findings', { projectId: 'p1', findingIds: ['v1'], reason: 'noise, per owner' })
+    expect(r.text).toMatch(/^Refused \(budget_exhausted\)/)
   })
 })

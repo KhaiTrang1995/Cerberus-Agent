@@ -1215,5 +1215,78 @@ class TestPruneAndClearsLockBeforeReadingTheMute(unittest.TestCase):
                     self.assertLess(src.index(f"SET {lock} = true"), src.index(read))
 
 
+class TestTheMcpMuteContract(unittest.TestCase):
+    """The answers the webapp's MCP mute tools parse, pinned in one JSON file.
+
+    `muteTools.test.ts` feeds the same file to the tools as the agent's answer,
+    so a key renamed on either side fails one of the two. Without it the
+    webapp reads a missing list as empty: a renamed `not_found` hides refs
+    that matched nothing, a renamed `skipped` leaves exemptions behind.
+
+    `mcp_gated` and `layered_publish` are the agent endpoint's markers, not
+    the mixin's (pinned in agentic/tests/test_graph_triage_mcp_gate.py).
+    """
+
+    AGENT_MARKERS = {"mcp_gated", "layered_publish"}
+
+    @classmethod
+    def setUpClass(cls):
+        import json
+        path = os.path.join(_REPO, "webapp", "src", "lib", "mcp", "contracts", "triage_mute.json")
+        with open(path, encoding="utf-8") as fh:
+            cls.contract = json.load(fh)
+
+    def _expected(self, op):
+        return {k: v for k, v in self.contract[op]["response"].items()
+                if k not in self.AGENT_MARKERS}
+
+    def _assert_returned_by_cypher(self, query, columns):
+        # The rows below are fed with the contract's names, so this is what
+        # catches a renamed RETURN alias.
+        returned = query[query.rindex("RETURN"):]
+        for column in columns:
+            with self.subTest(column=column):
+                self.assertRegex(returned, rf"(\bAS|RETURN|,)\s+{column}\b")
+
+    def test_mute_many(self):
+        request = self.contract["mute_many"]["request"]
+        expected = self._expected("mute_many")
+        item = expected["items"][0]
+        row = {k: v for k, v in item.items() if k != "ref"}
+        # graph id 813 resolves to nothing, key v1 mutes.
+        client = SeqClient([], [row])
+        result = client.mute_findings_delegated(
+            request["user_id"], request["project_id"], keys=request["keys"],
+            graph_ids=expected["not_found"], exempt_pairs=request["exempt_pairs"],
+            muted_by=request["muted_by"], reason=request["reason"],
+            token_prefix=request["token_prefix"])
+        self.assertEqual(result, expected)
+        self._assert_returned_by_cypher(client.queries[-1], row)
+
+    def test_resolve_muted(self):
+        request = self.contract["resolve_muted"]["request"]
+        expected = self._expected("resolve_muted")
+        by_key = {k: v for k, v in expected["to_unmute"][0].items() if k != "ref"}
+        by_gid = {k: v for k, v in expected["skipped_rule_mute"][0].items() if k != "ref"}
+        client = SeqClient([by_key], [{**by_gid, "gid": int(request["graph_ids"][0])}])
+        result = client.resolve_muted(
+            request["user_id"], request["project_id"], keys=request["keys"],
+            graph_ids=request["graph_ids"], include_rule_mutes=request["include_rule_mutes"])
+        self.assertEqual(result, expected)
+        for query in client.queries:
+            self._assert_returned_by_cypher(query, by_key)
+
+    def test_unmute_many(self):
+        request = self.contract["unmute_many"]["request"]
+        expected = self._expected("unmute_many")
+        rows = ([{**i, "skipped": False} for i in expected["items"]]
+                + [{**i, "was_via": "rule", "skipped": True} for i in expected["skipped"]])
+        client = SeqClient(rows)
+        result = client.unmute_findings(
+            request["user_id"], request["project_id"],
+            [r["key"] for r in rows], skip_rule_mutes=not request["include_rule_mutes"])
+        self.assertEqual(result, expected)
+        self._assert_returned_by_cypher(client.queries[-1], rows[0])
+
 if __name__ == "__main__":
     unittest.main()

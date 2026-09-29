@@ -82,7 +82,7 @@ export const MUTED_ORDERS = ['recent', 'person_first'] as const
 
 function busy(what: string): McpToolError {
   return new McpToolError(
-    `Nothing was changed: ${what}. A mute or unmute written now could be lost or undone. ` +
+    `Refused (busy): nothing was changed: ${what}. A mute or unmute written now could be lost or undone. ` +
       'Retry once it has finished.',
     'busy'
   )
@@ -119,6 +119,66 @@ function refsOf(
   return { keys, graphIds }
 }
 
+const pairKey = (label: unknown, key: unknown) => `${String(label)}\u0000${String(key)}`
+
+/**
+ * Put back what this call re-hid behind a person's back.
+ *
+ * The exemptions reach the write as a snapshot read before it, and the call
+ * can then wait at the agent (its MCP concurrency ceiling) for up to a minute.
+ * A person who unmutes one of these findings in that window gets an
+ * exemption the write never saw, and the write mutes the finding again. So
+ * the exemptions are read once more AFTER the write, and any finding this
+ * call muted that now has one is unmuted: it was a person's decision.
+ *
+ * The UI route unmutes the graph before it writes the exemption, so a
+ * few-millisecond window stays open where both writes land between this
+ * read and theirs. Bounded, and the mute is attributed to this token.
+ */
+async function releaseBroughtBack(
+  userId: string,
+  projectId: string,
+  muted: MuteManyItem[]
+): Promise<{ released: Set<string>; warning?: string }> {
+  const released = new Set<string>()
+  if (muted.length === 0) return { released }
+  let back: MuteManyItem[]
+  try {
+    const rows = await prisma.nodeFilterExemption.findMany({
+      where: { projectId, OR: muted.map(i => ({ label: String(i.label), nodeKey: String(i.key) })) },
+      select: { label: true, nodeKey: true },
+    })
+    const exempt = new Set(rows.map(r => pairKey(r.label, r.nodeKey)))
+    back = muted.filter(i => exempt.has(pairKey(i.label, i.key)))
+  } catch (err) {
+    console.error('[mcp] mute_findings could not re-read the exemptions:', err)
+    return {
+      released,
+      warning: 'Whether a person brought any of these back during this call could not be checked. ' +
+        'Re-check with search_muted_findings and list what you muted in your report.',
+    }
+  }
+  if (back.length === 0) return { released }
+  try {
+    const undone = await unmuteMany(userId, projectId, {
+      keys: [...new Set(back.map(i => String(i.key)))],
+      includeRuleMutes: false,
+    })
+    const skipped = new Set(undone.skipped.map(s => pairKey(s.label, s.key)))
+    for (const i of back) if (!skipped.has(pairKey(i.label, i.key))) released.add(pairKey(i.label, i.key))
+  } catch (err) {
+    console.error('[mcp] mute_findings could not release what a person brought back:', err)
+  }
+  const stuck = back.filter(i => !released.has(pairKey(i.label, i.key)))
+  return {
+    released,
+    ...(stuck.length > 0 ? {
+      warning: `A person brought back ${stuck.map(i => i.key).join(', ')} during this call, and this ` +
+        'mute could not be undone. Tell a person; do not mute them again.',
+    } : {}),
+  }
+}
+
 function budgetView(b: BudgetDecision | null) {
   return b ? { used: b.used, limit: b.limit, resetsAt: b.resetsAt } : undefined
 }
@@ -148,7 +208,8 @@ export async function muteFindings(
   const reservation = reserveMuteBudget(tokenId, requested)
   if (!reservation.allowed) {
     throw new McpToolError(
-      `This token's daily mute budget is spent: ${reservation.used} of ${reservation.limit} ` +
+      `Refused (budget_exhausted): this token's daily mute budget is spent: ` +
+        `${reservation.used} of ${reservation.limit} ` +
         `findings muted in the current window, and this call asked for ${requested} more. It ` +
         `resets at ${reservation.resetsAt}. Nothing was muted. Report this to a person rather ` +
         'than working around it.',
@@ -199,14 +260,24 @@ export async function muteFindings(
       throw err
     }
 
-    const muted = result.items.filter(i => i.outcome === 'muted')
+    if (result.items.some(i => i.outcome === 'muted')) invalidateCache(projectId)
+    const release = await releaseBroughtBack(
+      ctx.token.userId, projectId, result.items.filter(i => i.outcome === 'muted'))
+    // A finding released above is reported as the refusal it would have been
+    // had the write seen the person's exemption.
+    const items = result.items.map(i =>
+      release.released.has(pairKey(i.label, i.key)) ? { ...i, outcome: 'kept_visible' } : i)
+    const muted = items.filter(i => i.outcome === 'muted')
     refund = Math.max(0, requested - muted.length)
 
-    const warning = (await activationBusy(projectId))
-      ? 'A version activation started during this call, and these mutes may not survive it. ' +
-        'Re-check with search_muted_findings when it finishes.'
-      : undefined
-    if (muted.length > 0) invalidateCache(projectId)
+    const warnings = [
+      ...(await activationBusy(projectId)
+        ? ['A version activation started during this call, and these mutes may not survive it. ' +
+            'Re-check with search_muted_findings when it finishes.']
+        : []),
+      ...(release.warning ? [release.warning] : []),
+    ]
+    const warning = warnings.length > 0 ? warnings.join(' ') : undefined
 
     void writeAudit({
       actorId: ctx.token.userId,
@@ -218,7 +289,7 @@ export async function muteFindings(
         tokenPrefix: ctx.token.tokenPrefix,
         reason,
         count: muted.length,
-        items: result.items.slice(0, 100).map(i => ({ key: i.key ?? i.ref, label: i.label, outcome: i.outcome })),
+        items: items.slice(0, 100).map(i => ({ key: i.key ?? i.ref, label: i.label, outcome: i.outcome })),
         ...(result.notFound.length ? { notFound: result.notFound.slice(0, 100) } : {}),
       },
       source: 'mcp',
@@ -226,17 +297,17 @@ export async function muteFindings(
 
     const nodeIdOf = (i: MuteManyItem) =>
       typeof i.node_id === 'string' && NODE_ID_PATTERN.test(i.node_id) ? { nodeId: i.node_id } : {}
-    const budget = refundMuteBudget(tokenId, refund)
+    const budget = refundMuteBudget(tokenId, refund, reservation.windowStart)
     refund = 0
     return {
       projectId,
       muted: muted.map(i => ({
         findingId: i.key, ...nodeIdOf(i), label: i.label, name: i.name, severity: i.severity,
       })),
-      alreadyMuted: result.items
+      alreadyMuted: items
         .filter(i => i.outcome === 'already_muted')
         .map(i => ({ findingId: i.key, ...nodeIdOf(i), label: i.label, mutedVia: i.was_via })),
-      refused: result.items
+      refused: items
         .filter(i => ['proven', 'kept_visible', 'not_a_finding'].includes(i.outcome))
         .map(i => ({ ref: i.ref, reason: i.outcome, label: i.label })),
       notFound: result.notFound,
@@ -252,7 +323,7 @@ export async function muteFindings(
       ],
     }
   } finally {
-    if (refund > 0) refundMuteBudget(tokenId, refund)
+    if (refund > 0) refundMuteBudget(tokenId, refund, reservation.windowStart)
   }
 }
 

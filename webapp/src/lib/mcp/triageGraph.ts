@@ -50,6 +50,13 @@ const REFUSED_BEFORE_SENDING = new Set([
   'UND_ERR_CONNECT_TIMEOUT',
 ])
 
+/**
+ * The codes the agent puts on a 5xx it answered before writing anything: the
+ * node lock timed out (`busy`), a deadlock outlasted the retries (`retry`), or
+ * the master key is missing (`not_configured`). Each one rolled back.
+ */
+const NOTHING_CHANGED_CODES = new Set(['busy', 'retry', 'not_configured'])
+
 export function failedBeforeSending(err: unknown): boolean {
   const e = err as { code?: unknown; cause?: { code?: unknown } } | null
   const code = e?.cause?.code ?? e?.code
@@ -59,7 +66,8 @@ export function failedBeforeSending(err: unknown): boolean {
 /** The outcome of a suppression write cannot be known. */
 export function outcomeUnknown(verb: string): McpToolError {
   return new McpToolError(
-    `The ${verb} was sent, but its answer was lost, so it may or may not have been applied. ` +
+    `Outcome unknown (${verb}_outcome_unknown): the ${verb} was sent, but no reliable answer ` +
+      'came back, so it may or may not have been applied. ' +
       'Check with search_muted_findings before doing anything else. A retry is safe: an ' +
       'already-muted finding is reported, never changed, and an already-unmuted one is not found.',
     `${verb}_outcome_unknown`
@@ -120,7 +128,7 @@ export async function callTriage(
     throw new McpToolError('The findings service is unavailable.', 'agent_unreachable')
   }
   if (!resp.ok) {
-    const detail = (await resp.json().catch(() => null)) as { error?: unknown } | null
+    const detail = (await resp.json().catch(() => null)) as { error?: unknown; code?: unknown } | null
     console.error(`[mcp] triage ${op} failed (${resp.status})`, detail?.error ?? '')
     if (resp.status === 400 && /unknown op/i.test(String(detail?.error ?? ''))) {
       throw new McpToolError(
@@ -128,6 +136,12 @@ export async function callTriage(
           'operation, so nothing was done. The operator must rebuild the agent image.',
         'agent_outdated'
       )
+    }
+    // A server error on a write can follow a commit whose acknowledgement was
+    // lost. Only a refusal, or a 5xx the agent coded as "nothing was changed",
+    // is a definite failure.
+    if (verb && resp.status >= 500 && !NOTHING_CHANGED_CODES.has(String(detail?.code ?? ''))) {
+      throw outcomeUnknown(verb)
     }
     throw new McpToolError(
       verb ? `The ${verb} was refused by the findings service, and nothing was changed.`

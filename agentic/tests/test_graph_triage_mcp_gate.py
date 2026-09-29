@@ -530,6 +530,31 @@ class RuleAttributionIsNeverForgedTests(_TriageEndpointCase):
         self.assertEqual(resp.status_code, 200)
         self.assertIs(_body(resp)["already"], False)
 
+    async def test_an_already_muted_finding_is_not_logged_as_a_new_mute(self):
+        # The mute left it as it was; a log line would credit this person
+        # with a rule's or an agent's mute.
+        self.client.mute_finding = lambda *a, **k: {
+            "muted": True, "already": True, "label": "Vulnerability"}
+        resp = await self.call(op="mute", user_id="u1", project_id="p1",
+                               node_id="v1", muted_by="u1", reason="noise")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([e for e in self.events if e[0] == "finding_muted"], [])
+
+    async def test_a_fresh_mute_is_still_logged(self):
+        await self.call(op="mute", user_id="u1", project_id="p1",
+                        node_id="v1", muted_by="u1", reason="noise")
+        (name, kw), = [e for e in self.events if e[0] == "finding_muted"]
+        self.assertEqual(kw["node_id"], "v1")
+
+    async def test_the_unconfigured_key_refusal_says_nothing_was_done(self):
+        # Coded, so the webapp reports the write as not done, not as an
+        # unknown outcome that keeps an MCP token's budget spent.
+        with mock.patch.object(api, "master_key_is_weak", lambda: True):
+            resp = await self.call(**_GOOD_MUTE_MANY)
+        self.assertEqual(resp.status_code, 503)
+        self.assertEqual(_body(resp)["code"], "not_configured")
+        self.assertEqual(self.calls("mute_findings_delegated"), [])
+
     async def test_a_ui_mute_reason_is_capped(self):
         resp = await self.call(op="mute", user_id="u1", project_id="p1",
                                node_id="v1", reason="x" * 501)
@@ -581,6 +606,15 @@ class MuteManyValidationTests(_TriageEndpointCase):
     async def test_at_most_25_keys_and_25_node_ids(self):
         await self.assertRefused(keys=[f"v{i}" for i in range(26)])
         await self.assertRefused(graph_ids=[str(i) for i in range(26)])
+
+    async def test_keys_and_node_ids_over_25_together_are_refused_not_truncated(self):
+        # 25 of each used to pass here, and the mixin then muted the first 25
+        # of the combined set and reported the rest neither done nor not found.
+        self.assertIn("at most 25", await self.assertRefused(
+            keys=[f"v{i}" for i in range(13)], graph_ids=[str(i) for i in range(13)]))
+        resp = await self.call(**{**_GOOD_MUTE_MANY, "keys": [f"v{i}" for i in range(12)],
+                                  "graph_ids": [str(i) for i in range(13)]})
+        self.assertEqual(resp.status_code, 200)
 
     async def test_graph_ids_are_digits_only(self):
         for bad in ("12a", "-1", "1 OR 1=1", "1" * 19, "12\n", "\u00b2"):
@@ -651,6 +685,15 @@ class UnmuteScopeTests(_TriageEndpointCase):
         kwargs = self.calls("resolve_muted")[0][3]
         self.assertEqual(kwargs, {"keys": ["v1"], "graph_ids": ["77"],
                                   "include_rule_mutes": True})
+
+    async def test_keys_and_node_ids_over_the_ceiling_together_are_refused_not_truncated(self):
+        for op in ("resolve_muted", "unmute_many"):
+            with self.subTest(op=op):
+                resp = await self.call(op=op, user_id="u1", project_id="p1", source="mcp",
+                                       keys=[f"v{i}" for i in range(60)],
+                                       graph_ids=[str(i) for i in range(41)])
+                self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.calls("resolve_muted") + self.calls("unmute_findings"), [])
 
     async def test_resolve_refuses_a_non_digit_node_id(self):
         resp = await self.call(op="resolve_muted", user_id="u1", project_id="p1",
