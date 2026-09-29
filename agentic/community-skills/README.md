@@ -6,6 +6,7 @@ Ready-to-use attack skill workflows contributed by the community. Download any `
 
 | Skill | Author | Description |
 |-------|--------|-------------|
+| [ade_scoper.md](ade_scoper.md) | [@NikolasBielski](https://github.com/NikolasBielski), [@Koifman](https://github.com/Koifman) | Purple Team Planning, Detection Logic Bug aware, SIEM rule bypasses |
 | [api_testing.md](api_testing.md) | [@Shafranpackeer](https://github.com/Shafranpackeer) | JWT exploitation, GraphQL attacks, REST API vulns, 403 bypass |
 | [xss_exploitation.md](xss_exploitation.md) | [@Shafranpackeer](https://github.com/Shafranpackeer) | Reflected, stored, DOM-based XSS with WAF bypass techniques |
 | [sqli_exploitation.md](sqli_exploitation.md) | [@Shafranpackeer](https://github.com/Shafranpackeer) | Advanced SQL injection beyond sqlmap basics |
