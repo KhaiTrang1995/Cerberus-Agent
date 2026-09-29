@@ -81,4 +81,13 @@ describe('webCachePoison lens route', () => {
     shouldThrow = new Error('boom')
     expect((await route.GET(makeRequest('p1'))).status).toBe(500)
   })
+
+  test('nodeId is the finding node, mapped through and null when absent', async () => {
+    runReturn = [{ nodeId: '77', endpointUrl: 'http://t/a' }, { endpointUrl: 'http://t/b' }]
+    const body = await (await route.GET(makeRequest('p1'))).json()
+    expect(runCalls[0].cypher).toContain('toString(id(v))')
+    expect(runCalls[0].cypher).toMatch(/AS nodeId\b/)
+    expect(body.rows[0].nodeId).toBe('77')
+    expect(body.rows[1].nodeId).toBeNull()
+  })
 })

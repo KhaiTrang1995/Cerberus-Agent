@@ -13,6 +13,7 @@ import {
 import { WikiInfoButton } from '@/components/ui'
 import styles from './page.module.css'
 import { UpdatedAtCell, UpdatedAtTh, sortByUpdatedAt, useUpdatedAtSortDir } from '@/app/graph/components/RedZoneTables/updatedAt'
+import { NodeIdCell, NodeIdTh } from '@/app/graph/components/RedZoneTables/nodeId'
 
 const CHIP_BLUE = '#3b82f6'
 
@@ -553,6 +554,7 @@ export default function AiAttackSurfacePage() {
           <table className={styles.table}>
             <thead>
               <tr>
+                <NodeIdTh />
                 <th>Tool</th><th>OWASP</th><th>Attack</th><th>Target</th>
                 <th>ASR</th><th>Trials</th><th>Severity</th><th>Evidence</th><th>Report</th>
                 <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
@@ -561,6 +563,7 @@ export default function AiAttackSurfacePage() {
             <tbody>
               {sortByUpdatedAt(s.findings, sortDir).map((f) => (
                 <tr key={f.id}>
+                  <td><NodeIdCell value={f.nodeId} /></td>
                   <td>{f.source}</td>
                   <td>{f.owaspLlmId}</td>
                   <td>{f.payloadClass}</td>

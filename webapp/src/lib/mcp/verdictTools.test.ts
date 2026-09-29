@@ -129,6 +129,23 @@ describe('a failed write is never reported as success', () => {
     expect(err?.message).toMatch(/re-read list_findings/)
   })
 
+  test('an all-digit id is called out as the graph Node ID it probably is', async () => {
+    // list_findings returns `nodeId` (id(n)) beside `id`, and this tool's input
+    // is also named nodeId, so that is the likeliest wrong value to receive.
+    agentReturns({ updated: false, label: null })
+    const err = await setFindingVerdict(ctx(), 'p1', '1234', 'confirmed')
+      .then(() => null, (e: Error) => e)
+    expect(err?.message).toMatch(/"1234" looks like a graph Node ID/)
+    expect(err?.message).toMatch(/pass the finding's `id` instead/)
+  })
+
+  test('a real finding id gets no Node ID hint', async () => {
+    agentReturns({ updated: false, label: null })
+    const err = await setFindingVerdict(ctx(), 'p1', 'nuclei-9cf6109e', 'confirmed')
+      .then(() => null, (e: Error) => e)
+    expect(err?.message).not.toMatch(/Node ID/)
+  })
+
   test('the second failure shape, an invalid status, is reported too', async () => {
     agentReturns({ updated: false, reason: "invalid status 'x'" })
     await expect(setFindingVerdict(ctx(), 'p1', 'v1', 'confirmed'))

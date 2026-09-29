@@ -12,6 +12,8 @@ import {
   UpdatedAtTh,
   useUpdatedAtSort,
 } from './updatedAt'
+import { NODE_ID_COLUMN, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton } from '../MuteNode'
 import {
   SeverityBadge,
   Mono,
@@ -23,6 +25,7 @@ import {
 import rowStyles from './RedZoneTableRow.module.css'
 
 interface WcpRow {
+  nodeId: string | null
   endpointUrl: string | null
   baseUrl: string | null
   cacheHeader: string | null
@@ -49,6 +52,7 @@ const PAGE_SIZE = 100
 /** Module-level: the filter profiles are keyed off these, and a fresh array
  *  literal per render would re-profile every row. */
 const COLUMNS: RedZoneFilterColumn[] = [
+  NODE_ID_COLUMN,
   { key: 'endpointUrl', header: 'Endpoint' },
   { key: 'cacheHeader', header: 'Header' },
   { key: 'cacheParam', header: 'Param' },
@@ -120,6 +124,7 @@ export const WebCachePoisonTable = memo(function WebCachePoisonTable({ projectId
       <table className={rowStyles.table}>
         <thead>
           <tr>
+            <NodeIdTh />
             <th>Endpoint</th>
             <th>Unkeyed input</th>
             <th>Impact</th>
@@ -130,11 +135,13 @@ export const WebCachePoisonTable = memo(function WebCachePoisonTable({ projectId
             <th>Conf</th>
             <th>PoC</th>
             <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+            <th />
           </tr>
         </thead>
         <tbody>
           {sliced.map((r, i) => (
             <tr key={`${r.endpointUrl}-${r.cacheHeader || r.cacheParam}-${i}`}>
+              <td><NodeIdCell value={r.nodeId} /></td>
               <td><UrlCell url={r.endpointUrl} max={300} /></td>
               <td><Mono>{r.cacheHeader || (r.cacheParam ? `?${r.cacheParam}` : '-')}</Mono></td>
               <td><Mono>{r.impact || '-'}</Mono></td>
@@ -149,6 +156,7 @@ export const WebCachePoisonTable = memo(function WebCachePoisonTable({ projectId
                   : <Truncated text={r.curlVerify} max={40} />}
               </td>
               <td><UpdatedAtCell value={r.updatedAt} /></td>
+              <td><MuteNodeButton name={r.endpointUrl || r.baseUrl || 'cache poisoning finding'} graphId={r.nodeId} label="Vulnerability" /></td>
             </tr>
           ))}
         </tbody>

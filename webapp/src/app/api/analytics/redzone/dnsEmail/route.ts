@@ -50,7 +50,8 @@ export async function GET(request: NextRequest) {
             collect(DISTINCT CASE WHEN dns.type = 'TXT' THEN dns.value END) AS txtVals,
             collect(DISTINCT CASE WHEN dns.type = 'SOA' THEN dns.value END) AS soaVals,
             collect(DISTINCT coalesce(v.type, v.vulnerability_type, v.name)) AS vulnTagsRaw
-       RETURN d.name                              AS domain,
+       RETURN toString(id(d))                     AS nodeId,
+              d.name                              AS domain,
               d.dnssec                            AS dnssec,
               d.name_servers                      AS domainNameServers,
               d.whois_emails                      AS whoisEmails,
@@ -101,6 +102,7 @@ export async function GET(request: NextRequest) {
       const daysToExpiry  = daysFromIso(expirationIso)
 
       return {
+        nodeId: (r.get('nodeId') as string | null) ?? null,
         domain: (r.get('domain') as string) || '',
         spfPresent: !!spfRecord,
         spfStrict,

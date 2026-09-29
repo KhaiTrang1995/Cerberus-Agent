@@ -66,7 +66,8 @@ function renderTable(data: GraphData) {
 function bodyRowNames(container: HTMLElement): string[] {
   return [...container.querySelectorAll('tbody tr')]
     .filter(r => !r.className.includes('noMatchRow'))
-    .map(r => r.querySelector('td:nth-child(2)')?.textContent?.trim() ?? '')
+    // Columns are [expand, Node ID, Name, ...].
+    .map(r => r.querySelector('td:nth-child(3)')?.textContent?.trim() ?? '')
     .filter(Boolean)
 }
 

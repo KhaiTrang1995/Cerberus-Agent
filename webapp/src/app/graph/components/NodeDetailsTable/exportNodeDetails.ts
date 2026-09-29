@@ -7,6 +7,7 @@ import {
   streamMarkdownTableChunks,
   CSV_MIME,
 } from '../../utils/exportHelpers'
+import { NODE_ID_HEADER, formatNodeId } from '../RedZoneTables/nodeId'
 
 export interface NodeDetailsExportInput {
   nodeType: string
@@ -28,15 +29,20 @@ function slugForType(nodeType: string): string {
   return nodeType.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'nodes'
 }
 
+// Pinned first, like the table. Distinct from a node's own `id` property, which
+// (when visible) exports under its bare key `id`.
 function buildHeaders(input: NodeDetailsExportInput): string[] {
-  const headers: string[] = ['Name', ...input.visibleDynamicKeys]
+  const headers: string[] = [NODE_ID_HEADER, 'Name', ...input.visibleDynamicKeys]
   if (input.showIn) headers.push('In')
   if (input.showOut) headers.push('Out')
   return headers
 }
 
 function buildOneRow(row: TableRow, input: NodeDetailsExportInput): Record<string, unknown> {
-  const out: Record<string, unknown> = { Name: row.node.name }
+  const out: Record<string, unknown> = {
+    [NODE_ID_HEADER]: formatNodeId(row.node.id),
+    Name: row.node.name,
+  }
   for (const key of input.visibleDynamicKeys) {
     out[key] = row.node.properties[key]
   }

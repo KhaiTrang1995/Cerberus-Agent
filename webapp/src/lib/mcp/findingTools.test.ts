@@ -168,6 +168,26 @@ describe('list_findings projects the row down', () => {
       sectionName: 'resolved',
     })
   })
+
+  test('the graph node id the board shows travels as nodeId, beside the finding id', async () => {
+    agentReturns({ findings: [finding({ node_id: '4711' })], total: 1 })
+    const r = await listFindings(ctx(), 'p1')
+    expect(r.findings[0]).toMatchObject({ id: 'v1', nodeId: '4711' })
+    // Under its own name only: the snake_case original never leaks through.
+    expect(r.findings[0]).not.toHaveProperty('node_id')
+  })
+
+  test('an agent older than the column sends no node id, and none is invented', async () => {
+    agentReturns({ findings: [finding()], total: 1 })
+    expect((await listFindings(ctx(), 'p1')).findings[0]).not.toHaveProperty('nodeId')
+  })
+
+  test('a node id that is not a plain integer is dropped, not passed on', async () => {
+    agentReturns({ findings: [finding({ node_id: '4:abc:12' }), finding({ id: 'v2', node_id: 12 })], total: 2 })
+    const r = await listFindings(ctx(), 'p1')
+    expect(r.findings[0]).not.toHaveProperty('nodeId')
+    expect(r.findings[1]).not.toHaveProperty('nodeId')
+  })
 })
 
 describe('list_findings paging cannot pass a page off as the whole set', () => {
@@ -333,6 +353,13 @@ describe('list_muted_findings', () => {
     const r = await listMuted(ctx(), 'p1', { detail: true })
     expect(r.findings).toHaveLength(1)
     expect(r.findings![0]).toMatchObject({ muted_by: 'alice', muted_reason: 'accepted risk, internal only' })
+  })
+
+  test('detail rows carry the Node ID the Muted Nodes table shows, when the agent sends one', async () => {
+    agentReturns({ findings: [muted({ node_id: '812' }), muted({ id: 'm2' })] })
+    const r = await listMuted(ctx(), 'p1', { detail: true })
+    expect(r.findings![0]).toMatchObject({ id: 'm1', nodeId: '812' })
+    expect(r.findings![1]).not.toHaveProperty('nodeId')
   })
 
   test('detail rows are capped, because list_muted has no limit of its own', async () => {

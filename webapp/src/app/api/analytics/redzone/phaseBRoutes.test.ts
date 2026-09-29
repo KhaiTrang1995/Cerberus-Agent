@@ -179,6 +179,25 @@ describe('/api/analytics/redzone/paramMatrix', () => {
     expect(body.rows[0].cvssScore).toBe(7.5)
     expect(body.rows[1].vulnId).toBeNull()
   })
+
+  test('nodeId points at the linked Vulnerability, else the Parameter', async () => {
+    runReturn = [
+      { nodeId: '11', paramName: 'q', vulnId: 'v1' },
+      { nodeId: null, paramName: 'id', vulnId: null },
+    ]
+    const body = await (await paramMatrixRoute.GET(makeRequest('p1'))).json()
+    expect(runCalls[0].cypher).toMatch(/toString\(id\(coalesce\(v, p\)\)\)\s+AS nodeId/)
+    expect(body.rows.map((r: { nodeId: string | null }) => r.nodeId)).toEqual(['11', null])
+  })
+})
+
+describe('/api/analytics/redzone/webInitAccess nodeId', () => {
+  test('anchors on the BaseURL the row aggregates by', async () => {
+    runReturn = [{ nodeId: '7', baseUrl: 'https://a', securityHeadersPresent: [], vulnTags: [] }]
+    const body = await (await webInitRoute.GET(makeRequest('p1'))).json()
+    expect(runCalls[0].cypher).toMatch(/toString\(id\(bu\)\)\s+AS nodeId/)
+    expect(body.rows[0].nodeId).toBe('7')
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -344,5 +363,32 @@ describe('/api/analytics/redzone/dnsEmail', () => {
     expect(r.dnssecMissing).toBe(true)
     expect(r.dnssecEnabled).toBe(false)
     expect(r.zoneTransferOpen).toBe(true)
+  })
+})
+
+describe('/api/analytics/redzone/sharedInfra nodeId', () => {
+  // An ASN is a property shared by many IP nodes, not a node, so that arm has
+  // nothing to point at; the other two point at the node they cluster on.
+  test('cert and IP arms project their node, the ASN arm projects null', async () => {
+    runReturn = [
+      { nodeId: '5', clusterType: 'ip', hostCount: { low: 2, high: 0 } },
+      { clusterType: 'ip', hostCount: { low: 2, high: 0 } },
+    ]
+    const body = await (await sharedInfraRoute.GET(makeRequest('p1'))).json()
+    expect(runCalls[0].cypher).toMatch(/toString\(id\(cert\)\)\s+AS nodeId/)
+    expect(runCalls[1].cypher).toMatch(/null\s+AS nodeId/)
+    expect(runCalls[2].cypher).toMatch(/toString\(id\(ip\)\)\s+AS nodeId/)
+    const ids = body.rows.map((r: { nodeId: string | null }) => r.nodeId)
+    expect(ids.filter((x: string | null) => x === '5')).toHaveLength(3)
+    expect(ids.filter((x: string | null) => x === null)).toHaveLength(3)
+  })
+})
+
+describe('/api/analytics/redzone/dnsEmail nodeId', () => {
+  test('anchors on the Domain the row is grouped by', async () => {
+    runReturn = [{ nodeId: '9', domain: 'example.com', dnssec: null, expirationDate: null }]
+    const body = await (await dnsEmailRoute.GET(makeRequest('p1'))).json()
+    expect(runCalls[0].cypher).toMatch(/toString\(id\(d\)\)\s+AS nodeId/)
+    expect(body.rows[0].nodeId).toBe('9')
   })
 })

@@ -21,23 +21,25 @@ import { JsReconTable } from './JsReconTable'
 
 const PROJECT = 'proj-1'
 
+// `nodeId` is the internal graph id the route projects; `id` is the node's own
+// stored id property. They are different values on purpose.
 const DATA = {
   secrets: [
-    { id: 's1', severity: 'critical', name: 'aws_key', redacted_value: 'AKIA…', category: 'cloud',
+    { nodeId: '101', id: 's1', severity: 'critical', name: 'aws_key', redacted_value: 'AKIA…', category: 'cloud',
       source_url: 'https://a.invalid/app.js', detection_method: 'regex', confidence: 0.9,
       validation: { status: 'validated' } },
-    { id: 's2', severity: 'low', name: 'generic_token', redacted_value: 'tok…', category: 'generic',
+    { nodeId: '102', id: 's2', severity: 'low', name: 'generic_token', redacted_value: 'tok…', category: 'generic',
       source_url: 'https://b.invalid/vendor.js', detection_method: 'entropy', confidence: 0.3,
       validation: { status: 'unvalidated' } },
   ],
   endpoints: [
-    { id: 'e1', severity: 'info', method: 'GET', path: '/api/v1/users', type: 'rest', category: 'api',
+    { nodeId: '201', id: 'e1', severity: 'info', method: 'GET', path: '/api/v1/users', type: 'rest', category: 'api',
       base_url: 'https://a.invalid', source_js: 'app.js' },
-    { id: 'e2', severity: 'info', method: 'POST', path: '/api/v1/login', type: 'rest', category: 'auth',
+    { nodeId: '202', id: 'e2', severity: 'info', method: 'POST', path: '/api/v1/login', type: 'rest', category: 'auth',
       base_url: 'https://a.invalid', source_js: 'app.js' },
   ],
-  dom_sinks: [{ id: 'd1', severity: 'medium', finding_type: 'sink', type: 'innerHTML', pattern: 'x' }],
-  frameworks: [{ id: 'f1', name: 'react', version: '18' }],
+  dom_sinks: [{ nodeId: '301', id: 'd1', severity: 'medium', finding_type: 'sink', type: 'innerHTML', pattern: 'x' }],
+  frameworks: [{ nodeId: '401', id: 'f1', name: 'react', version: '18' }],
 }
 
 interface PatchCall { featureKey: string; value: any }
@@ -152,6 +154,13 @@ describe('JS Recon column filters', () => {
     await waitFor(() => expect(rowCount(container)).toBe(2))
   })
 
+  test('the Node ID column is filterable', async () => {
+    installFetch()
+    renderTable()
+    await openFilters()
+    expect(screen.getByRole('button', { name: /^Filter by Node ID/ })).toBeTruthy()
+  })
+
   test('a tab that stacks several row shapes offers no column filter', async () => {
     installFetch()
     renderTable()
@@ -190,5 +199,35 @@ describe('JS Recon filter persistence', () => {
     const { container } = renderTable()
     await waitFor(() => expect(rowCount(container)).toBe(1))
     expect(await screen.findByText(/Severity is low/)).toBeTruthy()
+  })
+})
+
+describe('JS Recon Node ID column', () => {
+  function firstHeaders(container: HTMLElement): string[] {
+    return [...container.querySelectorAll('table')].map(
+      t => t.querySelector('thead th')?.textContent?.trim() ?? '')
+  }
+
+  function firstCellIds(container: HTMLElement): (string | null)[] {
+    return [...container.querySelectorAll('tbody tr')].map(
+      r => r.querySelector('td')?.querySelector('[data-node-id]')?.getAttribute('data-node-id') ?? null)
+  }
+
+  test('leads the secrets table with the graph id, not the id property', async () => {
+    installFetch()
+    const { container } = renderTable()
+    await waitFor(() => expect(rowCount(container)).toBe(2))
+    expect(firstHeaders(container)).toEqual(['Node ID'])
+    expect(firstCellIds(container).sort()).toEqual(['101', '102'])
+  })
+
+  test('leads every stacked table on the Security tab', async () => {
+    installFetch()
+    const { container } = renderTable()
+    await screen.findByRole('button', { name: /^Filters/i })
+    await goToTab('Security')
+    // Frameworks + DOM Sinks, each with its own header row.
+    await waitFor(() => expect(firstHeaders(container)).toEqual(['Node ID', 'Node ID']))
+    expect(firstCellIds(container)).toEqual(['401', '301'])
   })
 })

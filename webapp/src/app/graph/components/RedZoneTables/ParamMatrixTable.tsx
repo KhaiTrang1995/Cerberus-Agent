@@ -11,6 +11,8 @@ import {
   UpdatedAtTh,
   useUpdatedAtSort,
 } from './updatedAt'
+import { NODE_ID_COLUMN, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton } from '../MuteNode'
 import { ExternalLink } from '@/components/ui'
 import {
   SeverityBadge,
@@ -26,6 +28,8 @@ import { normalizeSeverity } from './types'
 import rowStyles from './RedZoneTableRow.module.css'
 
 interface ParamRow {
+  /** The linked Vulnerability when the row has one, else the Parameter. */
+  nodeId: string | null
   paramName: string
   position: string
   endpointPath: string | null
@@ -73,6 +77,7 @@ function PositionChip({ position }: { position: string }) {
 /** Module-level: the filter profiles are keyed off these, and a fresh array
  *  literal per render would re-profile every row. */
 const COLUMNS: RedZoneFilterColumn[] = [
+  NODE_ID_COLUMN,
   { key: 'paramName', header: 'Parameter' },
   { key: 'position', header: 'Position' },
   { key: 'endpointMethod', header: 'Method' },
@@ -148,6 +153,7 @@ export const ParamMatrixTable = memo(function ParamMatrixTable({ projectId }: Pr
       <table className={rowStyles.table}>
         <thead>
           <tr>
+            <NodeIdTh />
             <th>Parameter</th>
             <th>Position</th>
             <th>Method</th>
@@ -159,11 +165,13 @@ export const ParamMatrixTable = memo(function ParamMatrixTable({ projectId }: Pr
             <th>Matched At</th>
             <th>Subdomain</th>
             <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+            <th />
           </tr>
         </thead>
         <tbody>
           {sliced.map((r, i) => (
             <tr key={`${r.paramName}-${r.endpointPath}-${r.vulnId || ''}-${i}`}>
+              <td><NodeIdCell value={r.nodeId} /></td>
               <td><Mono>{r.paramName}</Mono></td>
               <td><PositionChip position={r.position} /></td>
               <td>{r.endpointMethod ? <Mono>{r.endpointMethod}</Mono> : <span className={rowStyles.nullCell}>-</span>}</td>
@@ -183,6 +191,7 @@ export const ParamMatrixTable = memo(function ParamMatrixTable({ projectId }: Pr
               <td><UrlCell url={r.matchedAt} max={240} /></td>
               <td>{r.subdomain ? <HostCell host={r.subdomain} /> : <Truncated text={r.subdomain} max={160} />}</td>
               <td><UpdatedAtCell value={r.updatedAt} /></td>
+              <td><MuteNodeButton name={r.vulnName || r.paramName} graphId={r.nodeId} nodeId={r.vulnId} label={r.vulnId ? 'Vulnerability' : 'Parameter'} /></td>
             </tr>
           ))}
         </tbody>

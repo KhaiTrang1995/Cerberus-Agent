@@ -6,6 +6,7 @@ import { severityColor } from '../utils/chartTheme'
 import { ChartCard } from './ChartCard'
 import styles from './TopFindingsTable.module.css'
 import { UpdatedAtCell, UpdatedAtTh, sortByUpdatedAt, useUpdatedAtSortDir } from '@/app/graph/components/RedZoneTables/updatedAt'
+import { NodeIdCell, NodeIdTh } from '@/app/graph/components/RedZoneTables/nodeId'
 import type { AttackChainsData } from '../types'
 
 interface TopFindingsTableProps {
@@ -26,6 +27,7 @@ export function TopFindingsTable({ data, isLoading }: TopFindingsTableProps) {
         <table className={styles.table}>
           <thead>
             <tr>
+              <NodeIdTh />
               <th>Severity</th>
               <th>Title</th>
               <th>Type</th>
@@ -38,6 +40,7 @@ export function TopFindingsTable({ data, isLoading }: TopFindingsTableProps) {
           <tbody>
             {rows.map((f, i) => (
               <tr key={i}>
+                <td><NodeIdCell value={f.nodeId} /></td>
                 <td>
                   <span className={styles.sevBadge} style={{ background: severityColor(f.severity) }}>
                     {f.severity}

@@ -711,3 +711,113 @@ describe('/api/analytics/redzone/graphql', () => {
     expect(r.vulnTypes).toEqual(['graphql_introspection_enabled', 'graphql_graphiql_exposed'])
   })
 })
+
+// ---------------------------------------------------------------------------
+// Node ID: every query that feeds rows projects the id of the node the row is
+// about, and the mapper carries it through. A query that forgets it renders a
+// silent `-` column, so each one is checked, not just the first.
+// ---------------------------------------------------------------------------
+describe('nodeId column', () => {
+  test.each([
+    ['killChain', killChainRoute.GET, 1],
+    ['blastRadius', blastRadiusRoute.GET, 1],
+    ['takeover', takeoverRoute.GET, 1],
+    ['secrets', secretsRoute.GET, 5],
+    ['netInitAccess', netInitAccessRoute.GET, 2],
+    ['graphql', graphqlRoute.GET, 1],
+  ])('%s projects nodeId in every row query', async (_, handler, queries) => {
+    await handler(makeRequest('p1'))
+    expect(runCalls).toHaveLength(queries)
+    for (const call of runCalls) expect(call.cypher).toMatch(/\bAS nodeId\b/)
+  })
+
+  test.each([
+    ['killChain', killChainRoute.GET, [/toString\(id\(tech\)\)\s+AS nodeId/]],
+    ['blastRadius', blastRadiusRoute.GET, [/toString\(id\(t\)\)\s+AS nodeId/]],
+    ['takeover', takeoverRoute.GET, [/toString\(id\(v\)\)\s+AS nodeId/]],
+    ['secrets', secretsRoute.GET, [
+      /toString\(id\(s\)\)\s+AS nodeId/,
+      /toString\(id\(tf\)\)\s+AS nodeId/,
+      /toString\(id\(gs\)\)\s+AS nodeId/,
+      /toString\(id\(gsf\)\)\s+AS nodeId/,
+      /toString\(id\(f\)\)\s+AS nodeId/,
+    ]],
+    ['netInitAccess', netInitAccessRoute.GET, [
+      /toString\(id\(p\)\)\s+AS nodeId/,
+      /count\(DISTINCT v\) WHEN 1 THEN toString\(id\(head\(collect\(v\)\)\)\)/,
+    ]],
+    ['graphql', graphqlRoute.GET, [/toString\(id\(ep\)\)\s+AS nodeId/]],
+  ])('%s anchors each query on the node its row is about', async (_, handler, anchors) => {
+    await handler(makeRequest('p1'))
+    anchors.forEach((re, i) => expect(runCalls[i].cypher).toMatch(re))
+  })
+
+  test('killChain never anchors on the CVE, which MCP cannot address by id', async () => {
+    // CVE nodes are global: the tenant filter MCP injects into `(n)` can never
+    // match one, so an id(c) would read as a dead node to an external agent.
+    await killChainRoute.GET(makeRequest('p1'))
+    expect(runCalls[0].cypher).not.toMatch(/id\(c\)/)
+  })
+
+  test.each([
+    ['killChain', killChainRoute.GET],
+    ['blastRadius', blastRadiusRoute.GET],
+    ['takeover', takeoverRoute.GET],
+    ['secrets', secretsRoute.GET],
+    ['netInitAccess', netInitAccessRoute.GET],
+    ['graphql', graphqlRoute.GET],
+  ])('%s maps nodeId onto every row, and a missing one to null', async (_, handler) => {
+    runReturn = [{ nodeId: '4242' }]
+    const withId = await (await handler(makeRequest('p1'))).json()
+    expect(withId.rows.length).toBeGreaterThan(0)
+    for (const row of withId.rows) expect(row.nodeId).toBe('4242')
+
+    runCalls.length = 0
+    runReturn = [{}]
+    const without = await (await handler(makeRequest('p1'))).json()
+    for (const row of without.rows) expect(row).toHaveProperty('nodeId', null)
+  })
+
+  test('netInitAccess: a vuln row merged into a port row keeps the Port id', async () => {
+    runReturnFor = [
+      { match: /'port'\s+AS origin/, rows: [
+        { nodeId: '10', ipAddress: '1.2.3.4', port: { low: 6379, high: 0 }, vulnTags: [] },
+      ] },
+      { match: /'vuln'\s+AS origin/, rows: [
+        { nodeId: '20', ipAddress: '1.2.3.4', port: { low: 6379, high: 0 }, vulnTags: ['redis_no_auth'] },
+        { nodeId: '30', ipAddress: '5.6.7.8', port: null, vulnTags: ['waf_bypass'] },
+      ] },
+    ]
+    const body = await (await netInitAccessRoute.GET(makeRequest('p1'))).json()
+    const byIp = Object.fromEntries(body.rows.map((r: { ipAddress: string, nodeId: string }) => [r.ipAddress, r.nodeId]))
+    expect(byIp).toEqual({ '1.2.3.4': '10', '5.6.7.8': '30' })
+  })
+
+  test('netInitAccess: finding rows merged on one ip:port point at the IP, not the first finding', async () => {
+    // Part B groups on the finding's timestamp, so three findings on one host a
+    // few ms apart arrive as three one-finding rows and the JS merge folds them.
+    // The merged row lists all three tags; its id must not name just one of them.
+    runReturnFor = [
+      { match: /'port'\s+AS origin/, rows: [] },
+      { match: /'vuln'\s+AS origin/, rows: [
+        { nodeId: '535', ipNodeId: '7', ipAddress: '1.2.3.4', port: null, vulnTags: ['waf_bypass'] },
+        { nodeId: '534', ipNodeId: '7', ipAddress: '1.2.3.4', port: null, vulnTags: ['direct_ip_https'] },
+        { nodeId: '533', ipNodeId: '7', ipAddress: '1.2.3.4', port: null, vulnTags: ['direct_ip_http'] },
+        { nodeId: '600', ipNodeId: '8', ipAddress: '5.6.7.8', port: null, vulnTags: ['waf_bypass'] },
+      ] },
+    ]
+    const body = await (await netInitAccessRoute.GET(makeRequest('p1'))).json()
+    const merged = body.rows.find((r: { ipAddress: string }) => r.ipAddress === '1.2.3.4')
+    expect(merged.vulnTags).toEqual(['waf_bypass', 'direct_ip_https', 'direct_ip_http'])
+    expect(merged.nodeId).toBe('7')
+    // A lone finding still points at itself.
+    expect(body.rows.find((r: { ipAddress: string }) => r.ipAddress === '5.6.7.8').nodeId).toBe('600')
+    // The merge key is internal; it must not reach the table or its exports.
+    for (const r of body.rows) expect(r).not.toHaveProperty('ipNodeId')
+  })
+
+  test('netInitAccess projects the IP id beside each finding row, for the merge', async () => {
+    await netInitAccessRoute.GET(makeRequest('p1'))
+    expect(runCalls[1].cypher).toMatch(/toString\(id\(head\(collect\(ip\)\)\)\)\s+AS ipNodeId/)
+  })
+})

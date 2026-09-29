@@ -71,20 +71,24 @@ function installFetch() {
   ) as typeof fetch
 }
 
-/** Text of the LAST cell of each body row - the Updated column. */
+/** Text of the Updated cell of each body row: the last data cell, before the
+ *  Mute action. */
 function updatedCells(container: HTMLElement): string[] {
   return [...container.querySelectorAll('tbody tr')]
     .filter(r => r.querySelectorAll('td').length > 1)   // skip expanded detail rows
     .map(r => {
       const tds = r.querySelectorAll('td')
-      return tds[tds.length - 1]?.textContent?.trim() ?? ''
+      return tds[tds.length - 2]?.textContent?.trim() ?? ''
     })
 }
+
+/** Columns are [expand, Node ID, Type, Name, ...]. */
+const NAME_TD = 3
 
 function nameCells(container: HTMLElement): string[] {
   return [...container.querySelectorAll('tbody tr')]
     .filter(r => r.querySelectorAll('td').length > 1)
-    .map(r => r.querySelectorAll('td')[2]?.textContent?.trim() ?? '')
+    .map(r => r.querySelectorAll('td')[NAME_TD]?.textContent?.trim() ?? '')
 }
 
 afterEach(() => { cleanup(); vi.clearAllMocks() })
@@ -112,13 +116,14 @@ describe('All Nodes / Updated column', () => {
     expect(cells.filter(c => c === '-')).toHaveLength(1) // only the undated node
   })
 
-  test('is the rightmost column', async () => {
+  test('is the rightmost data column, with only the Mute action after it', async () => {
     installFetch()
     const { container } = render(<Harness />, { wrapper: makeWrapper() })
     await waitFor(() => expect(container.querySelectorAll('tbody tr').length).toBeGreaterThan(0))
 
     const headers = [...container.querySelectorAll('thead th')].map(th => th.textContent?.trim() ?? '')
-    expect(headers[headers.length - 1]).toContain('Updated')
+    expect(headers[headers.length - 2]).toContain('Updated')
+    expect(headers[headers.length - 1]).toBe('')
   })
 
   test('lands sorted newest-first, with the undated node last', async () => {

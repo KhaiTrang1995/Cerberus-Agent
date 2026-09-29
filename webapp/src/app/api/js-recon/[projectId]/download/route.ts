@@ -41,7 +41,19 @@ interface JsReconResponse {
 
 function generateEtag(data: JsReconResponse): string {
   const raw = `${data.secrets.length}:${data.endpoints.length}:${data.dependencies.length}:${data.dom_sinks.length}:${data.frameworks.length}:${data.source_maps.length}:${data.dev_comments.length}:${data.emails.length}:${data.ip_addresses.length}:${data.object_references.length}:${data.cloud_assets.length}:${data.external_domains.length}`
-  return createHash('md5').update(raw).digest('hex').slice(0, 16)
+  const hash = createHash('md5').update(raw)
+  // A rescan recreates the nodes, usually with the same counts but new ids. A
+  // count-only tag would 304 and leave the Node ID column pointing at deleted
+  // nodes, so the ids are part of the tag.
+  for (const list of [
+    data.secrets, data.endpoints, data.dependencies, data.dom_sinks, data.frameworks,
+    data.source_maps, data.dev_comments, data.emails, data.ip_addresses,
+    data.object_references, data.cloud_assets, data.external_domains,
+  ]) {
+    for (const row of list) hash.update(`${row.nodeId ?? ''},`)
+    hash.update('|')
+  }
+  return hash.digest('hex').slice(0, 16)
 }
 
 interface RouteParams {
@@ -79,7 +91,8 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       `
       MATCH (jf:JsReconFinding {project_id: $pid})
       WHERE ${notMuted('jf')}
-      RETURN jf.finding_type AS findingType,
+      RETURN toString(id(jf)) AS nodeId,
+             jf.finding_type AS findingType,
              jf.severity AS severity,
              jf.confidence AS confidence,
              jf.title AS title,
@@ -103,7 +116,8 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       `
       MATCH (s:Secret {project_id: $pid, source: 'js_recon'})
       WHERE ${notMuted('s')}
-      RETURN s.id AS id,
+      RETURN toString(id(s)) AS nodeId,
+             s.id AS id,
              s.secret_type AS name,
              s.severity AS severity,
              s.sample AS redacted_value,
@@ -127,7 +141,8 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       WHERE e.source = 'js_recon' OR e.js_recon_source = true
       OPTIONAL MATCH (jf:JsReconFinding {finding_type: 'js_file'})-[:HAS_ENDPOINT]->(e)
         WHERE ${notMuted('jf')}
-      RETURN e.path AS path,
+      RETURN toString(id(e)) AS nodeId,
+             e.path AS path,
              e.method AS method,
              e.full_url AS full_url,
              e.endpoint_type AS type,
@@ -155,6 +170,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     for (const record of findingsResult.records) {
       const type = record.get('findingType')
       const base = {
+        nodeId: record.get('nodeId') ?? null,
         id: record.get('id'),
         severity: record.get('severity'),
         confidence: record.get('confidence'),
@@ -206,6 +222,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
           break
         case 'email':
           emails.push({
+            nodeId: base.nodeId,
             email: base.title,
             category: 'unknown',
             source_url: base.source_url,
@@ -215,6 +232,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
           break
         case 'internal_ip':
           ip_addresses.push({
+            nodeId: base.nodeId,
             ip: base.title,
             type: base.evidence || 'private',
             source_url: base.source_url,
@@ -224,6 +242,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
           break
         case 'object_reference':
           object_references.push({
+            nodeId: base.nodeId,
             type: base.evidence || 'uuid',
             value: base.title,
             source_url: base.source_url,
@@ -234,6 +253,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
           break
         case 'cloud_asset':
           cloud_assets.push({
+            nodeId: base.nodeId,
             provider: record.get('cloudProvider') || base.evidence,
             type: record.get('cloudAssetType') || 'cloud_asset',
             url: base.title,
@@ -244,6 +264,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
         case 'external_domain': {
           const ts = record.get('timesSeen')
           external_domains.push({
+            nodeId: base.nodeId,
             domain: base.title,
             source: 'js_recon',
             urls: record.get('sampleUrls') || [],
@@ -263,6 +284,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
         try { validation = JSON.parse(vi) } catch {}
       }
       return {
+        nodeId: r.get('nodeId') ?? null,
         id: r.get('id'),
         name: r.get('name'),
         severity: r.get('severity'),
@@ -279,6 +301,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
 
     // Map endpoints
     const endpoints = endpointsResult.records.map((r: any) => ({
+      nodeId: r.get('nodeId') ?? null,
       method: r.get('method'),
       path: r.get('path'),
       full_url: r.get('full_url'),

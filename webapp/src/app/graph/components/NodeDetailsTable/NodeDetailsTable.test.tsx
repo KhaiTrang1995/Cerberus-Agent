@@ -286,7 +286,7 @@ describe('NodeDetailsTable', () => {
     })
   })
 
-  test('In, Out and Updated occupy the rightmost positions, in that order', async () => {
+  test('In, Out and Updated are the rightmost data columns, then only the Mute action', async () => {
     const { container } = render(
       <NodeDetailsTable data={makeData()} isLoading={false} error={null} />,
       { wrapper: makeWrapper() }
@@ -298,17 +298,51 @@ describe('NodeDetailsTable', () => {
     const headers = Array.from(container.querySelectorAll('thead tr th')).map(
       th => th.textContent?.trim() ?? ''
     )
-    // `Updated` is pinned last so it sits in the same place on every node
-    // type, with In/Out immediately before it.
-    expect(headers[headers.length - 3]).toBe('In')
-    expect(headers[headers.length - 2]).toBe('Out')
-    expect(headers[headers.length - 1]).toBe('Updated')
+    // `Updated` is pinned last among the data columns so it sits in the same
+    // place on every node type, with In/Out immediately before it. The
+    // untitled Mute action column is the only thing to its right.
+    expect(headers[headers.length - 4]).toBe('In')
+    expect(headers[headers.length - 3]).toBe('Out')
+    expect(headers[headers.length - 2]).toBe('Updated')
+    expect(headers[headers.length - 1]).toBe('')
     // Dynamic property columns must come before all three
     const inIdx = headers.indexOf('In')
     expect(headers.indexOf('registrar')).toBeLessThan(inIdx)
     expect(headers.indexOf('country')).toBeLessThan(inIdx)
     // ...and `updated_at` must NOT also appear as a dynamic property column
     expect(headers.filter(h => h === 'updated_at')).toHaveLength(0)
+  })
+
+  test('Node ID is the first data column and shows the graph id, not the `id` property', async () => {
+    // Graph ids as /api/graph builds them (`${identity.low}`), on a label that
+    // also carries its own `id` property.
+    const data: GraphData = {
+      nodes: [
+        { id: '17', name: 'CVE-2021-44228', type: 'CVE', properties: { id: 'CVE-2021-44228', cvss: 10 } },
+        { id: '9', name: 'CVE-2014-0160', type: 'CVE', properties: { id: 'CVE-2014-0160', cvss: 7.5 } },
+      ],
+      links: [],
+      projectId: 'test-project',
+    }
+    const { container } = render(
+      <NodeDetailsTable data={data} isLoading={false} error={null} />,
+      { wrapper: makeWrapper() }
+    )
+    await waitFor(() => expect(container.querySelectorAll('tbody tr').length).toBe(2))
+
+    const headers = Array.from(container.querySelectorAll('thead tr th')).map(
+      th => th.textContent?.trim() ?? ''
+    )
+    expect(headers[0]).toBe('') // expand toggle
+    expect(headers[1]).toBe('Node ID')
+    expect(headers[2]).toBe('Name')
+    // The `id` property keeps its own column.
+    expect(headers).toContain('id')
+
+    const ids = Array.from(container.querySelectorAll('tbody tr')).map(
+      r => r.querySelectorAll('td')[1].querySelector('[data-node-id]')?.getAttribute('data-node-id')
+    )
+    expect(ids.sort()).toEqual(['17', '9'])
   })
 
   test('In and Out are listed as toggleable items in the Columns menu', async () => {

@@ -11,6 +11,8 @@ import {
   UpdatedAtTh,
   useUpdatedAtSort,
 } from './updatedAt'
+import { NODE_ID_COLUMN, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton } from '../MuteNode'
 import { ExternalLink } from '@/components/ui'
 import { isHttpUrl, resolveLinkable } from '@/lib/url-utils'
 import {
@@ -24,6 +26,7 @@ import {
 import rowStyles from './RedZoneTableRow.module.css'
 
 interface ThreatIntelRow {
+  nodeId: string | null
   assetType: 'Domain' | 'IP' | string
   asset: string
   vtMaliciousCount: number | null
@@ -90,6 +93,7 @@ function GradeChip({ grade }: { grade: string | null }) {
 /** Module-level: the filter profiles are keyed off these, and a fresh array
  *  literal per render would re-profile every row. */
 const COLUMNS: RedZoneFilterColumn[] = [
+  NODE_ID_COLUMN,
   { key: 'assetType', header: 'Type' },
   { key: 'asset', header: 'Asset' },
   { key: 'vtMaliciousCount', header: 'VT Malicious' },
@@ -177,6 +181,7 @@ export const ThreatIntelTable = memo(function ThreatIntelTable({ projectId }: Pr
       <table className={rowStyles.table}>
         <thead>
           <tr>
+            <NodeIdTh />
             <th>Type</th>
             <th>Asset</th>
             <th>VT mal.</th>
@@ -190,11 +195,13 @@ export const ThreatIntelTable = memo(function ThreatIntelTable({ projectId }: Pr
             <th>Tags</th>
             <th>Contacted host</th>
             <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+            <th />
           </tr>
         </thead>
         <tbody>
           {sliced.map((r, i) => (
             <tr key={`${r.assetType}-${r.asset}-${i}`}>
+              <td><NodeIdCell value={r.nodeId} /></td>
               <td><span className={rowStyles.listChip}>{r.assetType}</span></td>
               <td><Mono>{(() => {
                 const href = resolveLinkable(r.asset)
@@ -242,6 +249,7 @@ export const ThreatIntelTable = memo(function ThreatIntelTable({ projectId }: Pr
                 ) : <span className={rowStyles.nullCell}>-</span>}
               </td>
               <td><UpdatedAtCell value={r.updatedAt} /></td>
+              <td><MuteNodeButton name={r.asset} graphId={r.nodeId} label={r.assetType} /></td>
             </tr>
           ))}
         </tbody>

@@ -24,7 +24,8 @@ export async function GET(request: NextRequest) {
       `MATCH (v:Vulnerability {project_id: $pid, source: 'takeover_scan'})
        WHERE ${notMuted('v')}
        OPTIONAL MATCH (parent)-[:HAS_VULNERABILITY]->(v)
-       RETURN v.id                   AS id,
+       RETURN toString(id(v))       AS nodeId,
+              v.id                   AS id,
               coalesce(v.hostname, v.host, parent.name) AS hostname,
               labels(parent)[0]     AS parentType,
               v.cname_target        AS cnameTarget,
@@ -48,6 +49,7 @@ export async function GET(request: NextRequest) {
     )
 
     const rows = result.records.map(r => ({
+      nodeId: (r.get('nodeId') as string | null) ?? null,
       id: (r.get('id') as string) || '',
       hostname: (r.get('hostname') as string) || '',
       parentType: (r.get('parentType') as string) || 'Subdomain',

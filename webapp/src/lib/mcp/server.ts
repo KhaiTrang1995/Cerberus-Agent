@@ -383,6 +383,15 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
         'This is the primary graph tool - prefer it. Pass "question" and it handles the schema ' +
         'for you. "cypher" is for callers that already know exactly what they want and requires ' +
         'a separate permission on the token.\n\n' +
+        'Every node in a result carries `nodeId`: the Node ID the RedAmon UI shows in the ' +
+        'leftmost column of its tables. When the user gives you one, ask about it directly ' +
+        '("what is node 1234 and what is it connected to?"); that works without knowing the ' +
+        'node\'s type. In "cypher" it is `id(n)` compared with an integer, never `n.id` (a ' +
+        'different property), and the pattern must name a label: ' +
+        '`MATCH (n:Vulnerability) WHERE id(n) = 1234`. The shared CVE, CWE and CAPEC reference ' +
+        'nodes are the exception: they are not reachable by Node ID alone, so look them up by ' +
+        'their public id (e.g. the CVE id) instead. A Node ID is only valid until the next ' +
+        'rescan of that data.\n\n' +
         `${GRAPH_TOOL_USAGE}\n\n${UNTRUSTED_DATA_NOTE}`,
       annotations: READ_ONLY,
       _meta: scopesMeta({
@@ -419,6 +428,9 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
         'STOPPED REPORTING it, which is not the same as someone having fixed it.\n\n' +
         'A finding id is only valid until the next scan of that source: a rescan can delete and ' +
         're-create the node.\n\n' +
+        'Each finding carries two ids. `id` is the finding\'s key: set_finding_verdict takes it. ' +
+        '`nodeId` is the graph Node ID the RedAmon Priority Board shows in its leftmost column, ' +
+        'and the one query_graph looks up with `id(n)`.\n\n' +
         `${UNTRUSTED_DATA_NOTE}`,
       annotations: READ_ONLY,
       _meta: scopesMeta({ required: ['recon:read'] }),
@@ -461,7 +473,9 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
         'rule mutes apart from people\'s, and do not treat a suppression as a mistake to correct: ' +
         'nothing on this surface can unmute.\n\n' +
         'Returns counts and reasons grouped by who muted, type and severity. Pass detail for the ' +
-        'individual rows, which are capped; a person\'s mutes come first.\n\n' +
+        'individual rows, which are capped; a person\'s mutes come first. A row\'s `nodeId` ' +
+        'matches the Node ID the Muted Nodes table shows, but query_graph cannot look it up: ' +
+        'muted findings are invisible there.\n\n' +
         `${UNTRUSTED_DATA_NOTE}`,
       annotations: READ_ONLY,
       _meta: scopesMeta({ required: ['triage:read'] }),
@@ -866,7 +880,10 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
         nodeId: z.string().min(1).max(200).regex(
           /^[A-Za-z0-9_.:-]+$/,
           'nodeId must be alphanumeric (with - _ . or :)'
-        ).describe('The finding id, from list_findings.'),
+        ).describe(
+          'The finding\'s `id` field, from list_findings. NOT its `nodeId`: that is the graph ' +
+          'Node ID, a different value, and a verdict sent to it is not recorded.'
+        ),
         status: z.enum(VERDICT_STATUSES as unknown as [string, ...string[]])
           .describe('confirmed | likely_noise | unreviewed'),
         reason: z.string().max(500).optional().describe('One line, why. Recorded with the verdict.'),

@@ -11,6 +11,8 @@ import {
   UpdatedAtTh,
   useUpdatedAtSort,
 } from './updatedAt'
+import { NODE_ID_COLUMN, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton } from '../MuteNode'
 import { ExternalLink } from '@/components/ui'
 import { resolveLinkable } from '@/lib/url-utils'
 import {
@@ -23,6 +25,7 @@ import {
 import rowStyles from './RedZoneTableRow.module.css'
 
 interface SharedInfraRow {
+  nodeId: string | null
   clusterType: 'certificate' | 'asn' | 'ip' | string
   clusterKey: string
   certCn: string | null
@@ -63,6 +66,7 @@ function daysToExpiry(iso: string | null): number | null {
 /** Module-level: the filter profiles are keyed off these, and a fresh array
  *  literal per render would re-profile every row. */
 const COLUMNS: RedZoneFilterColumn[] = [
+  NODE_ID_COLUMN,
   { key: 'clusterType', header: 'Type' },
   { key: 'clusterKey', header: 'Cluster Key' },
   { key: 'hostCount', header: 'Host Count' },
@@ -134,6 +138,7 @@ export const SharedInfraTable = memo(function SharedInfraTable({ projectId }: Pr
       <table className={rowStyles.table}>
         <thead>
           <tr>
+            <NodeIdTh />
             <th>Type</th>
             <th>Cluster Key</th>
             <th>Hosts</th>
@@ -143,6 +148,7 @@ export const SharedInfraTable = memo(function SharedInfraTable({ projectId }: Pr
             <th>Days to expiry</th>
             <th>ASN / Country</th>
             <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+            <th />
           </tr>
         </thead>
         <tbody>
@@ -150,6 +156,7 @@ export const SharedInfraTable = memo(function SharedInfraTable({ projectId }: Pr
             const days = daysToExpiry(r.certNotAfter)
             return (
               <tr key={`${r.clusterType}-${r.clusterKey}-${i}`}>
+                <td><NodeIdCell value={r.nodeId} /></td>
                 <td><TypeChip t={r.clusterType} /></td>
                 <td><Mono>{(() => {
                   const href = resolveLinkable(r.clusterKey)
@@ -184,6 +191,7 @@ export const SharedInfraTable = memo(function SharedInfraTable({ projectId }: Pr
                   <Truncated text={[r.asn, r.country].filter(Boolean).join(' · ')} max={140} />
                 </td>
                 <td><UpdatedAtCell value={r.updatedAt} /></td>
+                <td><MuteNodeButton name={r.clusterKey} graphId={r.nodeId} label={r.clusterType === 'ip' ? 'IP' : 'Certificate'} /></td>
               </tr>
             )
           })}

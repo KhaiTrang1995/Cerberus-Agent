@@ -31,7 +31,8 @@ export async function GET(request: NextRequest) {
        WITH v,
             head([x IN collect(DISTINCT coalesce(e.full_url, e.url)) WHERE x IS NOT NULL]) AS epUrl,
             head([x IN collect(DISTINCT bu.url) WHERE x IS NOT NULL]) AS buUrl
-       RETURN coalesce(epUrl, v.matched_at, v.endpoint, buUrl) AS endpointUrl,
+       RETURN toString(id(v))             AS nodeId,
+              coalesce(epUrl, v.matched_at, v.endpoint, buUrl) AS endpointUrl,
               buUrl                       AS baseUrl,
               v.cache_header              AS cacheHeader,
               v.cache_param               AS cacheParam,
@@ -55,6 +56,7 @@ export async function GET(request: NextRequest) {
     )
 
     const rows = result.records.map(r => ({
+      nodeId: (r.get('nodeId') as string | null) ?? null,
       endpointUrl: r.get('endpointUrl') as string | null,
       baseUrl: r.get('baseUrl') as string | null,
       cacheHeader: r.get('cacheHeader') as string | null,

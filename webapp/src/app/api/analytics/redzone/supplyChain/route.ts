@@ -42,7 +42,8 @@ export async function GET(request: NextRequest) {
             coalesce(bu, buDirect)           AS baseurl,
             coalesce(sd.name, sdDirect.name) AS subdomain,
             parent
-       RETURN j.id                  AS id,
+       RETURN toString(id(j))       AS nodeId,
+              j.id                  AS id,
               j.finding_type        AS findingType,
               j.severity            AS severity,
               j.confidence          AS confidence,
@@ -69,6 +70,7 @@ export async function GET(request: NextRequest) {
     )
 
     const rows = result.records.map(r => ({
+      nodeId: (r.get('nodeId') as string | null) ?? null,
       id: (r.get('id') as string) || '',
       findingType: (r.get('findingType') as string) || 'unknown',
       severity: (r.get('severity') as string) || 'info',

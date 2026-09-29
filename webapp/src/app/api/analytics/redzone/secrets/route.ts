@@ -73,7 +73,8 @@ export async function GET(request: NextRequest) {
        OPTIONAL MATCH (buJs:BaseURL)-[:HAS_JS_FILE]->(j)
        WITH s, j, coalesce(buDirect, buJs) AS bu
        OPTIONAL MATCH (sd:Subdomain)-[:HAS_BASE_URL]->(bu)
-       RETURN s.id                                      AS id,
+       RETURN toString(id(s))                           AS nodeId,
+              s.id                                      AS id,
               coalesce(s.secret_type, s.pattern)        AS secretType,
               s.sample                                  AS valueSample,
               s.matched_text                            AS matchedText,
@@ -108,7 +109,8 @@ export async function GET(request: NextRequest) {
       `MATCH (tf:MultiscannerFinding {project_id: $pid})
        WHERE ${notMuted('tf')}
        OPTIONAL MATCH (a)-[:HAS_FINDING]->(tf)
-       RETURN tf.id                AS id,
+       RETURN toString(id(tf))     AS nodeId,
+              tf.id                AS id,
               tf.detector_name     AS secretType,
               tf.redacted          AS valueSample,
               tf.validation_status AS validationStatus,
@@ -134,7 +136,8 @@ export async function GET(request: NextRequest) {
        WHERE ${notMuted('gs')}
        OPTIONAL MATCH (gp:GithubPath)-[:CONTAINS_SECRET]->(gs)
        OPTIONAL MATCH (gr:GithubRepository)-[:HAS_PATH]->(gp)
-       RETURN gs.id                              AS id,
+       RETURN toString(id(gs))                   AS nodeId,
+              gs.id                              AS id,
               gs.secret_type                     AS secretType,
               gs.sample                          AS valueSample,
               gs.matches                         AS matches,
@@ -154,7 +157,8 @@ export async function GET(request: NextRequest) {
        WHERE ${notMuted('gsf')}
        OPTIONAL MATCH (gp:GithubPath)-[:CONTAINS_SENSITIVE_FILE]->(gsf)
        OPTIONAL MATCH (gr:GithubRepository)-[:HAS_PATH]->(gp)
-       RETURN gsf.id                              AS id,
+       RETURN toString(id(gsf))                   AS nodeId,
+              gsf.id                              AS id,
               coalesce(gsf.repository, gr.name)   AS asset,
               coalesce(gsf.path, gp.path)         AS location,
               gsf.updated_at                      AS updatedAt
@@ -172,7 +176,8 @@ export async function GET(request: NextRequest) {
       `MATCH (f:ChainFinding {project_id: $pid})
        WHERE f.username IS NOT NULL OR f.password IS NOT NULL
           OR f.finding_type = 'credential_found'
-       RETURN f.finding_id   AS id,
+       RETURN toString(id(f)) AS nodeId,
+              f.finding_id   AS id,
               f.finding_type AS findingType,
               f.username     AS username,
               f.password     AS password,
@@ -187,6 +192,7 @@ export async function GET(request: NextRequest) {
     )
 
     const rows = result.records.map(r => ({
+      nodeId: (r.get('nodeId') as string | null) ?? null,
       origin: r.get('origin') as string,
       id: (r.get('id') as string) || '',
       secretType: (r.get('secretType') as string) || 'unknown',
@@ -214,6 +220,7 @@ export async function GET(request: NextRequest) {
       const findingKind = r.get('findingKind') as string | null
       const location = r.get('location') as string | null
       return {
+        nodeId: (r.get('nodeId') as string | null) ?? null,
         origin: 'MultiscannerFinding',
         id: (r.get('id') as string) || '',
         secretType: (r.get('secretType') as string) || 'unknown',
@@ -251,6 +258,7 @@ export async function GET(request: NextRequest) {
       const secretType = (r.get('secretType') as string) || 'unknown'
       const matches = r.get('matches') != null ? toNum(r.get('matches')) : null
       return {
+        nodeId: (r.get('nodeId') as string | null) ?? null,
         origin: 'GithubSecret',
         id: (r.get('id') as string) || '',
         secretType,
@@ -281,6 +289,7 @@ export async function GET(request: NextRequest) {
     }))
 
     rows.push(...ghFileResult.records.map(r => ({
+      nodeId: (r.get('nodeId') as string | null) ?? null,
       origin: 'GithubSensitiveFile',
       id: (r.get('id') as string) || '',
       secretType: 'Sensitive File',
@@ -310,6 +319,7 @@ export async function GET(request: NextRequest) {
       const targetIp = r.get('targetIp') as string | null
       const targetPort = r.get('targetPort') != null ? toNum(r.get('targetPort')) : null
       return {
+        nodeId: (r.get('nodeId') as string | null) ?? null,
         origin: 'ChainFinding',
         id: (r.get('id') as string) || '',
         secretType: username && r.get('password') ? 'Credential Pair' : 'Credential',

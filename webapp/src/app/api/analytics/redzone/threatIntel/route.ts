@@ -35,7 +35,8 @@ export async function GET(request: NextRequest) {
           OR size([x IN d.vt_tags WHERE x IS NOT NULL]) > 0
           OR pulseCount > 0
           OR malwareCount > 0
-       RETURN 'Domain'                                    AS assetType,
+       RETURN toString(id(d))                             AS nodeId,
+              'Domain'                                    AS assetType,
               d.name                                      AS asset,
               d.vt_malicious_count                        AS vtMaliciousCount,
               d.vt_suspicious_count                       AS vtSuspiciousCount,
@@ -86,7 +87,8 @@ export async function GET(request: NextRequest) {
           OR size([x IN ip.vt_tags WHERE x IS NOT NULL]) > 0
           OR pulseCount > 0
           OR malwareCount > 0
-       RETURN 'IP'                                         AS assetType,
+       RETURN toString(id(ip))                             AS nodeId,
+              'IP'                                         AS assetType,
               ip.address                                   AS asset,
               ip.vt_malicious_count                        AS vtMaliciousCount,
               ip.vt_suspicious_count                       AS vtSuspiciousCount,
@@ -121,6 +123,7 @@ export async function GET(request: NextRequest) {
     )
 
     const mapDomainRow = (r: any) => ({
+      nodeId: (r.get('nodeId') as string | null) ?? null,
       assetType: r.get('assetType') as string,
       asset: (r.get('asset') as string) || '',
       vtMaliciousCount: r.get('vtMaliciousCount') != null ? toNum(r.get('vtMaliciousCount')) : null,
@@ -157,6 +160,7 @@ export async function GET(request: NextRequest) {
     })
 
     const mapIpRow = (r: any) => ({
+      nodeId: (r.get('nodeId') as string | null) ?? null,
       assetType: r.get('assetType') as string,
       asset: (r.get('asset') as string) || '',
       vtMaliciousCount: r.get('vtMaliciousCount') != null ? toNum(r.get('vtMaliciousCount')) : null,
@@ -199,7 +203,10 @@ export async function GET(request: NextRequest) {
     // that a published incident names".
     const contactResult = await session.run(
       `MATCH (u:BaseURL {project_id: $pid})-[c:CONTACTS_MALICIOUS_HOST]->(tp:ThreatPulse)
-       RETURN 'BaseURL'                    AS assetType,
+       // The row is an edge; the id points at its asset, as in the other two
+       // arms. The incident is one CONTACTS_MALICIOUS_HOST hop from it.
+       RETURN toString(id(u))              AS nodeId,
+              'BaseURL'                    AS assetType,
               u.url                        AS asset,
               c.matched_host               AS contactedHost,
               c.evidence                   AS contactEvidence,
@@ -220,6 +227,7 @@ export async function GET(request: NextRequest) {
     // null, so the table renders one uniform grid and the per-column filter
     // engine sees every key.
     const mapContactRow = (r: any) => ({
+      nodeId: (r.get('nodeId') as string | null) ?? null,
       assetType: r.get('assetType') as string,
       asset: (r.get('asset') as string) || '',
       vtMaliciousCount: null, vtSuspiciousCount: null, vtReputation: null,

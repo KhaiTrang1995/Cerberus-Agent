@@ -64,12 +64,15 @@ import {
   valueText,
   IN_COLUMN_ID,
   NAME_COLUMN_ID,
+  NODE_ID_COLUMN_ID,
   OUT_COLUMN_ID,
   UPDATED_AT_COLUMN_ID,
   type ColumnFilter,
   type ColumnKind,
 } from './nodeFilterHelpers'
 import { UPDATED_AT_PROP, UpdatedAtCell, nodeUpdatedAt } from '../RedZoneTables/updatedAt'
+import { NODE_ID_HEADER, NodeIdCell, formatNodeId } from '../RedZoneTables/nodeId'
+import { GraphNodeMuteButton } from '../MuteNode'
 import styles from './NodeDetailsTable.module.css'
 
 interface NodeDetailsTableProps {
@@ -170,8 +173,9 @@ export function NodeDetailsTable({ data, isLoading, error, projectId = null }: N
   }, [hideableColumns, hiddenSet])
 
   // -- Build columns -------------------------------------------------------
-  // Order: [expand, name, ...dynamic, In, Out]
-  // In/Out live at the rightmost position and are user-hideable.
+  // Order: [expand, Node ID, name, ...dynamic, In, Out, Updated]
+  // Node ID is pinned leftmost and not hideable: it is how a row is handed to
+  // an external agent. In/Out/Updated are rightmost and user-hideable.
   const columns = useMemo(() => {
     const leading = [
       columnHelper.display({
@@ -189,6 +193,17 @@ export function NodeDetailsTable({ data, isLoading, error, projectId = null }: N
             {row.getIsExpanded() ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
           </button>
         ),
+      }),
+      columnHelper.accessor(row => formatNodeId(row.node.id) ?? undefined, {
+        id: NODE_ID_COLUMN_ID,
+        header: NODE_ID_HEADER,
+        size: 90,
+        enableHiding: false,
+        filterFn: advancedFilterFn,
+        sortUndefined: 'last',
+        // Numeric, or "10" would sort before "9".
+        sortingFn: (a, b, id) => Number(a.getValue(id)) - Number(b.getValue(id)),
+        cell: info => <NodeIdCell value={info.getValue()} />,
       }),
       columnHelper.accessor(row => row.node.name, {
         id: NAME_COLUMN_ID,
@@ -273,6 +288,13 @@ export function NodeDetailsTable({ data, isLoading, error, projectId = null }: N
           cell: info => <UpdatedAtCell value={info.getValue()} />,
         },
       ),
+      columnHelper.display({
+        id: 'mute',
+        header: '',
+        size: 80,
+        enableHiding: false,
+        cell: ({ row }) => <GraphNodeMuteButton node={row.original.node} />,
+      }),
     ]
 
     return [...leading, ...dynamic, ...trailing]
@@ -312,6 +334,7 @@ export function NodeDetailsTable({ data, isLoading, error, projectId = null }: N
    */
   const filterableColumns = useMemo(
     () => [
+      { columnId: NODE_ID_COLUMN_ID, label: NODE_ID_HEADER },
       { columnId: NAME_COLUMN_ID, label: 'Name' },
       ...dynamicColumnKeys.map(k => ({ columnId: propColumnId(k), label: k })),
       { columnId: IN_COLUMN_ID, label: 'In' },

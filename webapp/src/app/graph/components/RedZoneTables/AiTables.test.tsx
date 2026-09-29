@@ -26,7 +26,7 @@ function renderWithClient(ui: React.ReactElement) {
 
 const SURFACE = {
   sheets: {
-    llmEndpoints: [{ baseUrl: 'http://h:9106', path: '/v1/chat/completions', method: 'GET',
+    llmEndpoints: [{ nodeId: '123', baseUrl: 'http://h:9106', path: '/v1/chat/completions', method: 'GET',
       interfaceType: 'llm-chat', streaming: true, tools: true, vision: true, modelFamily: 'llama',
       latencyMs: 11.2, ragIngest: null, framework: null, source: 'ai_surface_recon' }],
     mcpServers: [{ baseUrl: 'http://h:9107', path: '/mcp', serverName: 'redamon-poison-mcp',
@@ -91,6 +91,20 @@ describe('AiSurfaceTable', () => {
     fireEvent.click(screen.getByRole('button', { name: /MCP Servers/ }))
     await waitFor(() => expect(screen.getByText('redamon-poison-mcp')).toBeTruthy())
     expect(screen.getByText('2025-06-18')).toBeTruthy()
+  })
+
+  test('Node ID is the leftmost column on every sheet, as a copy button or "-"', async () => {
+    const { container } = renderWithClient(createElement(AiSurfaceTable, { projectId: 'p1' }))
+    await waitFor(() => screen.getByText('/v1/chat/completions'))
+    const firstHeader = () => container.querySelector('thead th')?.textContent
+    expect(firstHeader()).toBe('Node ID')
+    expect(container.querySelector('tbody td button[data-node-id="123"]')).toBeTruthy()
+
+    // The column is prepended by the shared renderer, not per SheetDef.
+    fireEvent.click(screen.getByRole('button', { name: /MCP Servers/ }))
+    await waitFor(() => screen.getByText('redamon-poison-mcp'))
+    expect(firstHeader()).toBe('Node ID')
+    expect(container.querySelector('tbody td')?.textContent).toBe('-')
   })
 
   test('does not fetch when projectId is null', async () => {

@@ -38,7 +38,8 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
                       ELSE 2 END)
        WITH v, head(collect(parent)) AS parent
        ORDER BY v.ai_asr DESC, v.severity
-       RETURN v.id AS id, v.source AS source, v.name AS name, v.severity AS severity,
+       RETURN v.id AS id, toString(id(v)) AS nodeId,
+              v.source AS source, v.name AS name, v.severity AS severity,
               v.type AS type, v.ai_owasp_llm_id AS owaspLlmId, v.ai_asr AS asr,
               v.ai_trials AS trials, v.ai_payload_class AS payloadClass,
               v.ai_oracle_kind AS oracleKind, v.ai_atlas_technique AS atlasTechnique,
@@ -55,6 +56,7 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
     )
     const findings = res.records.map((r: { get: (k: string) => unknown }) => ({
       id: r.get('id'),
+      nodeId: r.get('nodeId') ?? null,
       source: r.get('source'),
       name: r.get('name'),
       severity: r.get('severity'),

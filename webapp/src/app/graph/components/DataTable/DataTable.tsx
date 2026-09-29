@@ -48,6 +48,8 @@ import {
   type ColumnKind,
 } from '../../utils/columnFilters'
 import { UPDATED_AT_KEY, UpdatedAtCell, nodeUpdatedAt } from '../RedZoneTables/updatedAt'
+import { NODE_ID_HEADER, NODE_ID_KEY, NodeIdCell, formatNodeId } from '../RedZoneTables/nodeId'
+import { GraphNodeMuteButton } from '../MuteNode'
 import styles from './DataTable.module.css'
 
 /**
@@ -60,6 +62,7 @@ const HIDDEN_PROP_KEYS = new Set(['project_id', 'user_id'])
 
 const cellValue: CellAccessor<TableRow> = (row, columnId) => {
   switch (columnId) {
+    case NODE_ID_KEY: return formatNodeId(row.node.id) ?? undefined
     case 'type': return row.node.type
     case 'name': return row.node.name
     case 'properties':
@@ -73,6 +76,7 @@ const cellValue: CellAccessor<TableRow> = (row, columnId) => {
 }
 
 const FILTERABLE_COLUMNS = [
+  { columnId: NODE_ID_KEY, label: NODE_ID_HEADER },
   { columnId: 'type', label: 'Type' },
   { columnId: 'name', label: 'Name' },
   { columnId: 'properties', label: 'Props' },
@@ -178,6 +182,16 @@ export const DataTable = memo(function DataTable({
           {row.getIsExpanded() ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
         </button>
       ),
+    }),
+    columnHelper.accessor(row => formatNodeId(row.node.id) ?? undefined, {
+      id: NODE_ID_KEY,
+      filterFn: advancedFilterFn,
+      header: NODE_ID_HEADER,
+      size: 90,
+      sortUndefined: 'last',
+      // Numeric, or "10" would sort before "9".
+      sortingFn: (a, b, id) => Number(a.getValue(id)) - Number(b.getValue(id)),
+      cell: info => <NodeIdCell value={info.getValue()} />,
     }),
     columnHelper.accessor(row => row.node.type, {
       id: 'type',
@@ -310,6 +324,12 @@ export const DataTable = memo(function DataTable({
         cell: info => <UpdatedAtCell value={info.getValue()} />,
       },
     ),
+    columnHelper.display({
+      id: 'mute',
+      header: '',
+      size: 80,
+      cell: ({ row }) => <GraphNodeMuteButton node={row.original.node} />,
+    }),
   ], [])
 
   const table = useReactTable({

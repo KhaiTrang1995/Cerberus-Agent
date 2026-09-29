@@ -115,10 +115,15 @@ export async function setFindingVerdict(
   // judgement was recorded when nothing was written.
   if (body.updated !== true) {
     const why = typeof body.reason === 'string' ? ` (${body.reason})` : ''
+    // list_findings returns a graph `nodeId` beside the finding `id`, and the
+    // input here is also called nodeId, so the likeliest wrong value is that one.
+    const nodeIdHint = /^\d+$/.test(nodeId)
+      ? ` "${nodeId}" looks like a graph Node ID (the \`nodeId\` field); pass the finding's \`id\` instead.`
+      : ''
     throw new McpToolError(
       `The verdict was NOT recorded${why}. The finding no longer exists, was never in this ` +
       `project, or is not a type a verdict can be set on. A finding id is only valid until the ` +
-      `next scan of that source, so re-read list_findings before retrying.`,
+      `next scan of that source, so re-read list_findings before retrying.${nodeIdHint}`,
       'not_updated'
     )
   }

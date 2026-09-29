@@ -4,7 +4,8 @@
  * Verifies that every field produced by the Python backend
  * is included in the CSV export columns for each section.
  */
-import { describe, test, expect } from 'vitest'
+import { describe, test, expect, beforeEach, afterEach } from 'vitest'
+import { exportJsReconJson } from './JsReconTable'
 
 // ============================================================
 // Replicate the addSheet column extraction logic
@@ -453,5 +454,65 @@ describe('addSheet edge cases', () => {
   test('empty array becomes empty string', () => {
     const row = extractRow({ parameters: [] }, ['parameters'])
     expect(row['parameters']).toBe('')
+  })
+})
+
+// ============================================================
+// The real export: Node ID leads every node-backed sheet
+// ============================================================
+
+describe('exportJsReconJson Node ID column', () => {
+  let blobs: Blob[]
+  let originalCreate: typeof URL.createObjectURL
+  let originalRevoke: typeof URL.revokeObjectURL
+  let originalClick: () => void
+
+  beforeEach(() => {
+    blobs = []
+    originalCreate = globalThis.URL.createObjectURL
+    originalRevoke = globalThis.URL.revokeObjectURL
+    originalClick = HTMLAnchorElement.prototype.click
+    globalThis.URL.createObjectURL = ((blob: Blob) => {
+      blobs.push(blob)
+      return `blob:test-${blobs.length}`
+    }) as typeof URL.createObjectURL
+    globalThis.URL.revokeObjectURL = (() => {}) as typeof URL.revokeObjectURL
+    HTMLAnchorElement.prototype.click = () => {}
+  })
+
+  afterEach(() => {
+    globalThis.URL.createObjectURL = originalCreate
+    globalThis.URL.revokeObjectURL = originalRevoke
+    HTMLAnchorElement.prototype.click = originalClick
+  })
+
+  test('every sheet backed by a node exports its nodeId first; bare subdomains have none', async () => {
+    const withId = <T extends object>(nodeId: string, row: T) => ({ nodeId, ...row })
+    await exportJsReconJson({
+      secrets: [withId('1', mockSecret())],
+      endpoints: [withId('2', mockEndpoint())],
+      dependencies: [withId('3', mockDependency())],
+      source_maps: [withId('4', mockSourceMap())],
+      dom_sinks: [withId('5', mockDomSink())],
+      frameworks: [withId('6', mockFramework())],
+      dev_comments: [withId('7', mockDevComment())],
+      cloud_assets: [withId('8', mockCloudAsset())],
+      emails: [withId('9', mockEmail())],
+      ip_addresses: [withId('10', mockIp())],
+      object_references: [withId('11', mockObjectRef())],
+      external_domains: [withId('12', mockExternalDomain())],
+      discovered_subdomains: ['new.example.com'],
+    })
+
+    expect(blobs).toHaveLength(1)
+    const parsed = JSON.parse(await blobs[0].text()) as Record<string, Record<string, unknown>[]>
+    const { Subdomains, ...nodeSheets } = parsed
+    expect(Object.keys(nodeSheets)).toHaveLength(12)
+    const ids = Object.values(nodeSheets).map(rows => {
+      expect(Object.keys(rows[0])[0]).toBe('nodeId')
+      return rows[0].nodeId
+    })
+    expect(ids.map(Number).sort((a, b) => a - b)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])
+    expect(Subdomains[0]).toEqual({ subdomain: 'new.example.com' })
   })
 })

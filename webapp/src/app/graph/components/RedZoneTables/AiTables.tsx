@@ -15,9 +15,11 @@ import {
   UpdatedAtTh,
   useUpdatedAtSort,
 } from './updatedAt'
+import { NODE_ID_HEADER, NODE_ID_KEY, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton, useMuteNodeContext } from '../MuteNode'
 import rowStyles from './RedZoneTableRow.module.css'
 
-type CellKind = 'url' | 'mono' | 'text' | 'bool' | 'num' | 'list' | 'sev' | 'date'
+type CellKind = 'url' | 'mono' | 'text' | 'bool' | 'num' | 'list' | 'sev' | 'date' | 'nodeId'
 
 /**
  * Appended to every sheet at render time rather than written into each of the
@@ -26,8 +28,25 @@ type CellKind = 'url' | 'mono' | 'text' | 'bool' | 'num' | 'list' | 'sev' | 'dat
  */
 const UPDATED_AT_CELL: ColumnDef = { key: UPDATED_AT_KEY, header: UPDATED_AT_HEADER, kind: 'date' }
 
+/** Prepended the same way, so it is the leftmost column on every sheet. */
+const NODE_ID_CELL: ColumnDef = { key: NODE_ID_KEY, header: NODE_ID_HEADER, kind: 'nodeId' }
+
 interface ColumnDef { key: string; header: string; kind: CellKind; max?: number }
-interface SheetDef { key: string; label: string; columns: ColumnDef[]; empty: string }
+/**
+ * The one graph node each of a sheet's rows stands for, for the Mute column.
+ * Absent on a sheet whose rows aggregate several nodes: there is no one node to
+ * mute there.
+ */
+interface SheetNode {
+  label: string
+  /** Row field naming the node in the mute confirm. */
+  nameKey: string
+  /** Row field carrying the finding's stored id, when the route projects it. */
+  idKey?: string
+}
+interface SheetDef {
+  key: string; label: string; columns: ColumnDef[]; empty: string; node?: SheetNode
+}
 
 interface MultiSheetProps {
   projectId: string | null
@@ -47,6 +66,7 @@ function renderCell(kind: CellKind, value: unknown, max?: number) {
     case 'list': return <ListCell items={(value as string[]) || []} max={max ?? 4} />
     case 'sev': return <SeverityBadge severity={normalizeSeverity(value as string)} />
     case 'date': return <UpdatedAtCell value={value} />
+    case 'nodeId': return <NodeIdCell value={value} />
     default: return <Truncated text={value == null ? '' : String(value)} max={max ?? 200} />
   }
 }
@@ -75,10 +95,12 @@ const MultiSheetTable = memo(function MultiSheetTable({ projectId, slug, title, 
     } finally { setIsLoading(false) }
   }, [projectId, slug])
 
-  useEffect(() => { fetchData() }, [fetchData])
+  // Muted rows are filtered server-side, so a mute anywhere means a refetch.
+  const { epoch: muteEpoch } = useMuteNodeContext()
+  useEffect(() => { fetchData() }, [fetchData, muteEpoch])
 
   const sheet = sheets.find(s => s.key === active) ?? sheets[0]
-  const columns = useMemo(() => [...sheet.columns, UPDATED_AT_CELL], [sheet])
+  const columns = useMemo(() => [NODE_ID_CELL, ...sheet.columns, UPDATED_AT_CELL], [sheet])
   const allRows = useMemo(() => (data?.sheets?.[sheet.key] as Record<string, unknown>[]) ?? [], [data, sheet.key])
   const searched = useMemo(() => filterRowsByText(allRows, search), [allRows, search])
   // Each sheet has its own columns, so it filters - and remembers its filters -
@@ -146,14 +168,27 @@ const MultiSheetTable = memo(function MultiSheetTable({ projectId, slug, title, 
             {columns.map(c => (
               c.key === UPDATED_AT_KEY
                 ? <UpdatedAtTh key={c.key} dir={sortDir} onToggle={toggleSort} />
-                : <th key={c.key}>{c.header}</th>
+                : c.key === NODE_ID_KEY
+                  ? <NodeIdTh key={c.key} />
+                  : <th key={c.key}>{c.header}</th>
             ))}
+            <th />
           </tr>
         </thead>
         <tbody>
           {sortedRows.map((r, i) => (
             <tr key={i}>
               {columns.map(c => <td key={c.key}>{renderCell(c.kind, r[c.key], c.max)}</td>)}
+              <td>
+                {sheet.node && (
+                  <MuteNodeButton
+                    name={String(r[sheet.node.nameKey] ?? '')}
+                    graphId={r[NODE_ID_KEY]}
+                    nodeId={sheet.node.idKey ? (r[sheet.node.idKey] as string | null) : null}
+                    label={sheet.node.label}
+                  />
+                )}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -165,6 +200,7 @@ const MultiSheetTable = memo(function MultiSheetTable({ projectId, slug, title, 
 // --------------------------------------------------------------------------- //
 const AI_SURFACE_SHEETS: SheetDef[] = [
   { key: 'llmEndpoints', label: 'LLM Endpoints',
+    node: { label: 'Endpoint', nameKey: 'path' },
     empty: 'No AI/LLM endpoints detected. Run a scan with AI Surface Recon enabled.',
     columns: [
       { key: 'baseUrl', header: 'Base URL', kind: 'url' },
@@ -180,6 +216,7 @@ const AI_SURFACE_SHEETS: SheetDef[] = [
       { key: 'source', header: 'Source', kind: 'text' },
     ] },
   { key: 'mcpServers', label: 'MCP Servers',
+    node: { label: 'Endpoint', nameKey: 'path' },
     empty: 'No MCP servers detected.',
     columns: [
       { key: 'baseUrl', header: 'Base URL', kind: 'url' },
@@ -195,6 +232,7 @@ const AI_SURFACE_SHEETS: SheetDef[] = [
       { key: 'toolsHash', header: 'Tools Hash', kind: 'mono', max: 16 },
     ] },
   { key: 'technologies', label: 'AI Technologies',
+    node: { label: 'Technology', nameKey: 'name' },
     empty: 'No AI technologies fingerprinted.',
     columns: [
       { key: 'name', header: 'Name', kind: 'text' },
@@ -204,6 +242,7 @@ const AI_SURFACE_SHEETS: SheetDef[] = [
       { key: 'attachedTo', header: 'Attached', kind: 'num' },
     ] },
   { key: 'vectorDbs', label: 'Vector DBs',
+    node: { label: 'Technology', nameKey: 'name' },
     empty: 'No vector databases confirmed.',
     columns: [
       { key: 'name', header: 'Name', kind: 'text' },
@@ -223,6 +262,7 @@ const AI_SURFACE_SHEETS: SheetDef[] = [
 
 const AI_RISK_SHEETS: SheetDef[] = [
   { key: 'findings', label: 'MCP Tool Poisoning',
+    node: { label: 'Vulnerability', nameKey: 'name', idKey: 'findingId' },
     empty: 'No MCP tool-poisoning findings. Good - or MCP analysis was disabled.',
     columns: [
       { key: 'severity', header: 'Severity', kind: 'sev' },
@@ -235,6 +275,7 @@ const AI_RISK_SHEETS: SheetDef[] = [
       { key: 'endpointPath', header: 'Path', kind: 'mono' },
     ] },
   { key: 'injectableParams', label: 'Injectable Params',
+    node: { label: 'Parameter', nameKey: 'name' },
     empty: 'No prompt-injectable parameters flagged.',
     columns: [
       { key: 'name', header: 'Parameter', kind: 'text' },
@@ -244,6 +285,7 @@ const AI_RISK_SHEETS: SheetDef[] = [
       { key: 'position', header: 'Position', kind: 'text' },
     ] },
   { key: 'ragPoints', label: 'RAG Ingestion',
+    node: { label: 'Endpoint', nameKey: 'path' },
     empty: 'No RAG ingestion endpoints flagged.',
     columns: [
       { key: 'baseUrl', header: 'Base URL', kind: 'url' },
@@ -252,6 +294,7 @@ const AI_RISK_SHEETS: SheetDef[] = [
       { key: 'interfaceType', header: 'Interface', kind: 'text' },
     ] },
   { key: 'exposedRuntimes', label: 'Exposed Runtimes',
+    node: { label: 'Technology', nameKey: 'name' },
     empty: 'No exposed AI runtimes or gateways.',
     columns: [
       { key: 'name', header: 'Name', kind: 'text' },
@@ -260,6 +303,7 @@ const AI_RISK_SHEETS: SheetDef[] = [
       { key: 'exposedOn', header: 'Exposed On', kind: 'list' },
     ] },
   { key: 'unauthenticatedMcp', label: 'Unauthenticated MCP',
+    node: { label: 'Endpoint', nameKey: 'path' },
     empty: 'No unauthenticated MCP servers.',
     columns: [
       { key: 'baseUrl', header: 'Base URL', kind: 'url' },

@@ -69,7 +69,8 @@ export async function GET(request: NextRequest) {
             collect(DISTINCT h.name) AS secHeaders,
             collect(DISTINCT coalesce(v.type, v.vulnerability_type, v.name)) AS vulnTags
        WHERE size(authEps) > 0 OR size([x IN vulnTags WHERE x IS NOT NULL]) > 0
-       RETURN bu.url                                 AS baseUrl,
+       RETURN toString(id(bu))                       AS nodeId,
+              bu.url                                 AS baseUrl,
               bu.scheme                              AS scheme,
               bu.status_code                         AS statusCode,
               bu.server                              AS server,
@@ -101,6 +102,7 @@ export async function GET(request: NextRequest) {
       const { grade, headerGrid } = deriveWebInitGrade(headersPresent, vulnTags)
 
       return {
+        nodeId: (r.get('nodeId') as string | null) ?? null,
         baseUrl: (r.get('baseUrl') as string) || '',
         scheme: r.get('scheme') as string | null,
         statusCode: r.get('statusCode') != null ? toNum(r.get('statusCode')) : null,

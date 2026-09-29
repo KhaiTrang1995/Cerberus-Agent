@@ -11,6 +11,8 @@ import {
   UpdatedAtTh,
   useUpdatedAtSort,
 } from './updatedAt'
+import { NODE_ID_COLUMN, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton } from '../MuteNode'
 import {
   Truncated,
   ListCell,
@@ -22,6 +24,7 @@ import {
 import rowStyles from './RedZoneTableRow.module.css'
 
 interface DnsEmailRow {
+  nodeId: string | null
   domain: string
   spfPresent: boolean
   spfStrict: boolean
@@ -68,6 +71,7 @@ function PolicyChip({ policy }: { policy: string | null }) {
 /** Module-level: the filter profiles are keyed off these, and a fresh array
  *  literal per render would re-profile every row. */
 const COLUMNS: RedZoneFilterColumn[] = [
+  NODE_ID_COLUMN,
   { key: 'domain', header: 'Domain' },
   { key: 'spfPresent', header: 'SPF Present' },
   { key: 'spfStrict', header: 'SPF Strict' },
@@ -142,6 +146,7 @@ export const DnsEmailTable = memo(function DnsEmailTable({ projectId }: Props) {
       <table className={rowStyles.table}>
         <thead>
           <tr>
+            <NodeIdTh />
             <th>Domain</th>
             <th>SPF</th>
             <th>SPF strict</th>
@@ -156,11 +161,13 @@ export const DnsEmailTable = memo(function DnsEmailTable({ projectId }: Props) {
             <th>OTX</th>
             <th>Registrar</th>
             <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+            <th />
           </tr>
         </thead>
         <tbody>
           {sliced.map((r, i) => (
             <tr key={`${r.domain}-${i}`}>
+              <td><NodeIdCell value={r.nodeId} /></td>
               <td><HostCell host={r.domain} /></td>
               <td><BoolChip value={r.spfPresent} /></td>
               <td><BoolChip value={r.spfStrict} trueLabel="-all" falseLabel="weak" /></td>
@@ -183,6 +190,7 @@ export const DnsEmailTable = memo(function DnsEmailTable({ projectId }: Props) {
               <td><NumCell value={r.otxPulseCount} /></td>
               <td><Truncated text={r.registrar} max={160} /></td>
               <td><UpdatedAtCell value={r.updatedAt} /></td>
+              <td><MuteNodeButton name={r.domain} graphId={r.nodeId} label="Domain" /></td>
             </tr>
           ))}
         </tbody>

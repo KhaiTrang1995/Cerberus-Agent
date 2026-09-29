@@ -14,6 +14,8 @@ import {
   useUpdatedAtSortDir,
   type SortDir,
 } from '../RedZoneTables/updatedAt'
+import { NODE_ID_KEY, NodeIdCell, NodeIdTh, withNodeId } from '../RedZoneTables/nodeId'
+import { MuteNodeButton, useMuteNodeContext } from '../MuteNode'
 import {
   timestampSlug,
   downloadStreaming,
@@ -70,7 +72,7 @@ const PAGE_SIZE = 50
  * drop every row from the lists that have no severity at all.
  */
 const TAB_FILTER_COLUMNS: Record<string, RedZoneFilterColumn[]> = {
-  secrets: [
+  secrets: withNodeId([
     { key: 'severity', header: 'Severity' },
     { key: 'name', header: 'Type' },
     { key: 'category', header: 'Category' },
@@ -80,8 +82,8 @@ const TAB_FILTER_COLUMNS: Record<string, RedZoneFilterColumn[]> = {
     { key: 'confidence', header: 'Confidence' },
     { key: 'line_number', header: 'Line' },
     UPDATED_AT_COLUMN,
-  ],
-  endpoints: [
+  ]),
+  endpoints: withNodeId([
     { key: 'severity', header: 'Severity' },
     { key: 'method', header: 'Method' },
     { key: 'path', header: 'Path' },
@@ -91,8 +93,8 @@ const TAB_FILTER_COLUMNS: Record<string, RedZoneFilterColumn[]> = {
     { key: 'base_url', header: 'BaseURL' },
     { key: 'source_js', header: 'Source JS' },
     UPDATED_AT_COLUMN,
-  ],
-  dependencies: [
+  ]),
+  dependencies: withNodeId([
     { key: 'severity', header: 'Severity' },
     { key: 'finding_type', header: 'Finding Type' },
     { key: 'package_name', header: 'Package' },
@@ -100,8 +102,8 @@ const TAB_FILTER_COLUMNS: Record<string, RedZoneFilterColumn[]> = {
     { key: 'npm_exists', header: 'On npm' },
     { key: 'confidence', header: 'Confidence' },
     UPDATED_AT_COLUMN,
-  ],
-  sourcemaps: [
+  ]),
+  sourcemaps: withNodeId([
     { key: 'severity', header: 'Severity' },
     { key: 'finding_type', header: 'Finding Type' },
     { key: 'js_url', header: 'JS URL' },
@@ -110,7 +112,7 @@ const TAB_FILTER_COLUMNS: Record<string, RedZoneFilterColumn[]> = {
     { key: 'discovery_method', header: 'Discovery' },
     { key: 'files_count', header: 'Files' },
     UPDATED_AT_COLUMN,
-  ],
+  ]),
 }
 
 const NO_COLUMNS: RedZoneFilterColumn[] = []
@@ -136,20 +138,22 @@ function getCol(row: any, col: string): unknown {
 }
 
 function buildJsReconSheets(data: JsReconData): JsReconSheet[] {
+  const N = NODE_ID_KEY
+  // Subdomains are bare strings with no node behind them, so no Node ID.
   return [
-    { name: 'Secrets', rows: data.secrets || [], columns: ['severity', 'name', 'redacted_value', 'matched_text', 'category', 'source_url', 'line_number', 'context', 'detection_method', 'validation.status', 'confidence', 'validator_ref', 'updatedAt'] },
-    { name: 'Endpoints', rows: data.endpoints || [], columns: ['severity', 'method', 'path', 'full_url', 'type', 'category', 'base_url', 'source_js', 'parameters', 'line_number', 'updatedAt'] },
-    { name: 'Dependencies', rows: data.dependencies || [], columns: ['severity', 'finding_type', 'package_name', 'scope', 'npm_exists', 'confidence', 'title', 'detail', 'recommendation', 'source_urls', 'updatedAt'] },
-    { name: 'Source Maps', rows: data.source_maps || [], columns: ['severity', 'finding_type', 'js_url', 'map_url', 'accessible', 'discovery_method', 'files_count', 'source_files', 'secrets_in_source', 'secrets', 'updatedAt'] },
-    { name: 'DOM Sinks', rows: data.dom_sinks || [], columns: ['severity', 'finding_type', 'type', 'pattern', 'description', 'source_url', 'line', 'confidence', 'updatedAt'] },
-    { name: 'Frameworks', rows: data.frameworks || [], columns: ['name', 'version', 'severity', 'finding_type', 'source_url', 'confidence', 'updatedAt'] },
-    { name: 'Dev Comments', rows: data.dev_comments || [], columns: ['severity', 'type', 'content', 'source_url', 'line', 'confidence', 'updatedAt'] },
-    { name: 'Cloud Assets', rows: data.cloud_assets || [], columns: ['provider', 'type', 'url', 'source_url', 'updatedAt'] },
-    { name: 'Emails', rows: data.emails || [], columns: ['email', 'category', 'source_url', 'context', 'updatedAt'] },
-    { name: 'IPs', rows: data.ip_addresses || [], columns: ['ip', 'type', 'source_url', 'context', 'updatedAt'] },
-    { name: 'Object Refs', rows: data.object_references || [], columns: ['type', 'value', 'source_url', 'context', 'potential_idor', 'updatedAt'] },
+    { name: 'Secrets', rows: data.secrets || [], columns: [N, 'severity', 'name', 'redacted_value', 'matched_text', 'category', 'source_url', 'line_number', 'context', 'detection_method', 'validation.status', 'confidence', 'validator_ref', 'updatedAt'] },
+    { name: 'Endpoints', rows: data.endpoints || [], columns: [N, 'severity', 'method', 'path', 'full_url', 'type', 'category', 'base_url', 'source_js', 'parameters', 'line_number', 'updatedAt'] },
+    { name: 'Dependencies', rows: data.dependencies || [], columns: [N, 'severity', 'finding_type', 'package_name', 'scope', 'npm_exists', 'confidence', 'title', 'detail', 'recommendation', 'source_urls', 'updatedAt'] },
+    { name: 'Source Maps', rows: data.source_maps || [], columns: [N, 'severity', 'finding_type', 'js_url', 'map_url', 'accessible', 'discovery_method', 'files_count', 'source_files', 'secrets_in_source', 'secrets', 'updatedAt'] },
+    { name: 'DOM Sinks', rows: data.dom_sinks || [], columns: [N, 'severity', 'finding_type', 'type', 'pattern', 'description', 'source_url', 'line', 'confidence', 'updatedAt'] },
+    { name: 'Frameworks', rows: data.frameworks || [], columns: [N, 'name', 'version', 'severity', 'finding_type', 'source_url', 'confidence', 'updatedAt'] },
+    { name: 'Dev Comments', rows: data.dev_comments || [], columns: [N, 'severity', 'type', 'content', 'source_url', 'line', 'confidence', 'updatedAt'] },
+    { name: 'Cloud Assets', rows: data.cloud_assets || [], columns: [N, 'provider', 'type', 'url', 'source_url', 'updatedAt'] },
+    { name: 'Emails', rows: data.emails || [], columns: [N, 'email', 'category', 'source_url', 'context', 'updatedAt'] },
+    { name: 'IPs', rows: data.ip_addresses || [], columns: [N, 'ip', 'type', 'source_url', 'context', 'updatedAt'] },
+    { name: 'Object Refs', rows: data.object_references || [], columns: [N, 'type', 'value', 'source_url', 'context', 'potential_idor', 'updatedAt'] },
     { name: 'Subdomains', rows: (data.discovered_subdomains || []).map(s => ({ subdomain: s })), columns: ['subdomain'] },
-    { name: 'External Domains', rows: data.external_domains || [], columns: ['domain', 'times_seen', 'updatedAt'] },
+    { name: 'External Domains', rows: data.external_domains || [], columns: [N, 'domain', 'times_seen', 'updatedAt'] },
   ]
 }
 
@@ -287,12 +291,12 @@ export const JsReconTable = memo(function JsReconTable({
   const [activeTab, setActiveTab] = useState<string>('secrets')
   const [limit, setLimit] = useState(PAGE_SIZE)
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (fresh = false) => {
     if (!projectId) return
     setIsLoading(true)
     setError(null)
     try {
-      const res = await fetch(`/api/js-recon/${projectId}/download`)
+      const res = await fetch(`/api/js-recon/${projectId}/download${fresh ? '?fresh=1' : ''}`)
       if (res.status === 404) { setError('No JS Recon data. Run a recon scan with JS Recon enabled.'); return }
       if (!res.ok) throw new Error('Failed to fetch')
       const json = await res.json()
@@ -307,6 +311,16 @@ export const JsReconTable = memo(function JsReconTable({
 
   useEffect(() => { fetchData() }, [fetchData])
   useEffect(() => { setLimit(PAGE_SIZE) }, [activeTab, search])
+
+  // A mute anywhere on the page drops the node from this list. Fresh, because
+  // the route's 10 s cache would otherwise hand the muted row straight back.
+  const { epoch: muteEpoch } = useMuteNodeContext()
+  const seenMuteEpoch = useRef(muteEpoch)
+  useEffect(() => {
+    if (muteEpoch === seenMuteEpoch.current) return
+    seenMuteEpoch.current = muteEpoch
+    void fetchData(true)
+  }, [muteEpoch, fetchData])
 
   const tabCounts = useMemo(() => {
     if (!data) return {}
@@ -461,10 +475,11 @@ function SecretsTable({ rows, search, limit, sortDir, onToggleSort }: { rows: re
   if (!filtered.length) return <div className={styles.stateContainer}>No secrets found.</div>
   return (
     <table className={styles.table}>
-      <thead><tr><th>Severity</th><th>Type</th><th>Redacted Value</th><th>Source</th><th>Validation</th><th>Confidence</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /></tr></thead>
+      <thead><tr><NodeIdTh /><th>Severity</th><th>Type</th><th>Redacted Value</th><th>Source</th><th>Validation</th><th>Confidence</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /><th /></tr></thead>
       <tbody>
         {filtered.map((s, i) => (
           <tr key={s.id || i}>
+            <td><NodeIdCell value={s.nodeId} /></td>
             <td>{sevBadge(s.severity)}</td>
             <td>{s.name}</td>
             <td>
@@ -475,6 +490,7 @@ function SecretsTable({ rows, search, limit, sortDir, onToggleSort }: { rows: re
             <td>{valBadge(s.validation?.status)}</td>
             <td>{s.confidence}</td>
             <td><UpdatedAtCell value={s.updatedAt} /></td>
+            <td><MuteNodeButton name={s.name} graphId={s.nodeId} nodeId={s.id} label="Secret" /></td>
           </tr>
         ))}
       </tbody>
@@ -487,10 +503,11 @@ function EndpointsTable({ rows, search, limit, sortDir, onToggleSort }: { rows: 
   if (!filtered.length) return <div className={styles.stateContainer}>No endpoints extracted.</div>
   return (
     <table className={styles.table}>
-      <thead><tr><th>Severity</th><th>Method</th><th>Path</th><th>Type</th><th>Category</th><th>Source</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /></tr></thead>
+      <thead><tr><NodeIdTh /><th>Severity</th><th>Method</th><th>Path</th><th>Type</th><th>Category</th><th>Source</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /><th /></tr></thead>
       <tbody>
         {filtered.map((ep, i) => (
           <tr key={ep.id || i}>
+            <td><NodeIdCell value={ep.nodeId} /></td>
             <td>{sevBadge(ep.severity || 'info')}</td>
             <td><code className={styles.mono}>{ep.method}</code></td>
             <td className={styles.truncate} title={ep.full_url || ep.path}><code className={styles.mono}>{ep.path}</code></td>
@@ -498,6 +515,7 @@ function EndpointsTable({ rows, search, limit, sortDir, onToggleSort }: { rows: 
             <td>{ep.category}</td>
             <td className={styles.truncate} title={ep.source_js}><ExternalLink href={ep.source_js}>{ep.source_js}</ExternalLink></td>
             <td><UpdatedAtCell value={ep.updatedAt} /></td>
+            <td><MuteNodeButton name={ep.path} graphId={ep.nodeId} label="Endpoint" /></td>
           </tr>
         ))}
       </tbody>
@@ -510,16 +528,18 @@ function DepsTable({ rows, search, limit, sortDir, onToggleSort }: { rows: reado
   if (!filtered.length) return <div className={styles.stateContainer}>No dependency confusion findings.</div>
   return (
     <table className={styles.table}>
-      <thead><tr><th>Severity</th><th>Package</th><th>Scope</th><th>On npm?</th><th>Detail</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /></tr></thead>
+      <thead><tr><NodeIdTh /><th>Severity</th><th>Package</th><th>Scope</th><th>On npm?</th><th>Detail</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /><th /></tr></thead>
       <tbody>
         {filtered.map((d, i) => (
           <tr key={d.id || i}>
+            <td><NodeIdCell value={d.nodeId} /></td>
             <td>{sevBadge(d.severity)}</td>
             <td><code className={styles.mono}>{d.package_name}</code></td>
             <td>{d.scope}</td>
             <td>{d.npm_exists ? 'Yes' : 'No'}</td>
             <td className={styles.truncate} title={d.detail}>{d.title}</td>
             <td><UpdatedAtCell value={d.updatedAt} /></td>
+            <td><MuteNodeButton name={d.package_name} graphId={d.nodeId} nodeId={d.id} label="JsReconFinding" /></td>
           </tr>
         ))}
       </tbody>
@@ -532,10 +552,11 @@ function SourceMapsTable({ rows, search, limit, sortDir, onToggleSort }: { rows:
   if (!filtered.length) return <div className={styles.stateContainer}>No source maps discovered.</div>
   return (
     <table className={styles.table}>
-      <thead><tr><th>JS File</th><th>Map URL</th><th>Accessible</th><th>Files</th><th>Secrets</th><th>Discovery</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /></tr></thead>
+      <thead><tr><NodeIdTh /><th>JS File</th><th>Map URL</th><th>Accessible</th><th>Files</th><th>Secrets</th><th>Discovery</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /><th /></tr></thead>
       <tbody>
         {filtered.map((sm, i) => (
           <tr key={sm.id || i}>
+            <td><NodeIdCell value={sm.nodeId} /></td>
             <td className={styles.truncate} title={sm.js_url}><code className={styles.mono}><ExternalLink href={sm.js_url}>{sm.js_url}</ExternalLink></code></td>
             <td className={styles.truncate} title={sm.map_url}><code className={styles.mono}><ExternalLink href={sm.map_url}>{sm.map_url}</ExternalLink></code></td>
             <td>{sm.accessible ? 'Yes' : 'No'}</td>
@@ -543,6 +564,7 @@ function SourceMapsTable({ rows, search, limit, sortDir, onToggleSort }: { rows:
             <td>{sm.secrets_in_source || 0}</td>
             <td>{sm.discovery_method}</td>
             <td><UpdatedAtCell value={sm.updatedAt} /></td>
+            <td><MuteNodeButton name={sm.js_url} graphId={sm.nodeId} nodeId={sm.id} label="JsReconFinding" /></td>
           </tr>
         ))}
       </tbody>
@@ -572,9 +594,9 @@ function SecurityTable({ data, search, limit, sortDir, onToggleSort }: { data: J
         <>
           <div className={styles.sectionTitle}>Frameworks ({frameworks.length})</div>
           <table className={styles.table}>
-            <thead><tr><th>Framework</th><th>Version</th><th>Source</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /></tr></thead>
+            <thead><tr><NodeIdTh /><th>Framework</th><th>Version</th><th>Source</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /><th /></tr></thead>
             <tbody>{frameworks.slice(0, fwLimit).map((f, i) => (
-              <tr key={f.id || i}><td>{f.name}</td><td>{f.version || '-'}</td><td className={styles.truncate} title={f.source_url}><ExternalLink href={f.source_url}>{f.source_url}</ExternalLink></td><td><UpdatedAtCell value={f.updatedAt} /></td></tr>
+              <tr key={f.id || i}><td><NodeIdCell value={f.nodeId} /></td><td>{f.name}</td><td>{f.version || '-'}</td><td className={styles.truncate} title={f.source_url}><ExternalLink href={f.source_url}>{f.source_url}</ExternalLink></td><td><UpdatedAtCell value={f.updatedAt} /></td><td><MuteNodeButton name={f.name} graphId={f.nodeId} nodeId={f.id} label="JsReconFinding" /></td></tr>
             ))}</tbody>
           </table>
         </>
@@ -583,15 +605,17 @@ function SecurityTable({ data, search, limit, sortDir, onToggleSort }: { data: J
         <>
           <div className={styles.sectionTitle}>DOM Sinks ({sinks.length})</div>
           <table className={styles.table}>
-            <thead><tr><th>Severity</th><th>Type</th><th>Pattern</th><th>Source</th><th>Line</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /></tr></thead>
+            <thead><tr><NodeIdTh /><th>Severity</th><th>Type</th><th>Pattern</th><th>Source</th><th>Line</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /><th /></tr></thead>
             <tbody>{sinks.slice(0, sinkLimit).map((s, i) => (
               <tr key={s.id || i}>
+                <td><NodeIdCell value={s.nodeId} /></td>
                 <td>{sevBadge(s.severity)}</td>
                 <td><code className={styles.mono}>{s.type}</code></td>
                 <td className={styles.truncate} title={s.pattern}><code className={styles.mono}>{s.pattern}</code></td>
                 <td className={styles.truncate} title={s.source_url}><ExternalLink href={s.source_url}>{s.source_url}</ExternalLink></td>
                 <td>{s.line}</td>
                 <td><UpdatedAtCell value={s.updatedAt} /></td>
+                <td><MuteNodeButton name={s.type} graphId={s.nodeId} nodeId={s.id} label="JsReconFinding" /></td>
               </tr>
             ))}</tbody>
           </table>
@@ -601,15 +625,17 @@ function SecurityTable({ data, search, limit, sortDir, onToggleSort }: { data: J
         <>
           <div className={styles.sectionTitle}>Developer Comments ({comments.length})</div>
           <table className={styles.table}>
-            <thead><tr><th>Severity</th><th>Type</th><th>Content</th><th>Source</th><th>Line</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /></tr></thead>
+            <thead><tr><NodeIdTh /><th>Severity</th><th>Type</th><th>Content</th><th>Source</th><th>Line</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /><th /></tr></thead>
             <tbody>{comments.slice(0, cmtLimit).map((c, i) => (
               <tr key={c.id || i}>
+                <td><NodeIdCell value={c.nodeId} /></td>
                 <td>{sevBadge(c.severity)}</td>
                 <td>{c.type}</td>
                 <td className={styles.truncate} title={c.content}>{c.content}</td>
                 <td className={styles.truncate} title={c.source_url}><ExternalLink href={c.source_url}>{c.source_url}</ExternalLink></td>
                 <td>{c.line}</td>
                 <td><UpdatedAtCell value={c.updatedAt} /></td>
+                <td><MuteNodeButton name={c.type} graphId={c.nodeId} nodeId={c.id} label="JsReconFinding" /></td>
               </tr>
             ))}</tbody>
           </table>
@@ -619,9 +645,9 @@ function SecurityTable({ data, search, limit, sortDir, onToggleSort }: { data: J
         <>
           <div className={styles.sectionTitle}>Object References / IDOR ({refs.length})</div>
           <table className={styles.table}>
-            <thead><tr><th>Type</th><th>Value</th><th>Source</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /></tr></thead>
+            <thead><tr><NodeIdTh /><th>Type</th><th>Value</th><th>Source</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /><th /></tr></thead>
             <tbody>{refs.slice(0, refLimit).map((r, i) => (
-              <tr key={i}><td>{r.type}</td><td><code className={styles.mono}>{r.value}</code></td><td className={styles.truncate} title={r.source_url}><ExternalLink href={r.source_url}>{r.source_url}</ExternalLink></td><td><UpdatedAtCell value={r.updatedAt} /></td></tr>
+              <tr key={i}><td><NodeIdCell value={r.nodeId} /></td><td>{r.type}</td><td><code className={styles.mono}>{r.value}</code></td><td className={styles.truncate} title={r.source_url}><ExternalLink href={r.source_url}>{r.source_url}</ExternalLink></td><td><UpdatedAtCell value={r.updatedAt} /></td><td><MuteNodeButton name={r.value} graphId={r.nodeId} label="JsReconFinding" /></td></tr>
             ))}</tbody>
           </table>
         </>
@@ -654,9 +680,9 @@ function SurfaceTable({ data, search, limit, sortDir, onToggleSort }: { data: Js
         <>
           <div className={styles.sectionTitle}>New Subdomains ({subs.length})</div>
           <table className={styles.table}>
-            <thead><tr><th>Subdomain</th><th>Updated</th></tr></thead>
+            <thead><tr><NodeIdTh /><th>Subdomain</th><th>Updated</th></tr></thead>
             <tbody>{subs.slice(0, subsLimit).map(s => (
-              <tr key={s}><td><code className={styles.mono}>{s}</code></td><td><UpdatedAtCell value={undefined} /></td></tr>
+              <tr key={s}><td><NodeIdCell value={undefined} /></td><td><code className={styles.mono}>{s}</code></td><td><UpdatedAtCell value={undefined} /></td></tr>
             ))}</tbody>
           </table>
         </>
@@ -665,9 +691,9 @@ function SurfaceTable({ data, search, limit, sortDir, onToggleSort }: { data: Js
         <>
           <div className={styles.sectionTitle}>Cloud Assets ({cloud.length})</div>
           <table className={styles.table}>
-            <thead><tr><th>Provider</th><th>Type</th><th>URL</th><th>Source</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /></tr></thead>
+            <thead><tr><NodeIdTh /><th>Provider</th><th>Type</th><th>URL</th><th>Source</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /><th /></tr></thead>
             <tbody>{cloud.slice(0, cloudLimit).map((a, i) => (
-              <tr key={i}><td>{a.provider}</td><td>{a.type}</td><td className={styles.truncate} title={a.url}><code className={styles.mono}><ExternalLink href={a.url}>{a.url}</ExternalLink></code></td><td className={styles.truncate} title={a.source_url}><ExternalLink href={a.source_url}>{a.source_url}</ExternalLink></td><td><UpdatedAtCell value={a.updatedAt} /></td></tr>
+              <tr key={i}><td><NodeIdCell value={a.nodeId} /></td><td>{a.provider}</td><td>{a.type}</td><td className={styles.truncate} title={a.url}><code className={styles.mono}><ExternalLink href={a.url}>{a.url}</ExternalLink></code></td><td className={styles.truncate} title={a.source_url}><ExternalLink href={a.source_url}>{a.source_url}</ExternalLink></td><td><UpdatedAtCell value={a.updatedAt} /></td><td><MuteNodeButton name={a.url} graphId={a.nodeId} label="JsReconFinding" /></td></tr>
             ))}</tbody>
           </table>
         </>
@@ -676,9 +702,9 @@ function SurfaceTable({ data, search, limit, sortDir, onToggleSort }: { data: Js
         <>
           <div className={styles.sectionTitle}>Email Addresses ({emails.length})</div>
           <table className={styles.table}>
-            <thead><tr><th>Email</th><th>Source</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /></tr></thead>
+            <thead><tr><NodeIdTh /><th>Email</th><th>Source</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /><th /></tr></thead>
             <tbody>{emails.slice(0, emailsLimit).map((e, i) => (
-              <tr key={i}><td>{e.email}</td><td className={styles.truncate} title={e.source_url}><ExternalLink href={e.source_url}>{e.source_url}</ExternalLink></td><td><UpdatedAtCell value={e.updatedAt} /></td></tr>
+              <tr key={i}><td><NodeIdCell value={e.nodeId} /></td><td>{e.email}</td><td className={styles.truncate} title={e.source_url}><ExternalLink href={e.source_url}>{e.source_url}</ExternalLink></td><td><UpdatedAtCell value={e.updatedAt} /></td><td><MuteNodeButton name={e.email} graphId={e.nodeId} label="JsReconFinding" /></td></tr>
             ))}</tbody>
           </table>
         </>
@@ -687,9 +713,9 @@ function SurfaceTable({ data, search, limit, sortDir, onToggleSort }: { data: Js
         <>
           <div className={styles.sectionTitle}>Internal IPs ({ips.length})</div>
           <table className={styles.table}>
-            <thead><tr><th>IP</th><th>Type</th><th>Source</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /></tr></thead>
+            <thead><tr><NodeIdTh /><th>IP</th><th>Type</th><th>Source</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /><th /></tr></thead>
             <tbody>{ips.slice(0, ipsLimit).map((ip, i) => (
-              <tr key={i}><td><code className={styles.mono}>{ip.ip}</code></td><td>{ip.type}</td><td className={styles.truncate} title={ip.source_url}><ExternalLink href={ip.source_url}>{ip.source_url}</ExternalLink></td><td><UpdatedAtCell value={ip.updatedAt} /></td></tr>
+              <tr key={i}><td><NodeIdCell value={ip.nodeId} /></td><td><code className={styles.mono}>{ip.ip}</code></td><td>{ip.type}</td><td className={styles.truncate} title={ip.source_url}><ExternalLink href={ip.source_url}>{ip.source_url}</ExternalLink></td><td><UpdatedAtCell value={ip.updatedAt} /></td><td><MuteNodeButton name={ip.ip} graphId={ip.nodeId} label="JsReconFinding" /></td></tr>
             ))}</tbody>
           </table>
         </>
@@ -698,9 +724,9 @@ function SurfaceTable({ data, search, limit, sortDir, onToggleSort }: { data: Js
         <>
           <div className={styles.sectionTitle}>External Domains ({extDomains.length})</div>
           <table className={styles.table}>
-            <thead><tr><th>Domain</th><th>Times Seen</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /></tr></thead>
+            <thead><tr><NodeIdTh /><th>Domain</th><th>Times Seen</th><UpdatedAtTh dir={sortDir} onToggle={onToggleSort} /><th /></tr></thead>
             <tbody>{extDomains.slice(0, extLimit).map((d, i) => (
-              <tr key={i}><td><code className={styles.mono}>{d.domain}</code></td><td>{d.times_seen}</td><td><UpdatedAtCell value={d.updatedAt} /></td></tr>
+              <tr key={i}><td><NodeIdCell value={d.nodeId} /></td><td><code className={styles.mono}>{d.domain}</code></td><td>{d.times_seen}</td><td><UpdatedAtCell value={d.updatedAt} /></td><td><MuteNodeButton name={d.domain} graphId={d.nodeId} label="JsReconFinding" /></td></tr>
             ))}</tbody>
           </table>
         </>

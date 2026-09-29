@@ -122,6 +122,8 @@ export interface AttackChainsData {
     evidence: string | null; attackType: string | null; cveIds: string[]
   }[]
   topFindings: {
+    /** The ChainFinding's Neo4j internal id, for the Node ID column. */
+    nodeId?: string | null
     title: string; severity: string; findingType: string
     evidence: string | null; confidence: number | null; phase: string | null
     targetHost: string | null

@@ -132,6 +132,29 @@
   opacity: 0.5;
 }
 
+/* A bare button so it inherits the cell's row striping; the dotted underline is
+   the only hint it copies, since a filled chip on ~40 sheets would be noise. */
+.nodeIdBtn {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-secondary);
+  text-decoration: underline dotted;
+  text-underline-offset: 2px;
+  cursor: copy;
+  white-space: nowrap;
+}
+
+/* Primary text, not the accent: the red accent on a light surface falls just
+   under AA contrast at 11px. The underline turning solid carries the hover. */
+.nodeIdBtn:hover,
+.nodeIdBtn:focus-visible {
+  color: var(--text-primary);
+  text-decoration-style: solid;
+}
+
 .numCell {
   font-family: var(--font-mono, monospace);
   font-size: 11px;

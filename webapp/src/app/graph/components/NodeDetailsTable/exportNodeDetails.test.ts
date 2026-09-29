@@ -76,7 +76,7 @@ describe('slugForType', () => {
 // ---------------------------------------------------------------------------
 
 describe('buildExportData', () => {
-  test('headers include Name + visible dynamic keys + In + Out (when both visible)', () => {
+  test('headers include Node ID + Name + visible dynamic keys + In + Out (when both visible)', () => {
     const r = makeRow(makeNode('Domain', 'd1', { registrar: 'GoDaddy', country: 'US' }), 1, 2)
     const built = buildExportData({
       nodeType: 'Domain',
@@ -85,8 +85,9 @@ describe('buildExportData', () => {
       showIn: true,
       showOut: true,
     })
-    expect(built.headers).toEqual(['Name', 'country', 'registrar', 'In', 'Out'])
+    expect(built.headers).toEqual(['Node ID', 'Name', 'country', 'registrar', 'In', 'Out'])
     expect(built.rows[0]).toEqual({
+      'Node ID': null, // 'd1' is not a numeric graph id
       Name: 'd1',
       country: 'US',
       registrar: 'GoDaddy',
@@ -104,8 +105,8 @@ describe('buildExportData', () => {
       showIn: true,
       showOut: true,
     })
-    expect(built.headers).toEqual(['Name', 'country', 'In', 'Out'])
-    expect(built.rows[0]).toEqual({ Name: 'd1', country: 'US', In: 0, Out: 0 })
+    expect(built.headers).toEqual(['Node ID', 'Name', 'country', 'In', 'Out'])
+    expect(built.rows[0]).toEqual({ 'Node ID': null, Name: 'd1', country: 'US', In: 0, Out: 0 })
   })
 
   test('omits In column when showIn=false', () => {
@@ -117,7 +118,7 @@ describe('buildExportData', () => {
       showIn: false,
       showOut: true,
     })
-    expect(built.headers).toEqual(['Name', 'Out'])
+    expect(built.headers).toEqual(['Node ID', 'Name', 'Out'])
     expect(built.rows[0]).not.toHaveProperty('In')
   })
 
@@ -130,11 +131,11 @@ describe('buildExportData', () => {
       showIn: true,
       showOut: false,
     })
-    expect(built.headers).toEqual(['Name', 'In'])
+    expect(built.headers).toEqual(['Node ID', 'Name', 'In'])
     expect(built.rows[0]).not.toHaveProperty('Out')
   })
 
-  test('Name column is always present even when no dynamic keys + In + Out hidden', () => {
+  test('Node ID and Name are always present even when no dynamic keys + In + Out hidden', () => {
     const r = makeRow(makeNode('X', 'only-name'))
     const built = buildExportData({
       nodeType: 'X',
@@ -143,8 +144,8 @@ describe('buildExportData', () => {
       showIn: false,
       showOut: false,
     })
-    expect(built.headers).toEqual(['Name'])
-    expect(built.rows[0]).toEqual({ Name: 'only-name' })
+    expect(built.headers).toEqual(['Node ID', 'Name'])
+    expect(built.rows[0]).toEqual({ 'Node ID': null, Name: 'only-name' })
   })
 
   test('handles empty rows (e.g. filter excluded everything)', () => {
@@ -155,7 +156,7 @@ describe('buildExportData', () => {
       showIn: true,
       showOut: true,
     })
-    expect(built.headers).toEqual(['Name', 'country', 'In', 'Out'])
+    expect(built.headers).toEqual(['Node ID', 'Name', 'country', 'In', 'Out'])
     expect(built.rows).toEqual([])
   })
 
@@ -170,8 +171,23 @@ describe('buildExportData', () => {
       showIn: false,
       showOut: false,
     })
-    expect(built.rows[0]).toEqual({ Name: 'd1', registrar: 'GoDaddy' })
-    expect(built.rows[1]).toEqual({ Name: 'd2', registrar: undefined })
+    expect(built.rows[0]).toEqual({ 'Node ID': null, Name: 'd1', registrar: 'GoDaddy' })
+    expect(built.rows[1]).toEqual({ 'Node ID': null, Name: 'd2', registrar: undefined })
+  })
+
+  test('Node ID carries the internal graph id, separate from an `id` property', () => {
+    // CVE/Secret/... nodes have their own `id` property; it must keep its own
+    // column and never be confused with (or overwrite) the graph id.
+    const r = makeRow(makeNode('CVE', '1234', { id: 'CVE-2021-44228' }, 'CVE-2021-44228'))
+    const built = buildExportData({
+      nodeType: 'CVE',
+      rows: [r],
+      visibleDynamicKeys: ['id'],
+      showIn: false,
+      showOut: false,
+    })
+    expect(built.headers).toEqual(['Node ID', 'Name', 'id'])
+    expect(built.rows[0]).toEqual({ 'Node ID': '1234', Name: 'CVE-2021-44228', id: 'CVE-2021-44228' })
   })
 
   test('preserves row order (no implicit sort)', () => {
@@ -261,8 +277,8 @@ describe('exportNodeDetailsJson / Markdown', () => {
     expect(downloads[0].mimeType).toBe('application/json;charset=utf-8')
     const parsed = JSON.parse(downloads[0].content)
     expect(parsed.nodeType).toBe('Domain')
-    expect(parsed.columns).toEqual(['Name', 'registrar', 'In', 'Out'])
-    expect(parsed.rows).toEqual([{ Name: 'example.com', registrar: 'GoDaddy', In: 2, Out: 3 }])
+    expect(parsed.columns).toEqual(['Node ID', 'Name', 'registrar', 'In', 'Out'])
+    expect(parsed.rows).toEqual([{ 'Node ID': null, Name: 'example.com', registrar: 'GoDaddy', In: 2, Out: 3 }])
     expect(parsed.generatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
   })
 
@@ -284,11 +300,11 @@ describe('exportNodeDetailsJson / Markdown', () => {
     const md = downloads[0].content
     expect(md).toContain('# Domain - Node Inspector Export')
     expect(md).toContain('Rows: 2')
-    expect(md).toContain('| Name | registrar |')
-    expect(md).toContain('| --- | --- |')
-    expect(md).toContain('| a.com | GoDaddy |')
+    expect(md).toContain('| Node ID | Name | registrar |')
+    expect(md).toContain('| --- | --- | --- |')
+    expect(md).toContain('|  | a.com | GoDaddy |')
     // Pipes escaped in cell
-    expect(md).toContain('| b\\|c.com | Name\\|cheap |')
+    expect(md).toContain('|  | b\\|c.com | Name\\|cheap |')
   })
 
   test('JSON export converts undefined cells to null (valid JSON)', async () => {
@@ -302,7 +318,7 @@ describe('exportNodeDetailsJson / Markdown', () => {
     })
     const downloads = await getDownloads()
     const parsed = JSON.parse(downloads[0].content)
-    expect(parsed.rows[0]).toEqual({ Name: 'd1', missing_prop: null })
+    expect(parsed.rows[0]).toEqual({ 'Node ID': null, Name: 'd1', missing_prop: null })
   })
 })
 
@@ -366,8 +382,8 @@ describe('exportNodeDetailsCsv', () => {
     expect(dl.mimeType).toBe('text/csv;charset=utf-8')
     // Strip BOM, split CRLF
     const lines = dl.content.replace(/^\uFEFF/, '').trimEnd().split('\r\n')
-    expect(lines[0]).toBe('Name,registrar,In')
-    expect(lines[1]).toBe('example.com,GoDaddy,1')
+    expect(lines[0]).toBe('Node ID,Name,registrar,In')
+    expect(lines[1]).toBe(',example.com,GoDaddy,1')
   })
 
   test('quotes cells containing commas, quotes, and newlines', async () => {

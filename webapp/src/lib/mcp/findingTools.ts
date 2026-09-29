@@ -54,8 +54,9 @@ const MUTED_FETCH_CEILING = 2000
  * `triage_ai_corrections` are raw JSON blobs sized for a UI, not for a model's
  * context, and `triage_ai_quote` is literally quoted target output - it is
  * behind an explicit argument and never travels without the untrusted-data
- * note. No property outside this list reaches a caller, which is also what
- * keeps `Secret.matched_text` and its kind off this surface by construction.
+ * note. No property outside this list reaches a caller (bar `nodeId`, which
+ * `graphNodeId` admits only as digits), which is also what keeps
+ * `Secret.matched_text` and its kind off this surface by construction.
  */
 const FINDING_FIELDS = [
   'id', 'label', 'name', 'severity', 'source', 'location', 'host', 'section',
@@ -72,11 +73,24 @@ const SECTION_NAMES: Record<number, string> = {
 
 export const FINDING_SECTIONS = Object.values(SECTION_NAMES)
 
+/**
+ * The Node ID the Priority Board and Muted Nodes show: Neo4j's internal id,
+ * what `query_graph` takes as `WHERE id(n) = <id>`. It is NOT the finding id
+ * (verdicts key on `id`, which survives a rescan; this does not), so it travels
+ * under its own name. Only a well-formed one is passed on, and an agent older
+ * than the column sends none, in which case the field is simply absent.
+ */
+function graphNodeId(raw: unknown): string | undefined {
+  return typeof raw === 'string' && /^\d+$/.test(raw) ? raw : undefined
+}
+
 function projectFinding(raw: TriageFinding, includeQuote: boolean): Record<string, unknown> {
   const out: Record<string, unknown> = {}
   for (const key of FINDING_FIELDS) {
     if (raw[key] !== undefined && raw[key] !== null && raw[key] !== '') out[key] = raw[key]
   }
+  const nodeId = graphNodeId(raw.node_id)
+  if (nodeId) out.nodeId = nodeId
   const section = typeof raw.section === 'number' ? raw.section : null
   if (section !== null) out.sectionName = SECTION_NAMES[section] ?? 'unknown'
   if (includeQuote && raw.triage_ai_quote) out.triage_ai_quote = raw.triage_ai_quote
@@ -329,8 +343,10 @@ export async function listMuted(
       ? {
           findings: all.slice(0, MUTED_MAX_ROWS).map(f => {
             const state = describeMutedBy(doc, String(f.muted_by ?? ''))
+            const nodeId = graphNodeId(f.node_id)
             return {
               id: f.id,
+              ...(nodeId ? { nodeId } : {}),
               label: f.label,
               name: f.name,
               severity: f.severity,

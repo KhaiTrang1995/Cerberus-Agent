@@ -24,6 +24,9 @@ export type McpTriageOp = 'list_findings' | 'list_muted' | 'human_verdict'
 
 export interface TriageFinding {
   id: string
+  /** Neo4j's internal id as a string, for display only; `id` is the key. Absent
+   *  from an agent older than the Node ID column. */
+  node_id?: string | null
   label: string
   name: string
   severity: string

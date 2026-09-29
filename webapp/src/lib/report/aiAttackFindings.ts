@@ -26,6 +26,8 @@ export interface AiAttackFindingRecord {
   // two of them, and the representative is the row whose evidence and ASR the
   // record already shows - so the timestamp matches the data on screen.
   updatedAt?: unknown
+  /** Graph node id of the same representative row, for the same reason. */
+  nodeId?: string | null
 }
 
 // Raw per-tool row straight off the graph, before cross-tool corroboration.
@@ -44,6 +46,7 @@ export interface RawAttackRow {
   endpointPath: string | null
   /** Optional: a caller with no timestamp to hand still builds a valid row. */
   updatedAt?: unknown
+  nodeId?: string | null
 }
 
 export const ATTACK_SEV_RANK: Record<string, number> = {
@@ -84,6 +87,7 @@ export function corroborateAttackFindings(rows: RawAttackRow[]): AiAttackFinding
       probePackVersions: uniq(group.map(r => r.probePackVersion)),
       evidence: rep.evidence || '',
       updatedAt: rep.updatedAt ?? null,
+      nodeId: rep.nodeId ?? null,
     })
   }
   out.sort((a, b) =>

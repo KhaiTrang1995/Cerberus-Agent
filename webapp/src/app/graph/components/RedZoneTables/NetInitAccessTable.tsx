@@ -11,6 +11,8 @@ import {
   UpdatedAtTh,
   useUpdatedAtSort,
 } from './updatedAt'
+import { NODE_ID_COLUMN, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton } from '../MuteNode'
 import {
   Mono,
   Truncated,
@@ -22,6 +24,8 @@ import {
 import rowStyles from './RedZoneTableRow.module.css'
 
 interface NetInitAccessRow {
+  /** The Port for a port row; the Vulnerability (or its IP) for an IP-level finding. */
+  nodeId: string | null
   origin: string
   ipAddress: string
   port: number | null
@@ -67,6 +71,7 @@ function CategoryChip({ category }: { category: string | null }) {
 /** Module-level: the filter profiles are keyed off these, and a fresh array
  *  literal per render would re-profile every row. */
 const COLUMNS: RedZoneFilterColumn[] = [
+  NODE_ID_COLUMN,
   { key: 'ipAddress', header: 'IP' },
   { key: 'port', header: 'Port' },
   { key: 'protocol', header: 'Proto' },
@@ -131,6 +136,7 @@ export const NetInitAccessTable = memo(function NetInitAccessTable({ projectId }
       <table className={rowStyles.table}>
         <thead>
           <tr>
+            <NodeIdTh />
             <th>IP</th>
             <th>Port</th>
             <th>Category</th>
@@ -140,11 +146,13 @@ export const NetInitAccessTable = memo(function NetInitAccessTable({ projectId }
             <th>CDN</th>
             <th>ASN / Country</th>
             <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+            <th />
           </tr>
         </thead>
         <tbody>
           {sliced.map((r, i) => (
             <tr key={`${r.ipAddress}-${r.port}-${i}`}>
+              <td><NodeIdCell value={r.nodeId} /></td>
               <td><IpCell ip={r.ipAddress} port={r.port ?? undefined} /></td>
               <td>
                 {r.port != null ? <Mono>{r.port}/{r.protocol}</Mono> : <span className={rowStyles.nullCell}>-</span>}
@@ -165,6 +173,9 @@ export const NetInitAccessTable = memo(function NetInitAccessTable({ projectId }
                 <Truncated text={[r.asn, r.country].filter(Boolean).join(' · ')} max={140} />
               </td>
               <td><UpdatedAtCell value={r.updatedAt} /></td>
+              {/* A vuln row points at its Vulnerability when it is alone and at
+                  the IP otherwise, which only the server can tell apart. */}
+              <td><MuteNodeButton name={`${r.ipAddress}:${r.port ?? ''}`} graphId={r.nodeId} label={r.origin === 'port' ? 'Port' : undefined} /></td>
             </tr>
           ))}
         </tbody>

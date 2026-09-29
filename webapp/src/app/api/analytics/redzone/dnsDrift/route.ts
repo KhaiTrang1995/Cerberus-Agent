@@ -60,7 +60,8 @@ export async function GET(request: NextRequest) {
        WHERE size(historicResolutionsClean) > 0
           OR size(externalDomainsClean) > 0
           OR size(danglingSubsClean) > 0
-       RETURN d.name                         AS domain,
+       RETURN toString(id(d))                AS nodeId,
+              d.name                         AS domain,
               historicResolutionsClean       AS historicResolutions,
               size(historicResolutionsClean) AS historicIpCount,
               currentIpsClean                AS currentIps,
@@ -119,6 +120,7 @@ export async function GET(request: NextRequest) {
         : null
 
       return {
+        nodeId: (r.get('nodeId') as string | null) ?? null,
         domain: (r.get('domain') as string) || '',
         historicIpCount: toNum(r.get('historicIpCount')),
         historicResolutions,
