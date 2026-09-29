@@ -127,6 +127,22 @@ describe('payload sourcing', () => {
     expect(res.headers.get('Cache-Control')).toBe('private, no-cache')
   })
 
+  test('only the live side names a Node ID; a node only a stored version has gets null', async () => {
+    h.capture.mockResolvedValue({
+      nodes: [{ labels: ['IP'], properties: { address: '10.0.0.2' }, _exportId: 'x1' }],
+      relationships: [], nodeCount: 1, linkCount: 0, summary: {},
+      liveNodeIds: new Map([['x1', '4711']]),
+    })
+    let body = await (await GET(req('from=v1&to=current'), params('p1'))).json()
+    expect(body.addedNodes[0].nodeId).toBe('4711')
+    expect(body.removedNodes[0].nodeId).toBeNull()
+
+    // Reversed, the removed row is the one still in the live graph.
+    body = await (await GET(req('from=current&to=v1'), params('p1'))).json()
+    expect(body.removedNodes[0].nodeId).toBe('4711')
+    expect(body.addedNodes[0].nodeId).toBeNull()
+  })
+
   test('a version with no bytes is reported, not silently compared as empty', async () => {
     h.load.mockResolvedValue(null)
     const res = await GET(req('from=v1&to=current'), params('p1'))

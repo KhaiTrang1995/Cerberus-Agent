@@ -93,6 +93,34 @@ describe('ReconDeltaTable', () => {
     expect(screen.getByText('1.25')).toBeTruthy()
   })
 
+  test('the Node ID column leads each node table, with "-" where no live node exists', async () => {
+    fetchMock.mockResolvedValue(ok({
+      ...DELTA,
+      addedNodes: [{ ...DELTA.addedNodes[0], nodeId: '4711' }],
+      removedNodes: [{ key: 'IP::address=10.0.0.9', type: 'IP', name: '10.0.0.9', properties: {}, nodeId: null }],
+      changedNodes: [{
+        ...DELTA.changedNodes[0], nodeId: '4712',
+        changes: [{ field: 'version', from: '1.20', to: '1.25' }, { field: 'banner', from: 'a', to: 'b' }],
+      }],
+      totals: { ...DELTA.totals, removed: 1 },
+    }))
+    render(<ReconDeltaTable projectId="p1" versions={versions} />)
+    await waitFor(() => expect(screen.getByText(/1 added/)).toBeTruthy())
+
+    // After the +/- state glyph, ahead of every data column.
+    expect(screen.getAllByRole('columnheader')[1].textContent).toBe('Node ID')
+    expect(screen.getByRole('button', { name: 'Copy node ID 4711' })).toBeTruthy()
+
+    fireEvent.click(screen.getByRole('tab', { name: /Removed/ }))
+    expect(screen.queryByRole('button', { name: /Copy node ID/ })).toBeNull()
+    expect(screen.getAllByRole('row')[1].querySelectorAll('td')[1].textContent).toBe('-')
+
+    // One node spans several change rows; only its first carries the id.
+    fireEvent.click(screen.getByRole('tab', { name: /Changed/ }))
+    expect(screen.getAllByRole('columnheader')[0].textContent).toBe('Node ID')
+    expect(screen.getAllByRole('button', { name: 'Copy node ID 4712' })).toHaveLength(1)
+  })
+
   test('surfaces a comparison error instead of rendering an empty diff', async () => {
     fetchMock.mockResolvedValue(fail(409, { error: 'Version "Scan 1" has no stored snapshot' }))
     render(<ReconDeltaTable projectId="p1" versions={versions} />)

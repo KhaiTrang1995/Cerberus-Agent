@@ -50,7 +50,10 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
   try {
     const load = async (
       sel: typeof fromSel
-    ): Promise<{ data: FormattedGraphData; side: SideDescriptor } | NextResponse> => {
+    ): Promise<
+      | { data: FormattedGraphData; side: SideDescriptor; liveNodeIds?: ReadonlyMap<string, string> }
+      | NextResponse
+    > => {
       if (isCurrentSelector(sel)) {
         // Capturing the live graph while something is rewriting it produces a
         // comparison against a state that never existed. This route had no
@@ -69,6 +72,8 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
         return {
           data: snapshotToGraphPayload(captured),
           side: { versionId: 'current', label: 'Current (live graph)', seq: null, isCurrent: true },
+          // Only the live side can name a node's id; a stored version never does.
+          liveNodeIds: captured.liveNodeIds,
         }
       }
       const snapshot = await loadSnapshot(sel.id)
@@ -93,7 +98,10 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
     const toLoaded = await load(toSel)
     if (toLoaded instanceof NextResponse) return toLoaded
 
-    const delta = computeReconDelta(fromLoaded.data, toLoaded.data)
+    const delta = computeReconDelta(fromLoaded.data, toLoaded.data, {
+      from: fromLoaded.liveNodeIds,
+      to: toLoaded.liveNodeIds,
+    })
 
     return NextResponse.json(
       {

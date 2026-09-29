@@ -138,6 +138,21 @@ export interface DeltaNode {
   type: string
   name: string
   properties: Record<string, unknown>
+  /**
+   * The asset's Neo4j internal id in the LIVE graph, or null. Only a side read
+   * from the live graph can name one: a stored version keeps no internal ids,
+   * and its nodes may have been deleted or recreated since.
+   */
+  nodeId: string | null
+}
+
+/**
+ * Payload node id -> live Neo4j id, given for a side that was captured from
+ * the live graph (`CapturedSnapshot.liveNodeIds`). A stored side passes none.
+ */
+export interface LiveNodeIds {
+  from?: ReadonlyMap<string, string>
+  to?: ReadonlyMap<string, string>
 }
 
 export interface ChangedNode extends DeltaNode {
@@ -253,8 +268,12 @@ export function extractReconCoverage(to: FormattedGraphData): ReconCoverage | nu
   return { sources: [...sources].sort(), skippedHosts: hosts.size, nucleiTruncated }
 }
 
-function toDeltaNode(node: FormattedNode, key: string): DeltaNode {
-  return { key, type: node.type || 'Unknown', name: node.name, properties: node.properties || {} }
+function toDeltaNode(node: FormattedNode, key: string, nodeId: string | null): DeltaNode {
+  return { key, type: node.type || 'Unknown', name: node.name, properties: node.properties || {}, nodeId }
+}
+
+function liveId(ids: ReadonlyMap<string, string> | undefined, node: FormattedNode): string | null {
+  return ids?.get(String(node.id)) ?? null
 }
 
 function diffProperties(
@@ -316,10 +335,16 @@ function collectLinks(
 
 /**
  * Diff two rendered graph payloads. `from` is the older/base side.
+ *
+ * `live` names the side(s) read from the live graph, so a row can carry the
+ * live node's id: an added node is the `to` node, a removed one the `from`
+ * node, and a changed asset exists on both, so whichever side is live names
+ * it. A row whose node is only in a stored version gets null.
  */
 export function computeReconDelta(
   from: FormattedGraphData,
-  to: FormattedGraphData
+  to: FormattedGraphData,
+  live: LiveNodeIds = {}
 ): ReconDelta {
   const fromIdx = indexByIdentity(from)
   const toIdx = indexByIdentity(to)
@@ -332,13 +357,13 @@ export function computeReconDelta(
   for (const [key, node] of toIdx.byKey) {
     const before = fromIdx.byKey.get(key)
     if (!before) {
-      addedNodes.push(toDeltaNode(node, key))
+      addedNodes.push(toDeltaNode(node, key, liveId(live.to, node)))
       continue
     }
     const changes = diffProperties(before.properties || {}, node.properties || {})
     if (changes.length > 0) {
       changedNodes.push({
-        ...toDeltaNode(node, key),
+        ...toDeltaNode(node, key, liveId(live.to, node) ?? liveId(live.from, before)),
         changes,
         previousProperties: before.properties || {},
       })
@@ -348,7 +373,7 @@ export function computeReconDelta(
   }
 
   for (const [key, node] of fromIdx.byKey) {
-    if (!toIdx.byKey.has(key)) removedNodes.push(toDeltaNode(node, key))
+    if (!toIdx.byKey.has(key)) removedNodes.push(toDeltaNode(node, key, liveId(live.from, node)))
   }
 
   const fromLinks = collectLinks(from, fromIdx.keyById, fromIdx.byKey)

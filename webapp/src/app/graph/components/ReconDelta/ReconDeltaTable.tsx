@@ -16,9 +16,14 @@ import {
   useUpdatedAtSortDir,
   type SortDir,
 } from '../RedZoneTables/updatedAt'
+import { NodeIdCell, NodeIdTh } from '../RedZoneTables/nodeId'
 
 interface FieldChange { field: string; from: unknown; to: unknown }
-interface DeltaNode { key: string; type: string; name: string; properties: Record<string, unknown> }
+interface DeltaNode {
+  key: string; type: string; name: string; properties: Record<string, unknown>
+  /** The live graph's id for this asset; null for a node only a stored version has. */
+  nodeId?: string | null
+}
 interface ChangedNode extends DeltaNode { changes: FieldChange[] }
 interface TypeScore { type: string; added: number; removed: number; changed: number; fromCount: number; toCount: number }
 interface DeltaLink { type: string; sourceName: string; targetName: string }
@@ -386,7 +391,7 @@ function NodeList({ nodes, kind, sortDir, onToggleSort }: {
   }
   return (
     <table className={styles.table}>
-      <thead><tr><th></th><th>Type</th><th>Asset</th><th>Details</th>
+      <thead><tr><th></th><NodeIdTh /><th>Type</th><th>Asset</th><th>Details</th>
         <UpdatedAtTh dir={sortDir} onToggle={onToggleSort} />
       </tr></thead>
       <tbody>
@@ -395,6 +400,7 @@ function NodeList({ nodes, kind, sortDir, onToggleSort }: {
             <td className={kind === 'added' ? styles.added : styles.removed}>
               {kind === 'added' ? '+' : '−'}
             </td>
+            <td><NodeIdCell value={n.nodeId} /></td>
             <td>{n.type}</td>
             <td>{describe(n)}</td>
             <td className={styles.props}>
@@ -418,13 +424,14 @@ function ChangedList({ nodes, sortDir, onToggleSort }: {
   if (nodes.length === 0) return <p className={styles.emptyRow}>Nothing changed.</p>
   return (
     <table className={styles.table}>
-      <thead><tr><th>Type</th><th>Asset</th><th>Field</th><th>Before</th><th>After</th>
+      <thead><tr><NodeIdTh /><th>Type</th><th>Asset</th><th>Field</th><th>Before</th><th>After</th>
         <UpdatedAtTh dir={sortDir} onToggle={onToggleSort} />
       </tr></thead>
       <tbody>
         {sortByUpdatedAt(nodes, sortDir, n => nodeUpdatedAt(n.properties)).flatMap(n =>
           n.changes.map((c, i) => (
             <tr key={`${n.key}:${c.field}`}>
+              <td>{i === 0 ? <NodeIdCell value={n.nodeId} /> : null}</td>
               <td>{i === 0 ? n.type : ''}</td>
               <td>{i === 0 ? describe(n) : ''}</td>
               <td className={styles.field}>{c.field}</td>
