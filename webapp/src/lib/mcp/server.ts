@@ -922,8 +922,13 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
   const findingIdsSchema = (max: number) =>
     z.array(z.string().min(1).max(200).regex(/^[A-Za-z0-9_.:-]+$/, 'a finding id is alphanumeric (with - _ . or :)'))
       .min(1).max(max)
+  // query_graph returns a Node ID as a JSON number, the finding tools as a
+  // string of digits. Both are accepted, so a nodeId copied from either works.
   const nodeIdsSchema = (max: number) =>
-    z.array(z.string().regex(/^\d{1,18}$/, 'a Node ID is digits only')).min(1).max(max)
+    z.array(z.union([
+      z.string().regex(/^\d{1,18}$/, 'a Node ID is digits only'),
+      z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+    ])).min(1).max(max)
 
   server.registerTool(
     'mute_findings',

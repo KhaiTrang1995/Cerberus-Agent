@@ -90,14 +90,15 @@ function busy(what: string): McpToolError {
 
 const ACTIVATION_BUSY = 'a version activation is in progress on this project, or its state could not be read'
 
-/** De-duplicated refs, checked, and bounded in total. */
+/** De-duplicated refs, checked, and bounded in total. A numeric Node ID (as
+ *  query_graph returns it) is taken as its digits. */
 function refsOf(
   findingIds: string[] | undefined,
-  nodeIds: string[] | undefined,
+  nodeIds: (string | number)[] | undefined,
   max: number
 ): { keys: string[]; graphIds: string[] } {
   const keys = [...new Set(findingIds ?? [])]
-  const graphIds = [...new Set(nodeIds ?? [])]
+  const graphIds = [...new Set((nodeIds ?? []).map(String))]
   for (const k of keys) {
     if (!k || k.length > 200 || !FINDING_ID_PATTERN.test(k)) {
       throw new McpToolError(`"${String(k).slice(0, 40)}" is not a finding id.`, 'bad_args')
@@ -127,7 +128,7 @@ function budgetView(b: BudgetDecision | null) {
 export async function muteFindings(
   ctx: McpContext,
   projectId: string,
-  args: { findingIds?: string[]; nodeIds?: string[]; reason: string }
+  args: { findingIds?: string[]; nodeIds?: (string | number)[]; reason: string }
 ) {
   requireScope(ctx.token, 'triage:mute')
   enforceRate(ctx, 'write')
@@ -260,7 +261,7 @@ export async function muteFindings(
 export async function unmuteFindings(
   ctx: McpContext,
   projectId: string,
-  args: { findingIds?: string[]; nodeIds?: string[]; includeRuleMutes?: boolean }
+  args: { findingIds?: string[]; nodeIds?: (string | number)[]; includeRuleMutes?: boolean }
 ) {
   requireScope(ctx.token, 'triage:mute')
   enforceRate(ctx, 'write')

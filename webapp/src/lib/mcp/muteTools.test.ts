@@ -614,6 +614,21 @@ describe('the advertised schema is enforced', () => {
     expect(sent()).toEqual([])
   })
 
+  test('a Node ID copied from query_graph (a JSON number) is accepted, and sent as digits', async () => {
+    const r = await call('mute_findings', { projectId: 'p1', nodeIds: [812, '813'], reason: 'noise, per owner' })
+    expect(r.isError).toBe(false)
+    expect(sent('mute_many')[0]).toMatchObject({ keys: [], graph_ids: ['812', '813'] })
+  })
+
+  test('a negative or fractional Node ID is refused before the tool runs', async () => {
+    for (const bad of [-1, 1.5, '12a']) {
+      h.fetch.mockClear()
+      const r = await call('unmute_findings', { projectId: 'p1', nodeIds: [bad] })
+      expect(r.isError, String(bad)).toBe(true)
+      expect(sent()).toEqual([])
+    }
+  })
+
   test('a mute with no reason is refused before the tool runs', async () => {
     const r = await call('mute_findings', { projectId: 'p1', findingIds: ['v1'] })
     expect(r.isError).toBe(true)
