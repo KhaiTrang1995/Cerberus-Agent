@@ -2,7 +2,11 @@
 
 /**
  * Muted Nodes: every finding hidden from the graph, the agent, analytics and
- * reports, whether a person muted it or a node-filter rule did.
+ * reports, whether a person muted it, an external agent did over MCP on a
+ * person's token, or a node-filter rule did.
+ *
+ * An agent's mutes are badged and filterable per token, so one token's work
+ * can be reviewed and unmuted together.
  *
  * This is the ONLY place a muted finding is still visible, so it is also where
  * a mute is undone. Paged on the server, because a filter rule can mute
@@ -187,6 +191,7 @@ export function MutedNodesTable({ projectId, onOpenRule }: MutedNodesTableProps)
   const labelOptions = useMemo(
     () => Object.entries(facets?.labels ?? {}).sort((a, b) => b[1] - a[1]), [facets])
   const ruleOptions = facets?.rules ?? []
+  const tokenOptions = facets?.tokens ?? []
 
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const page = Math.floor(offset / PAGE_SIZE) + 1
@@ -235,6 +240,7 @@ export function MutedNodesTable({ projectId, onOpenRule }: MutedNodesTableProps)
         >
           <option value="all">Muted by: all</option>
           <option value="person">People</option>
+          <option value="mcp">Agent (MCP){facets?.by_mcp !== undefined ? ` (${facets.by_mcp})` : ''}</option>
           <option value="rule">Rules</option>
           <option value="deleted_rule">Deleted rules</option>
         </select>
@@ -250,6 +256,19 @@ export function MutedNodesTable({ projectId, onOpenRule }: MutedNodesTableProps)
             <option key={r.muted_by} value={r.muted_by}>
               {r.rule_deleted ? `(deleted) ${r.reason || r.muted_by}` : r.rule_name ?? r.muted_by} ({r.count})
             </option>
+          ))}
+        </select>
+        <select
+          className={styles.select}
+          value={filters.token}
+          onChange={e => setFilter('token', e.target.value)}
+          aria-label="Token"
+          disabled={tokenOptions.length === 0 && !filters.token}
+          title="The mutes one access token made"
+        >
+          <option value="">Any token</option>
+          {tokenOptions.map(t => (
+            <option key={t.token} value={t.token}>{t.token} ({t.count})</option>
           ))}
         </select>
         <input
@@ -376,6 +395,16 @@ export function MutedNodesTable({ projectId, onOpenRule }: MutedNodesTableProps)
                         >
                           {mutedByText(row, userId)}
                         </button>
+                      ) : row.muted_via === 'mcp' ? (
+                        <>
+                          <span
+                            className={styles.agentBadge}
+                            title="Muted by an external agent over MCP, on an access token of this project's owner"
+                          >
+                            {mutedByText(row, userId)}
+                          </span>
+                          {row.muted_reason && <span className={styles.mutedReason}>{row.muted_reason}</span>}
+                        </>
                       ) : (
                         <span className={row.rule_deleted ? styles.ruleDeleted : undefined}>
                           {mutedByText(row, userId)}

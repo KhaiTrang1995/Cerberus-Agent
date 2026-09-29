@@ -366,6 +366,24 @@ describe('deleting asks first, through the modal (never window.confirm)', () => 
     )
   })
 
+  test('deleting a token that can mute says its mutes stay, and names the prefix to find them by', async () => {
+    h.dangerConfirm.mockResolvedValue(false)
+    const muter = { ...TOKEN, scopes: ['recon:read', 'triage:read', 'triage:mute'] }
+    await openDelete(mockFetch({ tokens: { tokens: [muter] } }))
+    await waitFor(() => expect(h.dangerConfirm).toHaveBeenCalled())
+    const [message] = h.dangerConfirm.mock.calls[0]
+    expect(message).toMatch(/Findings this token muted stay muted/)
+    expect(message).toContain(`Token filter ${TOKEN.tokenPrefix}`)
+    expect(message).toMatch(/the prefix is the only record/)
+  })
+
+  test('a token without triage:mute is not warned about mutes it cannot make', async () => {
+    h.dangerConfirm.mockResolvedValue(false)
+    await openDelete(mockFetch({ tokens: { tokens: [TOKEN] } }))
+    await waitFor(() => expect(h.dangerConfirm).toHaveBeenCalled())
+    expect(h.dangerConfirm.mock.calls[0][0]).not.toMatch(/muted/)
+  })
+
   test('the prompt says the row is going, not that the token is switched off', async () => {
     // The old copy promised a revoke, which left the row on screen. Someone who
     // reads "cannot be undone" and still expects to see the row afterwards is

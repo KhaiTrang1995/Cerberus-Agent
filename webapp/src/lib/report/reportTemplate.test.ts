@@ -524,14 +524,27 @@ describe('Dynamic TOC Numbering', () => {
 })
 
 describe('Suppressed findings: people and rules are reported apart', () => {
-  function withSuppressed(people: number, rules: number, ruleNames: { name: string; count: number }[] = []) {
+  function withSuppressed(
+    people: number, rules: number, ruleNames: { name: string; count: number }[] = [], agents = 0,
+  ) {
     const data = makeReportData()
-    ;(data.graphOverview as any).suppressedCount = people + rules
+    ;(data.graphOverview as any).suppressedCount = people + rules + agents
     ;(data.graphOverview as any).suppressedByPeople = people
+    ;(data.graphOverview as any).suppressedByAgents = agents
     ;(data.graphOverview as any).suppressedByRules = rules
     ;(data.graphOverview as any).suppressedRules = ruleNames
     return generateReportHtml(data, null)
   }
+
+  test('an agent\'s mutes get their own row and are never called reviewed', () => {
+    const html = withSuppressed(2, 0, [], 7)
+    expect(html).toContain('<tr><td>Suppressed as noise</td><td>2 finding(s) reviewed and excluded from this report</td></tr>')
+    expect(html).toContain('<tr><td>Suppressed by agents</td><td>7 finding(s) hidden by an automated agent through the MCP server, not reviewed by a person</td></tr>')
+  })
+
+  test('no agent mutes, no agent row', () => {
+    expect(withSuppressed(3, 0)).not.toContain('Suppressed by agents')
+  })
 
   test('two rows: a person reviewed the first, a rule excluded the second', () => {
     const html = withSuppressed(3, 1284, [{ name: 'Informational templates', count: 1284 }])

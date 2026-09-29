@@ -288,6 +288,9 @@ export interface ReportData {
     suppressedCount: number
     /** ...of which a person muted each one: a judgement of that finding. */
     suppressedByPeople: number
+    /** ...of which an external agent muted over MCP, on the operator's token.
+     *  Never presented to a client as a person's judgement. */
+    suppressedByAgents: number
     /** ...of which a project node-filter rule muted: a policy, not a judgement. */
     suppressedByRules: number
     /** The rules behind `suppressedByRules`, largest first. Names are operator
@@ -1025,18 +1028,22 @@ async function queryGraphOverview(session: any, pid: string) {
   // silently omitting them would misrepresent the assessment's scope. One count
   // line keeps the report honest without reprinting what was suppressed.
   //
-  // A person's mute and a filter rule's mute are reported apart: only the first
-  // is a judgement of the finding, and a reader must not take a thousand
-  // rule-muted informational findings for a thousand reviewed ones.
+  // A person's mute, an agent's and a filter rule's are reported apart: only
+  // the first is a judgement of the finding, and a reader must not take a
+  // thousand rule-muted informational findings for a thousand reviewed ones. An
+  // agent's (MCP) mute carries its owner's user id in muted_by, so it is told
+  // apart by muted_channel, or it would be counted as that person's review.
   const suppressedRes = await session.run(
     `MATCH (n:Muted {project_id: $pid})
      WITH coalesce(n.muted_by, '') STARTS WITH 'rule:' AS byRule, n
-     RETURN byRule,
+     WITH byRule, n, (NOT byRule AND coalesce(n.muted_channel, '') = 'mcp') AS byAgent
+     RETURN byRule, byAgent,
             CASE WHEN byRule THEN coalesce(n.muted_reason, '') ELSE '' END AS reason,
             count(n) AS total`,
     { pid }
   )
   let suppressedByPeople = 0
+  let suppressedByAgents = 0
   let suppressedByRules = 0
   const ruleCounts = new Map<string, number>()
   for (const r of suppressedRes.records) {
@@ -1045,11 +1052,13 @@ async function queryGraphOverview(session: any, pid: string) {
       suppressedByRules += total
       const name = String(r.get('reason') || '').replace(/^Filter rule:\s*/, '') || 'unnamed rule'
       ruleCounts.set(name, (ruleCounts.get(name) ?? 0) + total)
+    } else if (r.get('byAgent')) {
+      suppressedByAgents += total
     } else {
       suppressedByPeople += total
     }
   }
-  const suppressedCount = suppressedByPeople + suppressedByRules
+  const suppressedCount = suppressedByPeople + suppressedByAgents + suppressedByRules
   const suppressedRules = [...ruleCounts.entries()]
     .map(([name, count]) => ({ name, count }))
     .sort((a, b) => b.count - a.count)
@@ -1062,6 +1071,7 @@ async function queryGraphOverview(session: any, pid: string) {
     suppressedByPeople,
     suppressedByRules,
     suppressedRules,
+    suppressedByAgents,
     subdomainStats: subRec
       ? { total: toNum(subRec.get('total')), resolved: toNum(subRec.get('resolved')), uniqueIps: toNum(subRec.get('uniqueIps')) }
       : { total: 0, resolved: 0, uniqueIps: 0 },

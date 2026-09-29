@@ -63,6 +63,9 @@ function shapeWarnings(scopes: McpScope[]): string[] {
   if (has('triage:write') && !has('triage:read')) {
     out.push('`triage:write` without `triage:read` lets the agent record verdicts it cannot check against the suppressed findings first.')
   }
+  if (has('triage:mute') && !has('triage:read')) {
+    out.push('`triage:mute` without `triage:read` lets the agent mute findings but never find a muted one again, so it cannot check or undo its own mutes, and cannot unmute anything by id.')
+  }
   if (has('recon:queue')) {
     out.push('Queued work dispatches later and is NOT cancelled when you revoke the token. The pack tells the agent so.')
   }

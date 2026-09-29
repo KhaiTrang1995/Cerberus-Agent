@@ -206,6 +206,25 @@
   font-style: italic;
 }
 
+/* An agent's mute is not a person's judgement, so it is marked as such. */
+.agentBadge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--status-warning-bg);
+  color: var(--status-warning-text);
+  font-size: 10px;
+  font-weight: var(--font-semibold);
+  white-space: nowrap;
+}
+
+.mutedReason {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
 .resolved {
   padding: 1px 6px;
   border-radius: var(--radius-full, 999px);

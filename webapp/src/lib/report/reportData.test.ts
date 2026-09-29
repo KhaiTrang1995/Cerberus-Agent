@@ -346,6 +346,14 @@ describe('every finding query in reportData excludes muted findings', () => {
     expect(SRC).toMatch(/suppressedByPeople,\s*suppressedByRules,\s*suppressedRules,/)
   })
 
+  test('an agent\'s (MCP) mute is counted apart from a person\'s', () => {
+    // It carries its owner's user id in muted_by, so only the channel tells it
+    // apart; without this a client would read an agent's call as a review.
+    expect(SRC).toContain("(NOT byRule AND coalesce(n.muted_channel, '') = 'mcp') AS byAgent")
+    expect(SRC).toMatch(/suppressedCount = suppressedByPeople \+ suppressedByAgents \+ suppressedByRules/)
+    expect(SRC).toMatch(/suppressedRules,\s*suppressedByAgents,/)
+  })
+
   test('ChainFinding queries are deliberately left alone', () => {
     // EvoGraph attack-chain memory is out of triage scope and not muteable.
     const chain = cypherLiterals().filter(q => /:ChainFinding\b/.test(q))

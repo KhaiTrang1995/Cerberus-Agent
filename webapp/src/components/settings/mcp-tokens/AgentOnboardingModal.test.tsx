@@ -151,6 +151,16 @@ describe('it says what it is', () => {
     expect(screen.getByText(/the token is effectively inert/i)).toBeTruthy()
   })
 
+  test('a mute permission without the muted-findings read is called out', () => {
+    render(<AgentOnboardingModal {...props({ initialScopes: ['recon:read', 'triage:mute'] })} />)
+    expect(screen.getByText(/cannot check or undo its own mutes/)).toBeTruthy()
+  })
+
+  test('with the read beside it, the mute permission raises no warning', () => {
+    render(<AgentOnboardingModal {...props({ initialScopes: ['recon:read', 'triage:read', 'triage:mute'] })} />)
+    expect(screen.queryByText(/cannot check or undo its own mutes/)).toBeNull()
+  })
+
   test('a queue permission warns that queued work outlives the token', () => {
     render(<AgentOnboardingModal {...props({ initialScopes: ['recon:read', 'recon:queue'] })} />)
     expect(screen.getByText(/NOT cancelled when you revoke the token/)).toBeTruthy()

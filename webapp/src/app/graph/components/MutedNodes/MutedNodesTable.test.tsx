@@ -42,6 +42,31 @@ afterEach(() => {
 })
 
 describe('MutedNodesTable', () => {
+  test('an agent\'s mute is badged with its token, keeps its reason, and can be filtered by token', async () => {
+    fetchMock.mockReturnValue(reply({
+      total: 1,
+      findings: [row({
+        muted_by: 'u1', muted_via: 'mcp', muted_channel: 'mcp', muted_token: 'rdmn_mcp_ab12cd34',
+        muted_reason: 'dev-only banner, per the owner', rule_kind: null, rule_id: null, rule_name: null,
+      })],
+      facets: {
+        total: 1, by_person: 0, by_mcp: 1, labels: { Vulnerability: 1 }, rules: [],
+        tokens: [{ token: 'rdmn_mcp_ab12cd34', count: 1 }],
+      },
+    }))
+    render(<MutedNodesTable projectId="p1" />)
+    expect(await screen.findByText('Agent (MCP) · rdmn_mcp_ab12cd34')).toBeInTheDocument()
+    expect(screen.queryByText('you')).not.toBeInTheDocument()
+    expect(screen.getByText('dev-only banner, per the owner')).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Agent (MCP) (1)' })).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Token'), { target: { value: 'rdmn_mcp_ab12cd34' } })
+    await waitFor(() => {
+      const last = String(fetchMock.mock.calls[fetchMock.mock.calls.length - 1][0])
+      expect(last).toContain('token=rdmn_mcp_ab12cd34')
+    })
+  })
+
   test('lists rule and person mutes, and says which', async () => {
     fetchMock.mockReturnValue(reply({
       total: 3,

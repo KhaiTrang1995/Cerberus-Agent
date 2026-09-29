@@ -743,6 +743,9 @@ function renderScope(data: ReportData, narrative?: string): string {
       ${graphOverview.suppressedByPeople
         ? `<tr><td>Suppressed as noise</td><td>${graphOverview.suppressedByPeople} finding(s) reviewed and excluded from this report</td></tr>`
         : ''}
+      ${graphOverview.suppressedByAgents
+        ? `<tr><td>Suppressed by agents</td><td>${graphOverview.suppressedByAgents} finding(s) hidden by an automated agent through the MCP server, not reviewed by a person</td></tr>`
+        : ''}
       ${graphOverview.suppressedByRules
         ? `<tr><td>Suppressed by mute rules</td><td>${graphOverview.suppressedByRules} finding(s) excluded by rule, not reviewed one by one${
             graphOverview.suppressedRules.length
