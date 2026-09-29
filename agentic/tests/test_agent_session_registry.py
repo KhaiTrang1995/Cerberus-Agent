@@ -7,12 +7,16 @@ These tests pin the two halves the webapp relies on: the registry reports only
 this project's still-running sessions, and the endpoint is internal-auth gated
 and answers 503 (the webapp then stays busy) before the manager exists.
 
-Run in-container: ./agentic/run_tests.sh tests/test_live_agent_sessions.py
+Run in-container: ./agentic/run_tests.sh tests/test_agent_session_registry.py
 """
 import asyncio
+import importlib.util
+import os
+import re
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 _AGENTIC_DIR = str(Path(__file__).resolve().parents[1])
 if _AGENTIC_DIR not in sys.path:
@@ -93,9 +97,27 @@ class LiveSessionsEndpoint(unittest.TestCase):
                 return r
         self.fail("/agent-sessions/live is not registered")
 
-    def test_is_internal_auth_gated(self):
-        deps = [getattr(d.dependency, "__name__", "") for d in self._route().dependencies]
-        self.assertIn("require_internal_auth_only", deps)
+    def test_scanner_key_cannot_enumerate_live_sessions(self):
+        # The kali sandbox holds SCANNER_API_KEY and faces the target. Live
+        # session ids plus the unauthenticated /agent-session/stop would let it
+        # cancel an operator's run, so only the master key may list them.
+        from fastapi.testclient import TestClient
+
+        mgr = WebSocketManager()
+        saved = api.ws_manager
+        api.ws_manager = mgr
+        env = {"INTERNAL_API_KEY": "master-key-for-test", "SCANNER_API_KEY": "scanner-key-for-test"}
+        try:
+            with mock.patch.dict(os.environ, env, clear=False):
+                client = TestClient(api.app)
+                url = "/agent-sessions/live?project_id=p1"
+                scanner = client.get(url, headers={"x-internal-key": "scanner-key-for-test"})
+                master = client.get(url, headers={"x-internal-key": "master-key-for-test"})
+        finally:
+            api.ws_manager = saved
+        self.assertEqual(scanner.status_code, 401)
+        self.assertEqual(master.status_code, 200)
+        self.assertEqual(master.json(), {"project_id": "p1", "session_ids": []})
 
     def test_returns_the_projects_live_session_ids(self):
         async def scenario():
@@ -121,6 +143,70 @@ class LiveSessionsEndpoint(unittest.TestCase):
         finally:
             api.ws_manager = saved
         self.assertEqual(resp.status_code, 503)
+
+
+_REPO = Path(__file__).resolve().parents[2]
+_WEBAPP_LIB = _REPO / "webapp" / "src" / "lib"
+
+
+class RunsInTheUnitGate(unittest.TestCase):
+    def test_file_name_does_not_opt_it_out_of_the_unit_gate(self):
+        # A name holding `live_`, `_live`, `_smoke` or `smoke_` moves the whole
+        # file to the live tier, and the unit gate then never runs any of it.
+        runner = _REPO / "tooling" / "scripts" / "pytest_isolated.py"
+        if not runner.is_file():
+            self.skipTest(f"gate runner not mounted at {runner}")
+        spec = importlib.util.spec_from_file_location("pytest_isolated", runner)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.tier_of(Path(__file__).name), "unit")
+
+
+class WebappConsumerContract(unittest.TestCase):
+    """The webapp half (lib/agentSessions.ts) and this endpoint share no schema,
+    so each side's unit tests pass on their own assumption. A rename on one side
+    alone makes the webapp read every set flag as unverified, i.e. the project
+    stays locked for good, which is the bug the endpoint exists to fix."""
+
+    def setUp(self):
+        consumer = _WEBAPP_LIB / "agentSessions.ts"
+        if not consumer.is_file():
+            self.skipTest(f"webapp source not mounted at {consumer}")
+        self.src = consumer.read_text()
+
+    def _consumer(self, pattern):
+        m = re.search(pattern, self.src)
+        self.assertIsNotNone(m, f"agentSessions.ts no longer matches {pattern!r}")
+        return m.groups()
+
+    def test_path_method_param_and_key_match_the_consumer(self):
+        path, param = self._consumer(r"`(/[\w/-]+)\?(\w+)=\$\{encodeURIComponent\(projectId\)\}`")
+        (method,) = self._consumer(r"method: '(\w+)'")
+        (key,) = self._consumer(r"\(await res\.json\(\)\)\?\.(\w+)")
+
+        route = next((r for r in api.app.routes if getattr(r, "path", "") == path), None)
+        self.assertIsNotNone(route, f"the webapp calls {path}, which the agent does not serve")
+        self.assertIn(method, route.methods)
+        self.assertIn(param, [q.name for q in route.dependant.query_params])
+
+        async def scenario():
+            mgr = WebSocketManager()
+            task = asyncio.ensure_future(_busy())
+            mgr.register_task("u1:p1:sess-a", task)
+            saved = api.ws_manager
+            api.ws_manager = mgr
+            try:
+                return await route.endpoint(**{param: "p1"})
+            finally:
+                api.ws_manager = saved
+                task.cancel()
+
+        self.assertEqual(asyncio.run(scenario())[key], ["sess-a"])
+
+    def test_the_consumer_sends_the_master_key_the_endpoint_requires(self):
+        self._consumer(r"agentFetch\(\s*`/agent-sessions/live")
+        auth = (_WEBAPP_LIB / "agentAuth.ts").read_text()
+        self.assertIn("'x-internal-key': process.env.INTERNAL_API_KEY", auth)
 
 
 if __name__ == "__main__":

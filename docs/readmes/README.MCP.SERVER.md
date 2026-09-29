@@ -716,11 +716,14 @@ limits at start, not what it reaches.
 fire-and-forget PATCHes, so an agent restarted mid-run left it true and every
 busy check (apply, rescope, activation, the job-queue dispatcher,
 `get_project_activity`) read the project as busy for good. `lib/agentSessions.ts`
-asks the agent (`GET /agent-sessions/live?project_id=`, internal key, backed by
+asks the agent (`GET /agent-sessions/live?project_id=`, backed by
 `WebSocketManager._active_tasks`) whenever a flag is set, and clears the flags
 the agent does not hold with a compare-and-swap on the row's `updatedAt`. There
 is no time-to-live, because a run lasts hours. An agent that cannot answer
 leaves a set flag counting as a running session: fail closed.
+The endpoint takes the MASTER internal key only (`require_master_internal_auth`):
+the kali sandbox holds `SCANNER_API_KEY` and faces the target, and a live
+session id is all the unauthenticated `/agent-session/stop` needs.
 
 **Residual, stated plainly.** A token holding both `project:rescope` and
 `engagement:authorize` can record an authorization for any document digest and

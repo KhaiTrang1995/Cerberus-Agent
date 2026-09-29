@@ -1117,13 +1117,16 @@ async def stop_agent_session(body: SessionStopRequest):
     return {"stopped": stopped}
 
 
-@app.get("/agent-sessions/live", tags=["Sessions"], dependencies=[Depends(require_internal_auth_only)])
+@app.get("/agent-sessions/live", tags=["Sessions"], dependencies=[Depends(require_master_internal_auth)])
 async def live_agent_sessions(project_id: str):
     """Session ids of a project whose agent run is still in progress.
 
     The webapp asks this before it treats a Conversation.agentRunning flag as a
     running session, so a flag left behind by a restarted agent does not lock
     the project. 503 when the manager is not up: the caller then stays busy.
+
+    Master key only: the scanner token lives in the target-facing sandbox, and a
+    live session id is what /agent-session/stop needs.
     """
     if not ws_manager:
         return JSONResponse(content={"error": "agent not ready"}, status_code=503)

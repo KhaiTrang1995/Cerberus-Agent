@@ -23,8 +23,10 @@ vi.mock('@/lib/prisma', () => ({
 vi.mock('@/lib/orchestrator', () => ({ orchestratorFetch: (...a: unknown[]) => mockOrchestratorFetch(...a) }))
 
 import { RECON_PRESETS } from '@/lib/recon-presets'
+import { MINIMAL_DEFAULTS } from '@/components/projects/ProjectForm/formDefaults'
 import {
   PRESET_FIELD_KEYS,
+  appliedPresetName,
   applyPresetSettings,
   extractPresetSettings,
   pickPresetFields,
@@ -215,6 +217,20 @@ describe('computePresetApplication is the form\'s preset load', () => {
       expect(app.loadedPreset.fingerprint, p.id)
         .toBe(presetFingerprint(applyPresetSettings(row, settings, DEFAULTS)))
     }
+  })
+
+  test('the badge an apply writes shows in the settings form that loads the row', () => {
+    // The server fingerprints the row it writes; the form fingerprints the state
+    // it builds from that row after the API's JSON round trip. Any gap between
+    // the two hides the badge on every MCP apply.
+    const settings = {
+      katanaDepth: 5, naabuEnabled: false, arjunMethods: ['POST'],
+      agentToolPhaseMap: { b: ['x'], a: ['y'] },
+    }
+    const row = baseRow()
+    const app = computePresetApplication(row, settings, DEFAULTS, { name: 'Mine', id: 'up1', source: 'user' })
+    const served = JSON.parse(JSON.stringify({ ...row, ...app.data, loadedPreset: app.loadedPreset }))
+    expect(appliedPresetName({ ...MINIMAL_DEFAULTS, ...served })).toBe('Mine')
   })
 
   test('C-10: the badge names the preset by id and source, so a rename or delete can find it', () => {

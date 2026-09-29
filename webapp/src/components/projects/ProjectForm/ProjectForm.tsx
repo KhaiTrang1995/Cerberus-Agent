@@ -27,6 +27,7 @@ import type { PartialReconParams, PartialReconState } from '@/lib/recon-types'
 import { PARTIAL_RECON_PHASE_MAP } from '@/lib/recon-types'
 import type { ReconStatus } from '@/lib/recon-types'
 import { WORKFLOW_TOOLS } from './WorkflowView/workflowDefinition'
+import { MINIMAL_DEFAULTS } from './formDefaults'
 import { ReconLogsDrawer } from '@/app/graph/components/ReconLogsDrawer'
 import { PartialReconBadges } from '@/components/PartialReconBadges'
 import styles from './ProjectForm.module.css'
@@ -193,20 +194,6 @@ function PresetLoadWarning({ saves }: { saves: boolean }) {
 const RECON_TAB_IDS = new Set<string>(['preset', 'target','discovery', 'port', 'http', 'resource', 'jsrecon', 'vuln', 'cve', 'security'])
 // All valid tab ids, for validating a `?tab=` deep-link.
 const ALL_TAB_IDS = new Set<string>(TAB_GROUPS.flatMap(g => g.tabs.map(t => t.id)))
-
-// Minimal fallback defaults - only required fields
-// Full defaults are fetched from /api/projects/defaults (served by recon backend)
-const MINIMAL_DEFAULTS: Partial<ProjectFormData> = {
-  name: '',
-  description: '',
-  targetDomain: '',
-  subdomainList: [],
-  ipMode: false,
-  targetIps: [],
-  domainBatchMode: false,
-  domainBatchHosts: [],
-  scanModules: ['domain_discovery', 'port_scan', 'http_probe', 'resource_enum', 'vuln_scan'],
-}
 
 /** The target requirement per mode, shared by Save and Save-and-stay so the two
  *  can never disagree about what a valid target is. Returns a message or null. */

@@ -52,6 +52,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A full recon queued before a change to supply-chain recon now re-confirms**, like a change to any pipeline phase, instead of running with the new setting.
 - **Uploading a JS recon file and then saving the form no longer drops the upload** from the project.
 - **An MCP write can clear the engagement identity header.** Its empty default was refused as an invalid header.
+- **A scheduled scan you paused while it was starting came back on.** The run wrote back the "enabled" it had read before starting, so pausing a schedule in that window, by hand or by adding hosts to a batch over MCP, was undone. A run now leaves the switch alone.
 - **A project could stay locked by an agent session that had ended.** An agent restarted mid-run left its session marked as running, so applying a preset, changing a target list, activating a version and dispatching a queued full scan waited on it for good. The mark is now checked against the agent and cleared when the agent is not running that session. If the agent cannot be reached, the project still counts as busy.
 
 ## [6.21.0] - 2026-09-29
