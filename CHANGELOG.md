@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.22.0] - 2026-09-29
+
+### Added
+
+- **Mute from anywhere on the graph page.** The Priority Board's **Mute** button now also appears in the node drawer (left of delete) and as the rightmost column of every node table: All Nodes, Node Inspector, JS Recon and the Red Zone tables. It works exactly as it does on the board: confirm, hide the finding from the graph, reports and the agent, and restore it from Muted Nodes. Only findings can be muted. On asset rows (IP, domain, port, technology and so on) the button is disabled and its tooltip says why.
+- **Node ID column on every node table.** All Nodes, Node Inspector, JS Recon, the Red Zone tables and Insights Top Findings show the node's graph id in a leftmost column, and the Recon Delta shows it for live assets. It is the number to quote to an agent; MCP results carry it as `nodeId`.
+- **Copy a node's context, or start an agent session from it.** In the node drawer, **Copy context** puts an LLM-ready Markdown brief (properties and relationships) on your clipboard. **Ask agent** asks what you want, then opens a fresh agent session with your request and that brief as the first message. It is hidden on a saved version.
+
+### Changed
+
+- **Node drawer actions moved into the Basic Info row** as matching icon buttons (copy, ask agent, mute, delete). The drawer title is smaller and shows the full name on hover when it is clipped.
+
 ## [6.21.0] - 2026-09-29
 
 ### Added
