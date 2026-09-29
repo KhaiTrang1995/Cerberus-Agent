@@ -545,6 +545,19 @@ describe('editing a token', () => {
     expect(patchBody(fetchMock).scopes).toContain('graph:cypher')
   })
 
+  test('"Expire now" on a token that can mute says its mutes stay, by prefix', async () => {
+    await openEdit(mockFetch({ tokens: { tokens: [{ ...ACTIVE, scopes: ['recon:read', 'triage:mute'] }] } }))
+    fireEvent.change(screen.getByLabelText('Expires'), { target: { value: 'now' } })
+    expect(screen.getByText(/Findings this token muted stay muted/).textContent)
+      .toContain(`Token filter ${TOKEN.tokenPrefix}`)
+  })
+
+  test('"Expire now" on a token that cannot mute says nothing about mutes', async () => {
+    await openEdit(mockFetch({ tokens: { tokens: [ACTIVE] } }))
+    fireEvent.change(screen.getByLabelText('Expires'), { target: { value: 'now' } })
+    expect(screen.queryByText(/Findings this token muted/)).toBeNull()
+  })
+
   test('"Expire now" saves without a password', async () => {
     const fetchMock = mockFetch({ tokens: { tokens: [ACTIVE] } })
     await openEdit(fetchMock)
