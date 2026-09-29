@@ -13,6 +13,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **An agent's mute could re-hide a finding you unmuted while its call was running.** The finding is unmuted again and reported as `kept_visible`.
 - **The error codes the MCP mute tools document never reached the agent** (`busy`, `budget_exhausted`, `*_outcome_unknown`); they are now in the message. A mute budget refund no longer lands in the next day's budget.
 - **The Mute button said "this finding changed" during a version activation**, and announced an already-muted finding as your mute.
+- **Preset applied badges hidden in 6.22.0 show again, and follow their preset.** Renaming a preset renames the badge on the projects that loaded it; deleting one clears it.
+- **Adding hosts to a batch over MCP pauses the project's scheduled scans** until you resume them in the **Scans** tab, so no unattended scan reaches a new host first.
+- **A scheduled scan paused while it was starting no longer comes back on.**
+- **A project no longer stays locked by an agent session that has ended.** A session marked as running is checked with the agent; if the agent cannot be reached, the project still counts as busy.
 
 ## [6.22.0] - 2026-09-29
 
@@ -29,7 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Node drawer actions moved into the Basic Info row** as matching icon buttons (copy, ask agent, mute, delete). The drawer title is smaller and shows the full name on hover when it is clipped.
 - **`update_recon_settings` describes what it can really change.** Its description still listed the old 126-field allowlist, so agents concluded they could not edit an existing project's settings. The refused fields are now listed from the settings registry itself. *Penetration testing* and *Bug bounty* offer **Change recon tuning settings** as an opt-in.
-- **The Preset applied badge follows its preset.** Renaming one of your presets renames the badge on every project that loaded it, and deleting one clears it; the projects' settings do not move. Badges written before presets stopped carrying two switches (see Security) are still recognised, and a setting added to RedAmon later no longer hides every badge at once.
+- **Saved-preset badges reset once.** Presets no longer carry two switches (see Security), which changes the fingerprint behind the **Preset applied** badge, so projects that showed it lose it until the next preset load. Nothing about their settings changes.
 
 ### Security
 
@@ -44,7 +48,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **MCP `create_project` runs the permanent target guardrail**, as the project form does, on the domain and on every batch root.
 - **Presets store and return preset settings only.** Saving a preset in the UI, importing one and exporting a project used to pass through whatever object a preset held, so an old preset could carry a target or a credential; reads and the export now return only preset fields, and an import skips a bad preset instead of failing.
 - **The project form's AI guardrail can block an edit again.** On a batch host-list edit it called the agent without the internal key and read the wrong field of the answer, so it never refused anything.
-- **Adding hosts to a batch over MCP pauses the project's scheduled scans.** A scheduled scan is a full recon that nobody watches start, so it must not be the first thing to reach a host an agent added. `update_project_scope` pauses every enabled schedule of the project when the host list gains an entry and lists them in its answer; resume them in the **Scans** tab once you have checked the new scope.
 
 ### Fixed
 
@@ -52,8 +55,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A full recon queued before a change to supply-chain recon now re-confirms**, like a change to any pipeline phase, instead of running with the new setting.
 - **Uploading a JS recon file and then saving the form no longer drops the upload** from the project.
 - **An MCP write can clear the engagement identity header.** Its empty default was refused as an invalid header.
-- **A scheduled scan you paused while it was starting came back on.** The run wrote back the "enabled" it had read before starting, so pausing a schedule in that window, by hand or by adding hosts to a batch over MCP, was undone. A run now leaves the switch alone.
-- **A project could stay locked by an agent session that had ended.** An agent restarted mid-run left its session marked as running, so applying a preset, changing a target list, activating a version and dispatching a queued full scan waited on it for good. The mark is now checked against the agent and cleared when the agent is not running that session. If the agent cannot be reached, the project still counts as busy.
 
 ## [6.21.0] - 2026-09-29
 
