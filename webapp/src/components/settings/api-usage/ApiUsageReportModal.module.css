@@ -1,0 +1,401 @@
+/*
+ * API usage report. Status ink and bar fills use the --status-*-text tokens:
+ * 400 on the dark theme, 700 on the light one, so they keep their contrast on
+ * both surfaces (the raw 500-level --status-* tokens fail on light). Error and
+ * warning boxes sit on a neutral surface with a coloured edge: the tinted
+ * --status-*-bg fills drop red ink and grey text under 4.5:1 on the dark theme.
+ */
+
+.spin { animation: apiUsageSpin 1s linear infinite; }
+
+@keyframes apiUsageSpin { to { transform: rotate(360deg); } }
+
+.controlDisabled {
+  cursor: not-allowed;
+  color: var(--text-tertiary);
+}
+
+.controlDisabled:hover {
+  color: var(--text-tertiary);
+  border-color: var(--border-default);
+}
+
+/* Doubled class: outranks the Modal's own size class whatever the load order. */
+.modal.modal {
+  max-width: 820px;
+}
+
+.headerButton {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 4px 10px;
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium);
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-default);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.headerButton:hover:not(:disabled) { border-color: var(--border-strong); }
+.headerButton:disabled { cursor: not-allowed; color: var(--text-tertiary); }
+
+.report {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1-5);
+  margin: 0;
+  color: var(--text-secondary);
+}
+
+.runBy {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.muted { color: var(--text-tertiary); }
+
+.banner {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-md);
+  border: 1px solid transparent;
+  font-size: var(--text-xs);
+}
+
+.bannerError {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border-color: var(--status-error-text);
+  border-left-width: 3px;
+}
+
+.bannerError svg { color: var(--status-error-text); }
+
+.bannerWarning {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  border-color: var(--status-warning-text);
+  border-left-width: 3px;
+}
+
+.bannerWarning svg { color: var(--status-warning-text); }
+
+.linkButton {
+  padding: 0;
+  font: inherit;
+  font-size: var(--text-xs);
+  color: var(--accent-secondary);
+  background: none;
+  border: none;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.linkButton:disabled { color: var(--text-tertiary); cursor: not-allowed; }
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1-5);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: 3px 10px;
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium);
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  background: transparent;
+  cursor: pointer;
+}
+
+.chip:disabled {
+  cursor: default;
+  color: var(--text-tertiary);
+  border-color: var(--border-default);
+}
+
+.chipError { color: var(--status-error-text); }
+.chipOk { color: var(--status-success-text); }
+.chipInfo { color: var(--status-info-text); }
+.chipMuted { color: var(--text-secondary); }
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  scroll-margin-top: var(--space-2);
+}
+
+.sectionTitle {
+  margin: var(--space-2) 0 0;
+  font-size: var(--text-xs);
+  font-weight: var(--font-semibold);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-secondary);
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-3);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+}
+
+.rowHead {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.service { font-weight: var(--font-semibold); }
+
+.hint {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.role {
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  padding: 2px 8px;
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium);
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+
+.badgeOk { color: var(--status-success-text); }
+.badgeWarning { color: var(--status-warning-text); }
+.badgeError { color: var(--status-error-text); }
+.badgeMuted { color: var(--text-secondary); }
+
+.account {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.account b { color: var(--text-primary); }
+
+.errorBox {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2);
+  font-size: var(--text-xs);
+  color: var(--status-error-text);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-default);
+  border-left: 3px solid var(--status-error-text);
+  border-radius: var(--radius-default);
+}
+
+.errorBox .muted { color: var(--text-secondary); }
+
+.errorMessage {
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+
+.action { color: var(--text-secondary); }
+
+.meters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.meter {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.meterHead {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--text-xs);
+}
+
+.meterLabel { color: var(--text-primary); }
+
+.meterFigure {
+  color: var(--text-primary);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.bar {
+  height: 6px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-default);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.fill { height: 100%; border-radius: 999px; }
+.fillOk { background: var(--status-success-text); }
+.fillLow { background: var(--status-warning-text); }
+.fillExhausted { background: var(--status-error-text); }
+
+.meterFoot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px var(--space-3);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.secondary {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.secondary > .linkButton { align-self: flex-start; }
+
+.notes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.warning {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--status-warning-text);
+}
+
+.rowFoot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.tag {
+  padding: 0 6px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 999px;
+}
+
+.link {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--accent-secondary);
+}
+
+.skipped {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.skipped summary { cursor: pointer; }
+
+.skipped p { margin: var(--space-1) 0 0; }
+
+.pending {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: var(--space-1-5) var(--space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.pending li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+}
+
+/* Per-provider chip on the LLM Providers cards. */
+.llmChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 1px 8px;
+  font-size: 11px;
+  border-radius: 999px;
+  border: 1px solid currentColor;
+  white-space: nowrap;
+}
+
+@media (max-width: 640px) {
+  .modal.modal {
+    max-width: 100%;
+    max-height: calc(100vh - var(--space-4));
+  }
+
+  .rowHead { gap: var(--space-1-5); }
+
+  .badge { margin-left: 0; }
+
+  .meterHead {
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .meterFigure { text-align: left; }
+
+  .pending { grid-template-columns: 1fr; }
+}

@@ -1113,6 +1113,11 @@ services:
       SCA_INTEL_PATH: /sca-intel
       SCA_INTEL_MATCH_ENABLED: ${SCA_INTEL_MATCH_ENABLED:-true}
       CAPTURE_IOC_IGNORE_SUFFIXES: ${CAPTURE_IOC_IGNORE_SUFFIXES:-}
+      # Settings > API Keys "Check API usage": the webapp calls each provider's
+      # account/usage endpoint with the user's saved keys, on demand. Set false on
+      # an AIR-GAPPED host (no provider egress from the webapp); the last saved
+      # report stays readable. Same env_file caveat as every knob above.
+      API_USAGE_CHECK_ENABLED: ${API_USAGE_CHECK_ENABLED:-true}
       # S11: login lockout / backoff thresholds. SAFE DEFAULTS so an unset value
       # fails safe to a real limit, never to "no limit".
       LOGIN_MAX_ATTEMPTS: ${LOGIN_MAX_ATTEMPTS:-5}

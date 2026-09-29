@@ -72,11 +72,15 @@ class TestCredentialFieldWiring(unittest.TestCase):
             self.assertIn(f"'{field}'", allowed, f"{field} would be dropped on import")
 
     def test_every_credential_is_masked_on_read(self):
+        # One list masks the GET and the PUT response alike.
+        secret_fields = section(self.route, "const SECRET_FIELDS = [", "] as const")
         for field in CREDENTIAL_FIELDS:
             self.assertIn(
-                f"{field}: maskSecret(settings.{field})", self.route,
+                f"'{field}'", secret_fields,
                 f"{field} is returned unmasked by GET /api/users/[id]/settings",
             )
+        self.assertIn("settings = maskSecrets(settings)", self.route)
+        self.assertIn("...maskSecrets(settings), rotationConfigs", self.route)
 
     def test_every_credential_is_persisted_on_write(self):
         fields_array = section(self.route, "const fields = [", "] as const")

@@ -15,6 +15,7 @@ import {
   templateKeyLabel,
 } from './apiKeysTemplate'
 import { credentialField } from './credentialFields'
+import { ROTATION_TOOL_NAMES } from './rotationTools'
 
 // ---------------------------------------------------------------------------
 // Template generation
@@ -998,9 +999,10 @@ describe('buildTemplate — edge cases', () => {
     expect(Object.keys(t.tunneling).length).toBe(3)
   })
 
-  test('template rotation tools count matches TOOL_NAME_MAP', () => {
+  test('template rotation tools are exactly ROTATION_TOOLS, in order', () => {
     const t = buildTemplate({}, {})
     const rotationTools = Object.keys(t.rotation).filter(k => !k.startsWith('_'))
+    expect(rotationTools).toEqual([...ROTATION_TOOL_NAMES])
     expect(rotationTools.length).toBe(22)
   })
 

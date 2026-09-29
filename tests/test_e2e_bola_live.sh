@@ -97,11 +97,25 @@ check "A lists B's workspace files -> blocked"      404 "$(code "$TMP/a.jar" GET
 check "A reads B's MCP servers -> blocked"          403 "$(code "$TMP/a.jar" GET "/api/users/$B_ID/mcp")"
 check "A reads B's attack-skills -> blocked"        403 "$(code "$TMP/a.jar" GET "/api/users/$B_ID/attack-skills")"
 
+echo "== API usage report (sends a user's plaintext keys to providers) =="
+# The seeded users have no keys, so no provider is ever called: an owner POST
+# answers 400 no_keys, and a refused cross-user POST never reaches the keys.
+B_USAGE_BEFORE="$(body "$TMP/b.jar" "/api/users/$B_ID/settings/api-usage")"
+check "A reads B's api-usage report -> blocked"     403 "$(code "$TMP/a.jar" GET "/api/users/$B_ID/settings/api-usage")"
+check "A runs B's api-usage check -> blocked"       403 "$(code "$TMP/a.jar" POST "/api/users/$B_ID/settings/api-usage" '{"overwrite":true,"ignoreRunningScans":true}')"
+B_USAGE_AFTER="$(body "$TMP/b.jar" "/api/users/$B_ID/settings/api-usage")"
+if [ -n "$B_USAGE_BEFORE" ] && [ "$B_USAGE_BEFORE" = "$B_USAGE_AFTER" ]; then ok "B's api-usage state unchanged by A's POST"; else bad "B's api-usage state changed (or unreadable) after A's POST"; fi
+check "B reads OWN api-usage (the 403s are real)"   200 "$(code "$TMP/b.jar" GET "/api/users/$B_ID/settings/api-usage")"
+
 echo "== Admin scoping + impersonation =="
 check "admin (not simulating) reads A's project -> blocked (no see-all)" 404 "$(code "$TMP/admin.jar" GET "/api/projects/$PA_ID")"
+check "admin (not simulating) reads A's api-usage -> blocked" 403 "$(code "$TMP/admin.jar" GET "/api/users/$A_ID/settings/api-usage")"
+check "admin (not simulating) runs A's api-usage -> blocked"  403 "$(code "$TMP/admin.jar" POST "/api/users/$A_ID/settings/api-usage" '{"overwrite":true}')"
 check "admin acts-as A"                                    200 "$(code "$TMP/admin.jar" POST /api/auth/act-as "{\"targetUserId\":\"$A_ID\"}")"
 check "admin simulating A reads A's project"              200 "$(code "$TMP/admin.jar" GET "/api/projects/$PA_ID")"
 check "admin simulating A pastes B's project -> BLOCKED"  404 "$(code "$TMP/admin.jar" GET "/api/projects/$PB_ID")"
+check "admin simulating A reads A's api-usage"            200 "$(code "$TMP/admin.jar" GET "/api/users/$A_ID/settings/api-usage")"
+check "admin simulating A reads B's api-usage -> BLOCKED" 403 "$(code "$TMP/admin.jar" GET "/api/users/$B_ID/settings/api-usage")"
 check "admin stops simulating"                            200 "$(code "$TMP/admin.jar" DELETE /api/auth/act-as)"
 check "admin (stopped) reads A's project -> blocked again" 404 "$(code "$TMP/admin.jar" GET "/api/projects/$PA_ID")"
 
@@ -112,6 +126,8 @@ check "A reads OWN scan status"                     200 "$(code "$TMP/a.jar" GET
 check "A lists OWN remediations"                    200 "$(code "$TMP/a.jar" GET "/api/remediations?projectId=$PA_ID")"
 check "A lists OWN conversations"                   200 "$(code "$TMP/a.jar" GET "/api/conversations?projectId=$PA_ID")"
 check "A lists OWN graph-views"                     200 "$(code "$TMP/a.jar" GET "/api/graph-views?projectId=$PA_ID")"
+check "A reads OWN api-usage report"                200 "$(code "$TMP/a.jar" GET "/api/users/$A_ID/settings/api-usage")"
+check "A runs OWN api-usage check (no keys saved)"  400 "$(code "$TMP/a.jar" POST "/api/users/$A_ID/settings/api-usage" '{}')"
 # legacy agent/files download (no projectId) must NOT be blocked by the project guard
 FILES_CODE="$(code "$TMP/a.jar" GET "/api/agent/files?path=/tmp/nonexistent")"
 if [ "$FILES_CODE" = "400" ]; then bad "legacy agent/files (no projectId) wrongly 400-blocked"; else ok "legacy agent/files (no projectId) not project-guard-blocked -> $FILES_CODE"; fi

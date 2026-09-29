@@ -180,6 +180,7 @@ flag it manages. Control KB with `ENABLE_KB` only.
 | `SCA_INTEL_BOOTSTRAP_ON_SCAN` | `false` stops a scan populating a cold catalog volume (blank -> `true`). |
 | `SCA_INTEL_MATCH_ENABLED` | `false` turns off matching captured requests against the catalog (blank -> `true`). |
 | `CAPTURE_IOC_IGNORE_SUFFIXES` | Hosts excluded from that match. Blank -> the five OAST providers the catalog lists as indicators, so your own Burp Collaborator callbacks are not flagged. |
+| `API_USAGE_CHECK_ENABLED` | `false` (or `0`, `no`, `off`, any case) turns off **Settings > API Keys > Check API usage** on an **air-gapped** host: the check makes the webapp call each provider's account/usage endpoint with the saved keys, on demand. The last saved report stays readable. Blank -> `true`. |
 
 LLM provider keys are configured in the UI, not here.
 

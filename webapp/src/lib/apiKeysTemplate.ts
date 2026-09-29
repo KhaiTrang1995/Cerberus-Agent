@@ -16,10 +16,11 @@
  */
 
 import { credentialField } from './credentialFields'
+import { ROTATION_TOOL_NAMES } from './rotationTools'
 
 const MAX_FILE_SIZE = 100 * 1024 // 100 KB
 
-const ALLOWED_KEY_FIELDS = [
+export const ALLOWED_KEY_FIELDS = [
   // GitHub & Supply Chain
   'githubAccessToken',
   'supplyChainGithubToken',
@@ -76,18 +77,10 @@ const ALLOWED_KEY_FIELDS = [
   'trufflehogGitToken',
 ] as const
 
-const ALLOWED_TUNNEL_FIELDS = [
+export const ALLOWED_TUNNEL_FIELDS = [
   'ngrokAuthtoken',
   'chiselServerUrl',
   'chiselAuth',
-] as const
-
-const ALLOWED_ROTATION_TOOLS = [
-  'tavily', 'shodan', 'serp', 'nvd', 'vulners', 'urlscan',
-  'fofa', 'otx', 'netlas', 'virustotal', 'zoomeye', 'criminalip',
-  'securitytrails', 'viewdns',
-  'quake', 'hunter', 'publicwww', 'hunterhow', 'onyphe', 'driftnet', 'wpscan',
-  'pdcp',
 ] as const
 
 /**
@@ -145,7 +138,7 @@ function labelIndex(fields: readonly string[]): Map<string, string> {
 const KEY_BY_TEMPLATE_NAME = labelIndex(ALLOWED_KEY_FIELDS)
 const TUNNEL_BY_TEMPLATE_NAME = labelIndex(ALLOWED_TUNNEL_FIELDS)
 
-const ALLOWED_ROTATION_SET = new Set<string>(ALLOWED_ROTATION_TOOLS)
+const ALLOWED_ROTATION_SET = new Set<string>(ROTATION_TOOL_NAMES)
 
 // ---------------------------------------------------------------------------
 // Template generation
@@ -175,7 +168,7 @@ export function buildTemplate(
   const rotation: Record<string, { extraKeys: string[]; rotateEveryN: number } | { _comment: string }> = {
     _comment: 'Optional. Add extra keys for rotation. rotateEveryN = switch key every N API calls.' as never,
   }
-  for (const tool of ALLOWED_ROTATION_TOOLS) {
+  for (const tool of ROTATION_TOOL_NAMES) {
     rotation[tool] = { extraKeys: [], rotateEveryN: 10 }
   }
 

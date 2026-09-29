@@ -258,7 +258,8 @@ The frontend integration is identical regardless of which backend pattern is use
 **Key files for API key integration:**
 - `webapp/prisma/schema.prisma` -- `UserSettings` model (add key field)
 - `webapp/src/app/api/users/[id]/settings/route.ts` -- GET masking + PUT whitelist
-- `webapp/src/app/settings/page.tsx` -- `UserSettings` interface, `EMPTY_SETTINGS`, `TOOL_NAME_MAP`, `SecretField` rendering, both `fetchSettings()` response handlers
+- `webapp/src/app/settings/page.tsx` -- `UserSettings` interface, `EMPTY_SETTINGS`, `SecretField` rendering, both `fetchSettings()` response handlers
+- `webapp/src/lib/rotationTools.ts` -- `ROTATION_TOOLS`, the one list of Key Rotation tools (tool name + settings field) that the page, the settings PUT and the key template all read
 - `webapp/src/components/projects/ProjectForm/sections/ToolMatrixSection.tsx` -- `TOOL_KEY_INFO` + `fetchKeyStatus()`
 - `webapp/src/app/graph/components/AIAssistantDrawer/hooks/useApiKeyModal.ts` -- `API_KEY_INFO` dict (top of file) + `fetchApiKeyStatus()` -- **duplicate** of ToolMatrix key check, used to show missing-key warnings in the chat UI
 - `webapp/src/app/graph/components/AIAssistantDrawer/ToolExecutionCard.tsx` -- `TOOL_KEY_LABEL` dict (line 15-19) -- maps tool name to human-readable API key label for chat tool cards
@@ -377,15 +378,17 @@ Replace `TOOL_NAME` with the tool name (e.g. `execute_httpx`) and `PHASE1`, `PHA
 
 - [ ] **`webapp/prisma/schema.prisma`** — Add `[tool]ApiKey` field to `UserSettings` model (read existing key fields as reference)
 - [ ] **`webapp/src/app/api/users/[id]/settings/route.ts`** — Add to GET masking logic + PUT whitelist (read how existing keys are handled)
-- [ ] **`webapp/src/app/settings/page.tsx`** — Add to `UserSettings` interface, `EMPTY_SETTINGS`, `TOOL_NAME_MAP`, add `SecretField` component in JSX (read Shodan ~line 505-515 as reference), add to both `fetchSettings()` response handlers (~lines 243, 313)
+- [ ] **`webapp/src/app/settings/page.tsx`** — Add to `UserSettings` interface, `EMPTY_SETTINGS`, add `SecretField` component in JSX (read Shodan ~line 505-515 as reference), add to both `fetchSettings()` response handlers (~lines 243, 313)
 - [ ] **`webapp/src/components/projects/ProjectForm/sections/ToolMatrixSection.tsx`** — Add to `TOOL_KEY_INFO` + `fetchKeyStatus()` (if not already done above)
 - [ ] **`webapp/src/app/graph/components/AIAssistantDrawer/hooks/useApiKeyModal.ts`** — Add to `API_KEY_INFO` dict (top of file) and missing key detection in `fetchApiKeyStatus()`. This is a **duplicate** of the ToolMatrix key check — the chat drawer also warns users about missing API keys.
 - [ ] **`webapp/src/app/graph/components/AIAssistantDrawer/ToolExecutionCard.tsx`** — Add to `TOOL_KEY_LABEL` dict (line 15-19) — maps tool name to human-readable label shown on tool cards in chat when key is missing.
 
 #### API Keys Import/Export Template (Type D or any tool needing API keys)
 
-- [ ] **`webapp/src/lib/apiKeysTemplate.ts`** — Add new key to `ALLOWED_KEY_FIELDS` and rotation tool name to `ALLOWED_ROTATION_TOOLS`. These must stay in sync with `UserSettings` interface and `TOOL_NAME_MAP` in `settings/page.tsx`.
+- [ ] **`webapp/src/lib/apiKeysTemplate.ts`** — Add new key to `ALLOWED_KEY_FIELDS`. It must stay in sync with the `UserSettings` interface in `settings/page.tsx`.
+- [ ] **`webapp/src/lib/rotationTools.ts`** — If the key supports rotation, add one `ROTATION_TOOLS` entry (`tool`, `field`, `label`). The settings page (Key Rotation button), the settings PUT (which rows it saves) and the template all read this list, so there is no second copy to update; `rotationTools.test.ts` fails if the page has no Key Rotation button for the field.
 - [ ] **`webapp/src/lib/apiKeysTemplate.test.ts`** — Update test counts to match (key count, rotation count, round-trip test).
+- [ ] **`webapp/src/lib/apiUsage/registry.ts`** — Register a usage probe for the new key (a `providers/<id>.ts` with its `<id>.test.ts`, written from the provider's account/usage endpoint), or add the field to `NOT_PROBED` with the reason it cannot be checked for free. `registry.drift.test.ts` fails until the new field is covered, so the **Check API usage** report never silently skips a key.
 
 #### Progress Streaming (if long-running tool, >60s typical)
 
@@ -479,8 +482,9 @@ If the tool is the PRIMARY tool for a new built-in attack skill (like Hydra is f
 | `webapp/src/app/graph/components/AIAssistantDrawer/ToolExecutionCard.tsx` | `TOOL_KEY_LABEL` — human label on tool cards when key missing | If tool needs API keys |
 | `webapp/src/app/api/users/[id]/settings/route.ts` | API key storage, masking, PUT whitelist | If tool needs API keys |
 | `webapp/src/app/api/users/[id]/attack-skills/available/route.ts` | Built-in skills list | If part of new attack skill |
-| `webapp/src/app/settings/page.tsx` | Global Settings — API key inputs with `SecretField`, `UserSettings` interface, `TOOL_NAME_MAP` | If tool needs API keys |
-| `webapp/src/lib/apiKeysTemplate.ts` | Bulk import/export JSON template — `ALLOWED_KEY_FIELDS`, `ALLOWED_ROTATION_TOOLS`, `ALLOWED_TUNNEL_FIELDS` allowlists | If tool needs API keys |
+| `webapp/src/app/settings/page.tsx` | Global Settings — API key inputs with `SecretField`, `UserSettings` interface | If tool needs API keys |
+| `webapp/src/lib/rotationTools.ts` | `ROTATION_TOOLS` — the single Key Rotation tool list (page, settings PUT, template) | If the key supports rotation |
+| `webapp/src/lib/apiKeysTemplate.ts` | Bulk import/export JSON template — `ALLOWED_KEY_FIELDS`, `ALLOWED_TUNNEL_FIELDS` allowlists (rotation tools come from `rotationTools.ts`) | If tool needs API keys |
 | `webapp/src/lib/apiKeysTemplate.test.ts` | 82 unit tests for template generation and validation — field counts, round-trips, injection tests | If tool needs API keys (update counts) |
 | `docker-compose.yml` | Root compose — agent env vars, kali-sandbox ports | Type C |
 | `agentic/docker-compose.yml` | Dev compose — agent env vars | Type C |

@@ -53,8 +53,11 @@ class TestSettingsAPIRoute(unittest.TestCase):
             self.content = f.read()
 
     def test_get_masking(self):
-        """wpscanApiToken must be masked in GET response."""
-        self.assertIn('wpscanApiToken: maskSecret(settings.wpscanApiToken)', self.content)
+        """wpscanApiToken must be masked in GET response (the shared SECRET_FIELDS list)."""
+        match = re.search(r"const SECRET_FIELDS = \[([^\]]+)\]", self.content)
+        self.assertIsNotNone(match)
+        self.assertIn("'wpscanApiToken'", match.group(1))
+        self.assertIn('settings = maskSecrets(settings)', self.content)
 
     def test_put_whitelist(self):
         """wpscanApiToken must be in PUT fields whitelist."""
@@ -85,8 +88,12 @@ class TestSettingsPageUI(unittest.TestCase):
         self.assertIn("wpscanApiToken: ''", self.content)
 
     def test_tool_name_map_has_entry(self):
-        """TOOL_NAME_MAP must map wpscanApiToken to 'wpscan'."""
-        self.assertIn("wpscanApiToken: 'wpscan'", self.content)
+        """The shared rotation list (rotationTools.ts) must map wpscanApiToken to 'wpscan'."""
+        path = os.path.join(BASE_DIR, 'webapp', 'src', 'lib', 'rotationTools.ts')
+        with open(path) as f:
+            rotation = f.read()
+        self.assertIn("{ tool: 'wpscan', field: 'wpscanApiToken'", rotation)
+        self.assertIn("from '@/lib/rotationTools'", self.content)
 
     def test_fetch_settings_has_field(self):
         """fetchSettings response handler must include wpscanApiToken."""

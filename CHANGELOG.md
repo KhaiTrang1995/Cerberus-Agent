@@ -5,19 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [6.21.0] - 2026-09-27
+## [6.21.0] - 2026-09-29
 
 ### Added
 
-- **Recon keeps going when a data source fails, and says what it skipped.** Every external dependency the recon pipeline calls — the OSINT and search providers (Shodan, Censys, FOFA, ZoomEye, VirusTotal, urlscan, OTX, Netlas, CriminalIP, uncover), the CVE feeds (NVD, Vulners), the DNS resolver and the per-source subdomain tools (crt.sh, HackerTarget, subfinder, amass, knockpy, puredns), the JS/secret validators, npm, and the report/agent LLM — now sits behind a **circuit breaker**. A provider that rate-limits, refuses a key, times out or 5xxs is paused for the rest of the run instead of being retried into the ground, and a scan target that stops responding is skipped by the tools that would otherwise spend their full per-host timeout on it. A refused API key is dropped from a rotation pool and the next key is tried; the breaker opens only when the pool is empty.
-- **A partial run never deletes what it could not re-check.** When a source is degraded, the end-of-run prune keeps that source's (and that host's) previous findings rather than treating "not seen this run" as "gone". Each covered domain records what was skipped, so run history, the Recon Delta and the report can show it.
-- **Coverage is visible end to end.** A completed full recon stamps how many finding sources it could not fully re-check; the scan history and version lists show "partial — N sources skipped", the Recon Delta banners a partial newer version, the report gains a **Coverage Limitations** section, and the live logs highlight `[!][DEGRADED]` lines.
-- **Nuclei and httpx get real runtime ceilings.** Two new project settings, **Nuclei max runtime** and **Nuclei max host errors**, cap a Nuclei pass and drop a host that only errors; httpx gets a computed wall-clock budget. A capped run keeps the findings it produced and marks the coverage truncated.
-- **An off switch.** `RECON_CIRCUIT_BREAKERS=off` disables all breakers and host-skipping (coverage recording and the prune guard stay on) for debugging.
+- **API usage report.** **Check API usage** (Settings > API Keys and LLM Providers) checks every saved key, rotation keys included, in one click and shows each key's plan, remaining quota and next reset, or why it could not be checked. It calls only account and usage endpoints, never a search, and the keys never reach the browser. The report is saved and reopens from **Last report**. Turn it off on air-gapped hosts with `API_USAGE_CHECK_ENABLED=false`.
+- **Recon circuit breakers.** Every external dependency the recon pipeline calls — OSINT/search providers, CVE feeds, the DNS resolver, the subdomain tools, the JS/secret validators, npm and the agent LLM — now sits behind a circuit breaker: one that rate-limits, refuses a key or goes down is paused for the rest of the run instead of retried, and a scan host that stops responding is skipped after 3 failures. A degraded run keeps the findings it could not re-check (never deletes them as "gone"), records what it skipped per domain, and surfaces it as "partial — N sources skipped" in run history, the Recon Delta and the report. Nuclei and httpx gain runtime caps. Off switch: `RECON_CIRCUIT_BREAKERS=off`.
 
 ### Security
 
-- **Provider API keys never reach a recon log line.** Breaker and error messages carry only the provider, endpoint and a refused-key's 1-based rotation position — never the key, never a response body that might echo it.
+- **Provider API keys never reach a recon log line.** Circuit-breaker and error messages carry only the provider, endpoint and a refused key's rotation position — never the key or a response body that might echo it.
+
+### Fixed
+
+- **Vulners CVE lookups sent the key where Vulners no longer reads it.** Since 2025-10-02 Vulners accepts the key only in the `X-Api-Key` header; recon sent it as a query parameter, so every lookup hit a Cloudflare challenge and scans using the Vulners source found no CVEs. The key now goes in the header, and no longer appears in URLs. Once lookups succeed they spend Vulners credits: about 3 per technology looked up (Free plan: 100 credits a month), so a scan with many versioned technologies can use up a free plan.
+- **Extra keys for WPScan, SecurityTrails and ViewDNS were not saved.** The Key Rotation dialog accepted them and the save succeeded, but the settings API dropped them, so recon never rotated SecurityTrails and ViewDNS keys. The page, the settings API and the key template now share one list of rotation tools.
+- **Saved Secret Multiscanner credentials looked empty in Settings**, and saving the page returned them in cleartext in the response. They now load masked like every other key, and the save response masks them too.
 
 ## [6.20.0] - 2026-09-27
 

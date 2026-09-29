@@ -602,9 +602,11 @@ def _vulners_query(product: str, version: str, keys, *, admitted: bool = False):
 
     def send(key):
         params = {"software": f"{product} {version}", "version": version, "type": "software"}
-        if key:
-            params["apiKey"] = key
-        return requests.get(VULNERS_API_URL, params=params, timeout=30)
+        # Vulners accepts the key only in the X-Api-Key header since 2025-10-02. A
+        # key in the query string gets the same 403 Cloudflare challenge as no key,
+        # and it would land in URLs and logs.
+        headers = {"X-Api-Key": key} if key else {}
+        return requests.get(VULNERS_API_URL, params=params, headers=headers, timeout=30)
 
     res = cb.guarded_call(_vulners_breaker(), send, _vulners_classify, keys=keys,
                           admitted=admitted)

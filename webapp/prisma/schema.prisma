@@ -32,6 +32,7 @@ model User {
   tradecraftResources UserTradecraftResource[]
   mcpTokens       McpAccessToken[]
   settings        UserSettings?
+  apiUsageReport  ApiUsageReport?
   uiPreferences Json              @default("{}") @map("ui_preferences")
   // Per-user remembered model choices, used to pre-fill new projects.
   // Null until the user creates their first project and picks models.
@@ -319,6 +320,29 @@ model ApiKeyRotationConfig {
 
   @@unique([userId, toolName])
   @@map("api_key_rotation_configs")
+}
+
+/// The last "Check API usage" report for a user. ONE row per user: a new run
+/// replaces it (the UI asks first; the POST refuses without `overwrite: true`).
+/// It holds numbers, plan names and last-4 key hints only - never a key, an
+/// email, or a raw provider response body. Not part of the project export.
+model ApiUsageReport {
+  id            String   @id @default(cuid())
+  userId        String   @unique @map("user_id")
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  /// Shape of `report` (webapp/src/lib/apiUsage/types.ts). Bump when the JSON
+  /// contract changes so old rows can be rendered or discarded deliberately.
+  schemaVersion Int      @default(1) @map("schema_version")
+  startedAt     DateTime @map("started_at")
+  finishedAt    DateTime @map("finished_at")
+  report        Json
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+  // R1 actor columns: who ran it, which differs from userId under admin act-as.
+  createdById   String?  @map("created_by_id")
+  updatedById   String?  @map("updated_by_id")
+
+  @@map("api_usage_reports")
 }
 
 // =============================================================================

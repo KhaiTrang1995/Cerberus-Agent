@@ -531,3 +531,17 @@
 .agentOfflineRetry:hover {
   background: var(--bg-hover);
 }
+
+/* Four header buttons (Check API usage, Last report, Download Template, Import
+   Keys) do not fit one line on a phone: the title and the actions stack, and the
+   actions wrap. Same breakpoint as the MCP tokens tab. */
+@media (max-width: 640px) {
+  .sectionHeader {
+    flex-wrap: wrap;
+    gap: var(--space-2);
+  }
+
+  .sectionHeaderActions {
+    flex-wrap: wrap;
+  }
+}
