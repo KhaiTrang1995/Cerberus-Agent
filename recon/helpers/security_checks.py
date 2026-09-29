@@ -127,6 +127,28 @@ def _is_ip_address(host: str) -> bool:
     return bool(re.match(ipv4_pattern, host) or re.match(ipv6_pattern, host))
 
 
+def _is_synthetic_ip_host(name: str) -> bool:
+    """True for the dashed-IP placeholder recon assigns to an IP with no PTR.
+
+    IP-mode recon has no real hostname, so it names each host `ip.replace('.',
+    '-').replace(':', '-')` (e.g. ``192-88-96-10``, or ``2001-db8--1`` for v6).
+    That label never resolves, so probing it by name only raises ConnectionError
+    - wasted work that would also open a HostHealth breaker for a host whose IP
+    is alive and already checked directly. A real hostname has a dot or is not
+    an IP once the dashes are undone, so it is never matched here.
+    """
+    import ipaddress
+    if not name or "." in name:
+        return False
+    for sep in (".", ":"):
+        try:
+            ipaddress.ip_address(name.replace("-", sep))
+            return True
+        except ValueError:
+            continue
+    return False
+
+
 def _analyze_redirect_chain(ip: str, scheme: str, timeout: int = 10) -> Dict:
     """
     Analyze redirect behavior when accessing IP directly.
@@ -2876,7 +2898,15 @@ def _run_security_checks(recon_data, enabled_checks, timeout, tls_expiry_days, m
 
     # Filter empty values
     ips = [ip for ip in ips if ip]
-    hostnames = [h for h in hostnames if h]
+    # Drop the dashed-IP placeholders recon uses for an IP with no PTR (e.g.
+    # "192-88-96-10"): they never resolve, so a by-name probe only ever raises
+    # ConnectionError. That is wasted work, and it would open a HostHealth
+    # breaker for a host whose IP is alive and already checked directly (the
+    # direct-IP checks own those IPs), falsely reporting IP-mode scans as
+    # degraded. The IPs themselves are already in `ips`.
+    hostnames = [h for h in hostnames if h and not _is_synthetic_ip_host(h)]
+    subdomains_to_ips = {k: v for k, v in subdomains_to_ips.items()
+                         if not _is_synthetic_ip_host(k)}
 
     print(f"[*][SecurityCheck] Targets: {len(hostnames)} hostnames, {len(ips)} IPs")
     print(f"[*][SecurityCheck] Timeout: {timeout}s")

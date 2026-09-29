@@ -131,3 +131,43 @@ class TestTheResult:
         assert "dead.example.test" in report.skipped_hostnames()
         # Host-level only: the source itself still prunes for other hosts.
         assert "security_check" not in report.degraded_sources
+
+
+class TestSyntheticIpHostFilter:
+    """IP-mode dashed-IP placeholders (e.g. 192-88-96-10) must not be probed by
+    name or reported as unreachable: they never resolve, and the IP is checked
+    directly. Regression for the false 'partial' every IP-mode scan showed."""
+
+    def test_recognises_dashed_ipv4_placeholder(self):
+        assert sc._is_synthetic_ip_host("192-88-96-10") is True
+        assert sc._is_synthetic_ip_host("10-0-0-1") is True
+
+    def test_recognises_dashed_ipv6_placeholder(self):
+        assert sc._is_synthetic_ip_host("2001-db8--1") is True
+
+    def test_real_hostnames_are_not_matched(self):
+        assert sc._is_synthetic_ip_host("app.example.test") is False
+        assert sc._is_synthetic_ip_host("webserver") is False
+        assert sc._is_synthetic_ip_host("10-0-0-1.example.com") is False
+        assert sc._is_synthetic_ip_host("") is False
+
+    def test_placeholder_hostnames_are_never_probed_by_name(self):
+        # Two IP-mode hosts under dashed placeholder names, both resolving to a
+        # real IP. No probe may target a dashed-IP host (only the real IPs).
+        from urllib.parse import urlparse
+        recon = {"domain": "", "dns": {"domain": {}, "subdomains": {
+            "app.example.test": {"has_records": True, "ips": {"ipv4": ["192.88.96.10"], "ipv6": []}},
+            "192-88-96-10": {"has_records": True, "ips": {"ipv4": ["192.88.96.10"], "ipv6": []}},
+            "192-88-96-20": {"has_records": True, "ips": {"ipv4": ["192.88.96.20"], "ipv6": []}},
+        }}}
+        with mock.patch.object(sc.requests, "get", return_value=_resp(200)) as get, \
+             mock.patch.object(sc.requests, "post", return_value=_resp(200)), \
+             mock.patch.object(sc.requests, "request", return_value=_resp(200)):
+            sc.run_security_checks(
+                recon,
+                {"missing_referrer_policy": True, "login_no_https": True},
+                timeout=1, max_workers=1)
+        hosts = [urlparse(c.args[0]).hostname or "" for c in get.call_args_list if c.args]
+        assert "app.example.test" in hosts, "the real hostname should still be probed"
+        assert all(not sc._is_synthetic_ip_host(h) for h in hosts), \
+            f"a dashed-IP placeholder was probed: {[h for h in hosts if sc._is_synthetic_ip_host(h)]}"
