@@ -3235,7 +3235,71 @@ def _triage_graph_client():
 _TRIAGE_OPS = frozenset({
     "mute", "unmute", "unmute_many", "list_muted", "muted_facets",
     "list_findings", "human_verdict", "preflight", "stop_run",
+    "mute_many", "resolve_muted",
 })
+
+#: What an MCP mute is stamped with: the display prefix of the access token,
+#: never the token. The webapp's `MCP_TOKEN_PREFIX` plus 8 hex characters.
+_MCP_TOKEN_PREFIX_RE = re.compile(r"rdmn_mcp_[0-9a-f]{8}")
+
+#: Graph Node IDs as the tables show them: Neo4j internal ids, digits only.
+_GRAPH_ID_RE = re.compile(r"[0-9]{1,18}")
+
+#: Per-call ceilings, re-checked here because any master-key holder can call
+#: this endpoint without going through the webapp's own checks.
+_MCP_MUTE_MAX = 25
+_MCP_UNMUTE_MAX = 100
+_UI_UNMUTE_MAX = 500
+_MUTE_REASON_MAX = 500
+
+
+def _triage_request_error(body) -> Optional[str]:
+    """Why this request may not run, or None. Checked BEFORE any graph work.
+
+    These checks hold for EVERY caller holding the master key, not just the
+    webapp's MCP tools:
+
+    - a `muted_by` starting `rule:` is refused on every mute. Only the Mute
+      Rules sweep writes rule attribution, and it does not come through here;
+      a forged one would make the prune delete a finding a person muted and
+      let a sweep release or re-attribute it.
+    - `mute_many` is the MCP mute and nothing else: it needs the MCP source,
+      the exemptions (the only thing that keeps a person's unmute standing),
+      a real token prefix and a reason.
+    """
+    muted_by = body.muted_by or ""
+    if body.op in ("mute", "mute_many") and muted_by.startswith("rule:"):
+        return "muted_by may not name a rule: only the Mute Rules sweep writes rule mutes"
+    if body.op == "mute" and len(body.reason or "") > _MUTE_REASON_MAX:
+        return f"reason is longer than {_MUTE_REASON_MAX} characters"
+    graph_ids = body.graph_ids or []
+    if any(not _GRAPH_ID_RE.fullmatch(str(g)) for g in graph_ids):
+        return "graph_ids must be graph node ids (digits only)"
+    keys = body.keys or []
+    if body.op == "mute_many":
+        if body.source != "mcp":
+            return "mute_many is the MCP mute and needs source=mcp"
+        pairs = body.exempt_pairs
+        if pairs is None or not isinstance(pairs, list) or any(
+                not isinstance(p, list) or len(p) != 2
+                or not all(isinstance(x, str) for x in p) for p in pairs):
+            return "exempt_pairs is required: a list of [label, key] pairs"
+        if not _MCP_TOKEN_PREFIX_RE.fullmatch(body.token_prefix or ""):
+            return "token_prefix must be an MCP token prefix"
+        reason = (body.reason or "").strip()
+        if not 3 <= len(reason) <= _MUTE_REASON_MAX:
+            return f"reason must be 3-{_MUTE_REASON_MAX} characters"
+        if not keys and not graph_ids:
+            return "mute_many needs keys or graph_ids"
+        if len(keys) > _MCP_MUTE_MAX or len(graph_ids) > _MCP_MUTE_MAX:
+            return f"at most {_MCP_MUTE_MAX} findings per mute"
+    if body.op in ("resolve_muted", "unmute_many"):
+        ceiling = _MCP_UNMUTE_MAX if body.source == "mcp" else _UI_UNMUTE_MAX
+        if len(keys) > ceiling or len(graph_ids) > ceiling:
+            return f"at most {ceiling} findings per unmute"
+    if body.token is not None and not _MCP_TOKEN_PREFIX_RE.fullmatch(body.token):
+        return "token must be an MCP token prefix"
+    return None
 
 #: The mixin's own ceiling on `list_triage_findings`. A caller-supplied limit is
 #: clamped to it, never above it.
@@ -3252,6 +3316,7 @@ class GraphTriageRequest(BaseModel):
     """
     op: str  # mute | unmute | unmute_many | list_muted | muted_facets
              # | list_findings | human_verdict | preflight | stop_run
+             # | mute_many | resolve_muted
     user_id: str
     project_id: str
     node_id: Optional[str] = None
@@ -3263,9 +3328,9 @@ class GraphTriageRequest(BaseModel):
     #: narrow what that caller gets; the browser paths leave it unset and keep
     #: their current behaviour.
     source: Optional[str] = None
-    #: How a human verdict ARRIVED. Never what it means: the verdict value stays
-    #: `human` whatever the channel, because four other behaviours branch on
-    #: that being a closed two-value set.
+    #: Unread, and no caller sends it: kept so an older webapp that does is not
+    #: refused. A write's channel is derived from `source`, for the verdict
+    #: (`triage_verdict_channel`) and the MCP mute (`muted_channel`) alike.
     channel: Optional[str] = None
     #: Who the verdict is attributed to, mirroring `muted_by`.
     verdict_by: Optional[str] = None
@@ -3278,7 +3343,7 @@ class GraphTriageRequest(BaseModel):
     #: them the op returns what it always did, plus a `total`.
     offset: Optional[int] = None
     label: Optional[str] = None
-    muted_via: Optional[str] = None   # person | rule | deleted_rule
+    muted_via: Optional[str] = None   # person | mcp | rule | deleted_rule
     rule: Optional[str] = None        # an exact muted_by, e.g. rule:vuln.nuclei/k3f9a2
     search: Optional[str] = None
     order: Optional[str] = None       # recent (default) | person_first
@@ -3286,6 +3351,17 @@ class GraphTriageRequest(BaseModel):
     live_rules: Optional[List[str]] = None
     #: `unmute_many`: the findings' natural keys (id, or finding_id).
     keys: Optional[List[str]] = None
+    #: `mute_many` / `resolve_muted`: Graph Node IDs, resolved inside the tenant.
+    graph_ids: Optional[List[str]] = None
+    #: `resolve_muted` / `unmute_many` over MCP: also release rule mutes.
+    include_rule_mutes: Optional[bool] = None
+    #: `mute_many`: the access-token prefix the mute is stamped with.
+    token_prefix: Optional[str] = None
+    #: `mute_many`: the project's Mute Rules exemptions, as [label, key] pairs.
+    #: Required: an absent list would silently re-hide what a person unmuted.
+    exempt_pairs: Optional[List[List[str]]] = None
+    #: `list_muted`: only the mutes one access token made.
+    token: Optional[str] = None
 
 
 @app.post("/graph/triage", tags=["Graph"], dependencies=[Depends(require_master_internal_auth)])
@@ -3323,6 +3399,10 @@ async def graph_triage(body: GraphTriageRequest):
         return JSONResponse(status_code=400,
                             content={"error": f"unknown op {body.op!r}"})
 
+    refused = _triage_request_error(body)
+    if refused:
+        return JSONResponse(status_code=400, content={"error": refused})
+
     def run_op():
         """The blocking body, in one place.
 
@@ -3334,6 +3414,19 @@ async def graph_triage(body: GraphTriageRequest):
             return client.mute_finding(
                 body.user_id, body.project_id, body.node_id,
                 muted_by=body.muted_by or body.user_id, reason=body.reason or "")
+        if body.op == "mute_many":
+            return client.mute_findings_delegated(
+                body.user_id, body.project_id,
+                keys=body.keys or [], graph_ids=body.graph_ids or [],
+                exempt_pairs=body.exempt_pairs,
+                muted_by=body.muted_by or body.user_id,
+                reason=(body.reason or "").strip(),
+                token_prefix=body.token_prefix or "")
+        if body.op == "resolve_muted":
+            return client.resolve_muted(
+                body.user_id, body.project_id,
+                keys=body.keys or [], graph_ids=body.graph_ids or [],
+                include_rule_mutes=bool(body.include_rule_mutes))
         if body.op == "unmute":
             return client.unmute_finding(body.user_id, body.project_id, body.node_id)
         if body.op == "list_muted":
@@ -3344,7 +3437,7 @@ async def graph_triage(body: GraphTriageRequest):
                            if body.limit is not None else None)
             filters = dict(label=body.label, muted_via=body.muted_via,
                            rule=body.rule, search=body.search,
-                           live_rules=body.live_rules)
+                           live_rules=body.live_rules, token=body.token)
             return {
                 "findings": client.list_muted(
                     body.user_id, body.project_id, limit=muted_limit,
@@ -3355,7 +3448,12 @@ async def graph_triage(body: GraphTriageRequest):
         if body.op == "muted_facets":
             return client.muted_facets(body.user_id, body.project_id)
         if body.op == "unmute_many":
-            return client.unmute_findings(body.user_id, body.project_id, body.keys or [])
+            # An MCP caller releases a rule mute only when it asked to: the
+            # unmute becomes a standing exception to that rule. The UI keeps
+            # unmuting whatever it is given.
+            return client.unmute_findings(
+                body.user_id, body.project_id, body.keys or [],
+                skip_rule_mutes=body.source == "mcp" and not body.include_rule_mutes)
         if body.op == "list_findings":
             # `total` is what stops the table lying: the query is capped, so
             # without it the operator reads a truncated list as complete. It
@@ -3371,8 +3469,9 @@ async def graph_triage(body: GraphTriageRequest):
             }
         if body.op == "human_verdict":
             # Keyed on the channel, not a flag, so no MCP caller can forget it:
-            # on a rule-muted finding a verdict releases the mute, and an
-            # unattended token may not unmute.
+            # on a rule-muted finding a verdict releases the mute, and a token
+            # releases one only through unmute_many, with its own permission
+            # and an explicit include_rule_mutes.
             return client.set_human_verdict(
                 body.user_id, body.project_id, body.node_id,
                 body.status or "", body.reason or "",
@@ -3426,7 +3525,17 @@ async def graph_triage(body: GraphTriageRequest):
         for item in result.get("items") or []:
             log_event("finding_unmuted", user_id=body.user_id,
                       project_id=body.project_id, node_id=item.get("key"),
-                      label=item.get("label"), muted_by=item.get("muted_by"))
+                      label=item.get("label"), muted_by=item.get("muted_by"),
+                      channel=body.source or "app")
+    if body.op == "mute_many" and isinstance(result, dict):
+        from session_log import log_event
+        for item in result.get("items") or []:
+            if item.get("outcome") != "muted":
+                continue
+            log_event("finding_muted", user_id=body.user_id,
+                      project_id=body.project_id, node_id=item.get("key"),
+                      label=item.get("label"), reason=(body.reason or "").strip(),
+                      channel=body.source or "app", token_prefix=body.token_prefix)
     if body.op in ("mute", "unmute", "human_verdict"):
         from session_log import log_event
         # The three ops write durable operator decisions. mute/unmute report
@@ -3441,8 +3550,8 @@ async def graph_triage(body: GraphTriageRequest):
                 node_id=body.node_id,
                 label=result.get("label"),
                 reason=body.reason or "",
-                **({"status": body.status or "",
-                    "channel": body.source or "app"} if body.op == "human_verdict" else {}),
+                channel=body.source or "app",
+                **({"status": body.status or ""} if body.op == "human_verdict" else {}),
             )
         elif result.get("reason") == "muted":
             logger.info("graph/triage human_verdict refused on a muted finding: "

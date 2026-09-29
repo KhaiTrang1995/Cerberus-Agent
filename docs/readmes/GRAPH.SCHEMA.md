@@ -190,12 +190,33 @@ REMOVE v:Muted, v.muted, v.muted_at, v.muted_by, v.muted_reason
 `Domain`, `Endpoint`, `CVE`, ...) are context: muting one would orphan the real
 findings hanging off it.
 
-### Who muted it: a person, or a node-filter rule
+### Who muted it: a person, an agent (MCP), or a node-filter rule
 
 `muted_by` holds the user id of the person who muted the finding, or
 `rule:<kind>/<rule id>` when a [mute rule](../../redamon.wiki/Mute-Rules.md)
 did (`rule:<kind>/allowlist` in allowlist mode), with `muted_reason` set to
-`Filter rule: <name>`. The two differ in what they mean and in how they are kept:
+`Filter rule: <name>`.
+
+The third provenance is an external agent muting over the inbound MCP server
+(`mute_findings`), with an operator's access token that holds the opt-in
+`triage:mute` permission. `muted_by` stays that operator's user id, because the
+token carries their authority, and two more properties record how it arrived:
+`muted_channel = 'mcp'` and `muted_token`, the token's display prefix (never the
+token). Only `mute_findings_delegated` in
+`graph_db/mixins/recon/triage_mixin.py` writes them. Every unmute removes them,
+and every other mute (a person's, a rule's) clears them, so a later mute never
+inherits an old token's stamp. `tooling/scripts/mute_provenance_cleanup.py`
+strips leftovers from unmuted findings after a rollback and roll-forward.
+
+An agent's mute carries its owner's delegated authority, so the prune (kept,
+stamped `stale_since`), the rule sweep (never touched) and partial-recon
+seeding (excluded) treat it exactly as a person's. Every display and report
+treats it as an agent's: Muted Nodes, the MCP listings and the pentest report
+count it apart from people's, per token. It is never allowed to overwrite an
+existing mute, to hide a proven finding, or to hide one a person brought back
+(one with an exemption).
+
+The kinds differ in what they mean and in how they are kept:
 
 - The one sweep that applies rules (`apply_node_filters` in
   `graph_db/mixins/node_filter_mixin.py`) only mutes, re-attributes or releases

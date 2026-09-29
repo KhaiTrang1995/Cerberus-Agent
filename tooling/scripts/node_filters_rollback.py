@@ -42,7 +42,8 @@ RELEASE = """
 MATCH (n:Muted)
 WHERE coalesce(n.muted_by, '') STARTS WITH $prefix {scope}
 CALL (n) {{
-  REMOVE n:Muted, n.muted, n.muted_at, n.muted_by, n.muted_reason
+  REMOVE n:Muted, n.muted, n.muted_at, n.muted_by, n.muted_reason,
+         n.muted_channel, n.muted_token
 }} IN TRANSACTIONS OF 1000 ROWS
 RETURN count(n) AS n
 """

@@ -1533,6 +1533,8 @@ not so you can query for one.
 - muted_at (datetime): When it was suppressed
 - muted_by (string): `user_id` of the operator who suppressed it
 - muted_reason (string): Optional operator note
+- muted_channel (string): How the mute arrived: absent = a person in the UI, `mcp` = an external agent holding that person's access token
+- muted_token (string): The access-token prefix of an `mcp` mute; never the token
 - triage_priority_score (float): 0-100, the sort key. Bigger is more urgent
 - triage_math_score (float): The score before any AI correction
 - triage_risk (float): C x L x I x R, 0-1, before the tier is folded into the score. The project-level risk roll-up combines these

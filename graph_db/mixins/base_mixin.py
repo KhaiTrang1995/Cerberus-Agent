@@ -263,6 +263,12 @@ class BaseMixin:
           AND ({_FINDING_LABEL_PREDICATE})
           AND coalesce(n.source, '') IN $sources
           AND (n.updated_at IS NULL OR n.updated_at < datetime($since)){keep_clause}
+        // The write lock BEFORE `keep` reads n:Muted: a mute that committed
+        // first is then kept, and one that starts later waits for the delete
+        // and matches nothing. Without it a mute can land between the read
+        // and the DETACH DELETE and be deleted with the node.
+        SET n._prune_lock = true
+        REMOVE n._prune_lock
         WITH n,
              ((n:Muted AND NOT coalesce(n.muted_by, '') STARTS WITH 'rule:')
               OR coalesce(n.triage_source, '') = 'human') AS keep
@@ -400,6 +406,10 @@ class BaseMixin:
         }
 
         with self.driver.session() as session:
+            # Every delete below takes the node's write lock BEFORE reading
+            # n:Muted (the prune's idiom), so a mute committing mid-statement is
+            # kept rather than deleted with the node.
+            #
             # 1. GVM's Vulnerability findings are NO LONGER deleted here (X7).
             # Deleting them deleted the operator's mutes and verdicts with them,
             # every scan. They are pruned after a successful ingest instead.
@@ -410,7 +420,10 @@ class BaseMixin:
                 MATCH (v:Vulnerability {user_id: $uid, project_id: $pid})
                 WHERE v.source = 'gvm'
                   AND NOT (v)<-[:HAS_VULNERABILITY]-()
-                  AND NOT v:Muted
+                SET v._prune_lock = true
+                REMOVE v._prune_lock
+                WITH v
+                WHERE NOT v:Muted
                   AND coalesce(v.triage_source, '') <> 'human'
                 DETACH DELETE v
                 RETURN count(v) as deleted
@@ -458,6 +471,9 @@ class BaseMixin:
             result = session.run(
                 """
                 MATCH (e:ExploitGvm {user_id: $uid, project_id: $pid})
+                SET e._prune_lock = true
+                REMOVE e._prune_lock
+                WITH e
                 WHERE NOT e:Muted
                   AND coalesce(e.triage_source, '') <> 'human'
                 DETACH DELETE e

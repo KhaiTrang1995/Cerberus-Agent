@@ -68,11 +68,28 @@ class _FakeTriageClient:
         self.calls.append(("muted_facets", user_id, project_id))
         return {"total": 1, "by_person": 1, "labels": {}, "rules": []}
 
-    def unmute_findings(self, user_id, project_id, keys):
-        self.calls.append(("unmute_findings", user_id, project_id, list(keys)))
+    def unmute_findings(self, user_id, project_id, keys, skip_rule_mutes=False):
+        self.calls.append(("unmute_findings", user_id, project_id, list(keys),
+                           skip_rule_mutes))
         return {"unmuted": len(keys),
                 "items": [{"key": k, "label": "Vulnerability", "muted_by": "rule:x/abc123"}
                           for k in keys]}
+
+    def mute_finding(self, user_id, project_id, node_id, muted_by="", reason=""):
+        self.calls.append(("mute_finding", node_id, muted_by, reason))
+        return {"muted": True, "already": False, "label": "Vulnerability"}
+
+    def mute_findings_delegated(self, user_id, project_id, **kwargs):
+        self.calls.append(("mute_findings_delegated", user_id, project_id, kwargs))
+        return {"items": [
+            {"ref": "v1", "key": "v1", "label": "Vulnerability", "outcome": "muted"},
+            {"ref": "v2", "key": "v2", "label": "Vulnerability", "outcome": "proven"},
+            {"ref": "v3", "key": "v3", "label": "Secret", "outcome": "muted"},
+        ], "not_found": []}
+
+    def resolve_muted(self, user_id, project_id, **kwargs):
+        self.calls.append(("resolve_muted", user_id, project_id, kwargs))
+        return {"to_unmute": [], "skipped_rule_mute": [], "not_found": []}
 
     def set_human_verdict(self, user_id, project_id, node_id, status, reason,
                           channel="", verdict_by="", refuse_muted=False):
@@ -204,7 +221,8 @@ class TriageOpValidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             api._TRIAGE_OPS,
             frozenset({"mute", "unmute", "unmute_many", "list_muted", "muted_facets",
-                       "list_findings", "human_verdict", "preflight", "stop_run"}))
+                       "list_findings", "human_verdict", "preflight", "stop_run",
+                       "mute_many", "resolve_muted"}))
 
     async def test_a_node_op_without_a_node_id_is_refused_before_dispatch(self):
         for op in ("mute", "unmute", "human_verdict"):
@@ -450,3 +468,209 @@ class GateAcknowledgementTests(unittest.IsolatedAsyncioTestCase):
         body = _body(resp)
         self.assertEqual(body["total"], 137)
         self.assertEqual(len(body["findings"]), 1)
+
+
+#: A body `mute_many` accepts, so each refusal test changes exactly one thing.
+_GOOD_MUTE_MANY = dict(
+    op="mute_many", user_id="u1", project_id="p1", source="mcp",
+    keys=["v1", "v2", "v3"], graph_ids=["812"], exempt_pairs=[["Secret", "s9"]],
+    muted_by="u1", reason="dev-only banner, confirmed by the owner",
+    token_prefix="rdmn_mcp_ab12cd34",
+)
+
+
+class _TriageEndpointCase(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.client = _FakeTriageClient()
+        self.events = []
+        self._patches = [
+            mock.patch.object(api, "_triage_graph_client", lambda: self.client),
+            mock.patch.object(api, "_graph_exec_mcp_semaphore", lambda: _RecordingSemaphore()),
+            mock.patch.object(api, "master_key_is_weak", lambda: False),
+        ]
+        for p in self._patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self._patches])
+        import session_log
+        self._log = mock.patch.object(
+            session_log, "log_event",
+            lambda name, **kw: self.events.append((name, kw)))
+        self._log.start()
+        self.addCleanup(self._log.stop)
+
+    async def call(self, **kw):
+        return await api.graph_triage(api.GraphTriageRequest(**kw))
+
+    def calls(self, name):
+        return [c for c in self.client.calls if c[0] == name]
+
+
+class RuleAttributionIsNeverForgedTests(_TriageEndpointCase):
+    """Only the Mute Rules sweep writes rule mutes, and it does not come here.
+
+    A `muted_by` starting `rule:` makes the prune delete the finding (a rule
+    mute is not a person's decision) and lets a sweep release or re-attribute
+    it, so any master-key caller could turn a mute into a deletion.
+    """
+
+    async def test_a_rule_muted_by_is_refused_on_the_ui_mute(self):
+        resp = await self.call(op="mute", user_id="u1", project_id="p1",
+                               node_id="v1", muted_by="rule:vuln.nuclei/abc123")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.calls("mute_finding"), [])
+
+    async def test_a_rule_muted_by_is_refused_on_the_mcp_mute(self):
+        resp = await self.call(**{**_GOOD_MUTE_MANY, "muted_by": "rule:secret/x"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.calls("mute_findings_delegated"), [])
+
+    async def test_a_person_mute_still_works(self):
+        resp = await self.call(op="mute", user_id="u1", project_id="p1",
+                               node_id="v1", muted_by="u1", reason="noise")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIs(_body(resp)["already"], False)
+
+    async def test_a_ui_mute_reason_is_capped(self):
+        resp = await self.call(op="mute", user_id="u1", project_id="p1",
+                               node_id="v1", reason="x" * 501)
+        self.assertEqual(resp.status_code, 400)
+
+
+class MuteManyValidationTests(_TriageEndpointCase):
+    """`mute_many` is the MCP mute, re-checked here for any master-key caller."""
+
+    async def assertRefused(self, **override):
+        resp = await self.call(**{**_GOOD_MUTE_MANY, **override})
+        self.assertEqual(resp.status_code, 400, override)
+        self.assertEqual(self.calls("mute_findings_delegated"), [], override)
+        return _body(resp)["error"]
+
+    async def test_the_good_body_is_accepted(self):
+        resp = await self.call(**_GOOD_MUTE_MANY)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(self.calls("mute_findings_delegated")), 1)
+
+    async def test_a_browser_source_is_refused(self):
+        await self.assertRefused(source=None)
+
+    async def test_absent_exemptions_are_refused_not_read_as_none(self):
+        # Absent would silently re-hide everything a person unmuted.
+        self.assertIn("exempt_pairs", await self.assertRefused(exempt_pairs=None))
+
+    async def test_an_empty_exemption_list_is_a_real_answer(self):
+        resp = await self.call(**{**_GOOD_MUTE_MANY, "exempt_pairs": []})
+        self.assertEqual(resp.status_code, 200)
+
+    async def test_a_malformed_pair_is_refused(self):
+        await self.assertRefused(exempt_pairs=[["Secret"]])
+
+    async def test_a_bad_token_prefix_is_refused(self):
+        for bad in (None, "", "rdmn_mcp_", "rdmn_mcp_ZZ12cd34", "rdmn_mcp_ab12cd34ef",
+                    "rdmn_mcp_ab12cd34\n[audit] forged", "rdmn_mcp_ab12cd34\n"):
+            with self.subTest(prefix=bad):
+                await self.assertRefused(token_prefix=bad)
+
+    async def test_the_reason_is_required_and_bounded(self):
+        for bad in (None, "", "  a ", "x" * 501):
+            with self.subTest(reason=(bad or "")[:10]):
+                await self.assertRefused(reason=bad)
+
+    async def test_at_least_one_ref(self):
+        await self.assertRefused(keys=[], graph_ids=[])
+
+    async def test_at_most_25_keys_and_25_node_ids(self):
+        await self.assertRefused(keys=[f"v{i}" for i in range(26)])
+        await self.assertRefused(graph_ids=[str(i) for i in range(26)])
+
+    async def test_graph_ids_are_digits_only(self):
+        for bad in ("12a", "-1", "1 OR 1=1", "1" * 19, "12\n", "\u00b2"):
+            with self.subTest(gid=bad):
+                await self.assertRefused(graph_ids=[bad])
+
+    async def test_the_arguments_reach_the_mixin(self):
+        await self.call(**{**_GOOD_MUTE_MANY, "reason": "  noisy banner  "})
+        kwargs = self.calls("mute_findings_delegated")[0][3]
+        self.assertEqual(kwargs["keys"], ["v1", "v2", "v3"])
+        self.assertEqual(kwargs["graph_ids"], ["812"])
+        self.assertEqual(kwargs["exempt_pairs"], [["Secret", "s9"]])
+        self.assertEqual(kwargs["muted_by"], "u1")
+        self.assertEqual(kwargs["reason"], "noisy banner")
+        self.assertEqual(kwargs["token_prefix"], "rdmn_mcp_ab12cd34")
+
+    async def test_the_write_is_acknowledged_as_gated(self):
+        resp = await self.call(**_GOOD_MUTE_MANY)
+        self.assertIs(_body(resp)["mcp_gated"], True)
+
+    async def test_one_log_line_per_finding_actually_muted(self):
+        await self.call(**_GOOD_MUTE_MANY)
+        muted = [kw for name, kw in self.events if name == "finding_muted"]
+        self.assertEqual([kw["node_id"] for kw in muted], ["v1", "v3"])
+        for kw in muted:
+            self.assertEqual(kw["channel"], "mcp")
+            self.assertEqual(kw["token_prefix"], "rdmn_mcp_ab12cd34")
+            self.assertEqual(kw["reason"], "dev-only banner, confirmed by the owner")
+
+
+class UnmuteScopeTests(_TriageEndpointCase):
+    async def test_an_mcp_unmute_skips_rule_mutes_unless_asked(self):
+        await self.call(op="unmute_many", user_id="u1", project_id="p1",
+                        keys=["v1"], source="mcp")
+        self.assertIs(self.calls("unmute_findings")[0][4], True)
+
+    async def test_an_mcp_unmute_with_the_flag_releases_rule_mutes(self):
+        await self.call(op="unmute_many", user_id="u1", project_id="p1",
+                        keys=["v1"], source="mcp", include_rule_mutes=True)
+        self.assertIs(self.calls("unmute_findings")[0][4], False)
+
+    async def test_the_ui_unmute_is_unchanged(self):
+        await self.call(op="unmute_many", user_id="u1", project_id="p1", keys=["v1"])
+        self.assertIs(self.calls("unmute_findings")[0][4], False)
+
+    async def test_the_mcp_ceiling_is_100_and_the_ui_ceiling_500(self):
+        keys = [f"v{i}" for i in range(101)]
+        resp = await self.call(op="unmute_many", user_id="u1", project_id="p1",
+                               keys=keys, source="mcp")
+        self.assertEqual(resp.status_code, 400)
+        resp = await self.call(op="unmute_many", user_id="u1", project_id="p1", keys=keys)
+        self.assertEqual(resp.status_code, 200)
+        resp = await self.call(op="unmute_many", user_id="u1", project_id="p1",
+                               keys=[f"v{i}" for i in range(501)])
+        self.assertEqual(resp.status_code, 400)
+
+    async def test_an_unmute_is_logged_with_its_channel(self):
+        await self.call(op="unmute_many", user_id="u1", project_id="p1",
+                        keys=["v1"], source="mcp")
+        (name, kw), = [e for e in self.events if e[0] == "finding_unmuted"]
+        self.assertEqual(kw["channel"], "mcp")
+
+    async def test_resolve_passes_the_flag_and_node_ids(self):
+        resp = await self.call(op="resolve_muted", user_id="u1", project_id="p1",
+                               keys=["v1"], graph_ids=["77"], source="mcp",
+                               include_rule_mutes=True)
+        self.assertIs(_body(resp)["mcp_gated"], True)
+        kwargs = self.calls("resolve_muted")[0][3]
+        self.assertEqual(kwargs, {"keys": ["v1"], "graph_ids": ["77"],
+                                  "include_rule_mutes": True})
+
+    async def test_resolve_refuses_a_non_digit_node_id(self):
+        resp = await self.call(op="resolve_muted", user_id="u1", project_id="p1",
+                               graph_ids=["n1"], source="mcp")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.calls("resolve_muted"), [])
+
+
+class MutedTokenFilterTests(_TriageEndpointCase):
+    async def test_the_token_filter_reaches_the_page_and_its_count(self):
+        await self.call(op="list_muted", user_id="u1", project_id="p1",
+                        token="rdmn_mcp_ab12cd34", muted_via="mcp")
+        listed = self.calls("list_muted")[0][4]
+        counted = self.calls("count_muted")[0][3]
+        self.assertEqual(listed["token"], "rdmn_mcp_ab12cd34")
+        self.assertEqual(counted["token"], "rdmn_mcp_ab12cd34")
+        self.assertEqual(listed["muted_via"], "mcp")
+
+    async def test_a_token_that_is_not_a_prefix_is_refused(self):
+        resp = await self.call(op="list_muted", user_id="u1", project_id="p1",
+                               token="rdmn_mcp_ab12cd34ef567890")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.calls("list_muted"), [])

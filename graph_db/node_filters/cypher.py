@@ -18,6 +18,11 @@ from .guards import GUARD_COLUMNS, GUARD_WRITE_CHECK
 
 RULE_PREFIX = "rule:"
 
+#: An MCP mute's provenance (graph_db/mixins/recon/triage_mixin.py). A rule
+#: never writes it, so every rule mute clears it and every unmute removes it:
+#: otherwise a later mute would be attributed to an old access token.
+MUTE_PROVENANCE = "n.muted_channel, n.muted_token"
+
 
 def ident(name) -> str:
     if not isinstance(name, str) or not IDENT.match(name):
@@ -103,6 +108,7 @@ WHERE NOT n:Muted
   AND {GUARD_WRITE_CHECK}
 SET n:Muted, n.muted = true, n.muted_at = datetime(),
     n.muted_by = row.muted_by, n.muted_reason = row.reason
+REMOVE {MUTE_PROVENANCE}
 RETURN count(n) AS n"""
 
 
@@ -119,16 +125,18 @@ WHERE n:Muted
   AND n.muted_by <> row.muted_by
   AND {GUARD_WRITE_CHECK}
 SET n.muted_by = row.muted_by, n.muted_reason = row.reason
+REMOVE {MUTE_PROVENANCE}
 RETURN count(n) AS n"""
 
 
 def unmute_query(kind: dict) -> str:
-    """Release rule mutes only. A person's mute never matches the STARTS WITH."""
+    """Release rule mutes only. A person's or an agent's (MCP) mute never
+    matches the STARTS WITH: an MCP mute keeps its owner's id in `muted_by`."""
     label, key = ident(kind["graph_label"]), ident(kind["key"])
     return f"""UNWIND $keys AS key
 MATCH (n:{label}:Muted {{{key}: key, user_id: $uid, project_id: $pid}})
 WHERE coalesce(n.muted_by, '') STARTS WITH '{RULE_PREFIX}'
 {_lock('n')}
 WHERE n:Muted AND coalesce(n.muted_by, '') STARTS WITH '{RULE_PREFIX}'
-REMOVE n:Muted, n.muted, n.muted_at, n.muted_by, n.muted_reason
+REMOVE n:Muted, n.muted, n.muted_at, n.muted_by, n.muted_reason, {MUTE_PROVENANCE}
 RETURN count(n) AS n"""

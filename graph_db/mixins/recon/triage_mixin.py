@@ -8,12 +8,24 @@ Two separate things live here, and keeping them separate is the point:
   `:Muted` label, which makes the node invisible to every agent query and every
   analytics, report and graph read.
 
-A person mutes, or a project's node-filter rule does (`muted_by` starts with
-`rule:`; see `graph_db/mixins/node_filter_mixin.py`). Only the first is a
-judgement of that particular finding. The AI never mutes: `apply_triage_scores`
--- the one path a triage run writes through -- cannot set `:Muted` no matter
-what the model returns, so a prompt injection in scanner output (`raw_response`,
-`evidence`) can at worst mislabel a verdict a human can overrule.
+Three things mute:
+
+- a person, in the UI (`muted_by` is their user id);
+- a project's node-filter rule (`muted_by` starts with `rule:`; see
+  `graph_db/mixins/node_filter_mixin.py`);
+- an external agent over MCP, and only through `mute_findings_delegated`,
+  holding an operator's access token with the opt-in `triage:mute`
+  permission. `muted_by` stays that operator's id, because the token carries
+  their authority, and the mute is always stamped `muted_channel = 'mcp'` and
+  `muted_token = <token prefix>` so it is never read as a person's judgement.
+
+RedAmon's own AI never mutes: `apply_triage_scores` -- the one path a triage
+run writes through -- cannot set `:Muted` no matter what the model returns, so
+a prompt injection in scanner output (`raw_response`, `evidence`) can at worst
+mislabel a verdict a human can overrule. What bounds an EXTERNAL agent is
+enforced in `mute_findings_delegated` and in the webapp: it never touches an
+existing mute, never hides a proven finding or one a person brought back, and
+is capped per call and per day.
 
 See `docs/readmes/GRAPH.SCHEMA.md` for the label's schema contract, and
 `graph_db/tenant_filter.py` for how invisibility is enforced.
@@ -73,12 +85,61 @@ _FUNCTIONAL_LABEL = "[l IN labels(n) WHERE l <> 'Muted'][0]"
 RULE_MUTE_PREFIX = "rule:"
 _RULE_MUTED = f"coalesce(n.muted_by, '') STARTS WITH '{RULE_MUTE_PREFIX}'"
 
+#: How a mute ARRIVED, recorded beside `muted_by` (who it is attributed to).
+#: Absent for a person in the UI and for a rule; `mcp` for an external agent on
+#: an operator's token. Every unmute removes both properties and every other
+#: mute clears them, so a later mute can never inherit an old token's stamp.
+MCP_MUTE_CHANNEL = "mcp"
+_MCP_MUTED = f"coalesce(n.muted_channel, '') = '{MCP_MUTE_CHANNEL}'"
+_MUTE_PROVENANCE = "n.muted_channel, n.muted_token"
+_MUTE_PROPS = f"n.muted, n.muted_at, n.muted_by, n.muted_reason, {_MUTE_PROVENANCE}"
+
+#: Who a mute is by, three-valued. A rule wins over the channel: a rule write
+#: clears the channel, so both can only hold on a hand-edited node.
+_MUTED_VIA = (f"CASE WHEN {_RULE_MUTED} THEN 'rule' "
+              f"WHEN {_MCP_MUTED} THEN 'mcp' ELSE 'person' END")
+
 #: The host a finding is about, from the fields the writers actually use.
 _HOST = "coalesce(n.triage_host, n.host, n.hostname, n.target_hostname, '')"
 
 #: Upper bound on one batch unmute. The Muted Nodes table selects at most a page
 #: (50), so this only bounds a hand-crafted request.
 MAX_UNMUTE_BATCH = 500
+
+#: Upper bound on one delegated (MCP) mute. The webapp caps it too; this is the
+#: bound a master-key caller that skipped the webapp still hits.
+MAX_DELEGATED_MUTE_BATCH = 25
+
+#: The evidence that makes a finding un-hideable by an agent: a confirmed
+#: verdict, a stored proof, or a chain finding that confirms it. The Mute Rules
+#: guards minus `g_human`: a person calling it noise is a reason TO mute.
+_PROVEN = """(coalesce(n.triage_status, '') = 'confirmed' OR n.triage_proof IS NOT NULL
+              OR EXISTS { MATCH (:ChainFinding)-[:CONFIRMS]->(n) })"""
+
+
+def _graph_id_session(driver):
+    """A session that does not log `id()`'s DEPRECATION notification.
+
+    `id(n) IN $gids` is the only form Neo4j plans as a NodeByIdSeek; matching
+    on the elementId tail scans the tenant. Imported here, not at module level,
+    because the recon image bakes graph_db too and must not fail to import it.
+    """
+    try:
+        from neo4j import NotificationDisabledClassification
+    except ImportError:  # pragma: no cover - an older driver logs the warning
+        return driver.session()
+    return driver.session(notifications_disabled_classifications=[
+        NotificationDisabledClassification.DEPRECATION])
+
+
+def _clean_graph_ids(graph_ids, cap: int) -> list:
+    """Digits only, as ints, de-duplicated. Anything else is dropped, never cast."""
+    out = set()
+    for g in graph_ids or []:
+        text = str(g).strip()
+        if text.isascii() and text.isdigit() and len(text) <= 18:
+            out.add(int(text))
+    return sorted(out)[:cap]
 
 #: Worst-first ordering, so a capped list keeps the findings that matter. An
 #: unknown or missing severity sorts last rather than being treated as critical.
@@ -162,33 +223,223 @@ class TriageMixin:
         properties and leaves the suppression intact. Relabelling would make that
         MERGE miss and create a second, un-muted duplicate.
 
-        Idempotent: muting an already-muted finding refreshes nothing but the
-        reason, and returns muted=True.
+        Idempotent, and it never overwrites: an already-muted finding is left
+        exactly as it was -- whoever muted it, when and why -- and returns
+        muted=True with already=True. Re-muting from a stale row would
+        otherwise re-attribute a rule's or an agent's mute to this person.
 
-        Returns {"muted": bool, "label": str|None}. `muted=False` means nothing
-        matched: a wrong id, another tenant's id, or an asset node, all of which
-        are indistinguishable to the caller on purpose.
+        A fresh mute clears `muted_channel`/`muted_token`: a person's mute
+        carries neither, and a leftover from an older build must not make it
+        read as an agent's.
+
+        The node's write lock is taken BEFORE `n:Muted` is read, as in
+        `set_human_verdict`, so a mute committing in between is seen.
+
+        Returns {"muted": bool, "already": bool, "label": str|None}.
+        `muted=False` means nothing matched: a wrong id, another tenant's id,
+        or an asset node, all of which are indistinguishable to the caller on
+        purpose.
         """
         query = f"""
         MATCH (n:{_MUTEABLE})
         WHERE {_BY_ID} AND n.user_id = $user_id AND n.project_id = $project_id
-        SET n:Muted,
-            n.muted = true,
-            n.muted_at = datetime(),
-            n.muted_by = $muted_by,
-            n.muted_reason = $reason
-        RETURN {_FUNCTIONAL_LABEL} AS label
+        SET n._mute_lock = true
+        REMOVE n._mute_lock
+        WITH n, n:Muted AS already
+        FOREACH (_ IN CASE WHEN already THEN [] ELSE [1] END |
+            SET n:Muted,
+                n.muted = true,
+                n.muted_at = datetime(),
+                n.muted_by = $muted_by,
+                n.muted_reason = $reason
+            REMOVE {_MUTE_PROVENANCE})
+        RETURN {_FUNCTIONAL_LABEL} AS label, already
         """
         with self.driver.session() as session:
             record = session.run(
                 query,
                 node_id=node_id, user_id=user_id, project_id=project_id,
-                muted_by=muted_by or user_id, reason=reason or "",
+                muted_by=muted_by or user_id, reason=str(reason or "")[:500],
             ).single()
 
         if record is None:
             return {"muted": False, "label": None}
-        return {"muted": True, "label": record["label"]}
+        return {"muted": True, "already": bool(record.get("already")),
+                "label": record["label"]}
+
+    def mute_findings_delegated(self, user_id: str, project_id: str,
+                                keys=None, graph_ids=None, exempt_pairs=None,
+                                muted_by: str = "", reason: str = "",
+                                token_prefix: str = "") -> dict:
+        """Mute findings on behalf of an external agent (MCP `mute_findings`).
+
+        Everything that bounds an agent is decided here, per node, under the
+        node's write lock and in the same statement as the write, so nothing
+        read beforehand can go stale:
+
+        - an already-muted node is NEVER touched (`already_muted`), whoever
+          muted it: a rule, a person, or another token;
+        - a proven finding is refused (`proven`), see `_PROVEN`;
+        - a finding a person brought back, i.e. one with a Mute Rules
+          exemption, is refused (`kept_visible`). The exemptions live in
+          Postgres, so the caller passes them as `[label, key]` pairs.
+
+        A mute that does land is stamped `muted_channel = 'mcp'` and
+        `muted_token = token_prefix`, with `muted_by` the token owner.
+
+        `graph_ids` (Neo4j internal ids, as the tables show them) are resolved
+        to finding keys first, inside the tenant. One that is not a finding is
+        `not_a_finding` and muted by nothing. A key can match more than one
+        node (`_BY_ID` spans eight labels), so EVERY matched row is reported.
+
+        Returns {"items": [{ref, key, label, node_id, name, severity, outcome,
+        was_via}], "not_found": [ref]}. `outcome` is muted | already_muted |
+        proven | kept_visible | not_a_finding.
+        """
+        clean_keys = sorted({str(k) for k in (keys or []) if k})[:MAX_DELEGATED_MUTE_BATCH]
+        gids = _clean_graph_ids(graph_ids, MAX_DELEGATED_MUTE_BATCH)
+        pairs = [[str(p[0]), str(p[1])] for p in (exempt_pairs or [])
+                 if isinstance(p, (list, tuple)) and len(p) == 2]
+
+        items: list = []
+        not_found: list = []
+        # Which ref each key came from, so a result names what the caller sent.
+        ref_of: dict = {k: k for k in clean_keys}
+
+        if gids:
+            resolve = """
+            MATCH (n) WHERE id(n) IN $gids
+              AND n.user_id = $user_id AND n.project_id = $project_id
+            RETURN id(n) AS gid,
+                   [l IN labels(n) WHERE l <> 'Muted'] AS labels,
+                   n.id AS id, n.finding_id AS finding_id
+            """
+            with _graph_id_session(self.driver) as session:
+                found = {int(r["gid"]): dict(r) for r in session.run(
+                    resolve, gids=gids, user_id=user_id, project_id=project_id)}
+            for gid in gids:
+                row = found.get(gid)
+                if row is None:
+                    not_found.append(str(gid))
+                    continue
+                labels = row.get("labels") or []
+                label = next((l for l in labels if l in MUTEABLE_LABELS), None)
+                if label is None:
+                    items.append({"ref": str(gid), "key": None,
+                                  "label": labels[0] if labels else None,
+                                  "node_id": str(gid), "name": "", "severity": "",
+                                  "outcome": "not_a_finding", "was_via": None})
+                    continue
+                key = row.get("finding_id") if label == "MalPackageFinding" else row.get("id")
+                key = key or row.get("id") or row.get("finding_id")
+                if not key:
+                    not_found.append(str(gid))
+                    continue
+                ref_of.setdefault(str(key), str(gid))
+
+        mute_keys = sorted(ref_of)[:MAX_DELEGATED_MUTE_BATCH]
+        if not mute_keys:
+            return {"items": items, "not_found": not_found}
+
+        query = f"""
+        UNWIND $keys AS key
+        MATCH (n:{_MUTEABLE})
+        WHERE n.user_id = $user_id AND n.project_id = $project_id
+          AND (n.id = key OR n.finding_id = key)
+        SET n._mute_lock = true
+        REMOVE n._mute_lock
+        WITH key, n, {_FUNCTIONAL_LABEL} AS label
+        WITH key, n, label, n:Muted AS already,
+             {_PROVEN} AS proven,
+             any(p IN $exempt_pairs WHERE p[0] = label
+                 AND (p[1] = n.id OR p[1] = n.finding_id)) AS kept_visible,
+             {_MUTED_VIA} AS was_via
+        FOREACH (_ IN CASE WHEN already OR proven OR kept_visible THEN [] ELSE [1] END |
+            SET n:Muted,
+                n.muted = true,
+                n.muted_at = datetime(),
+                n.muted_by = $muted_by,
+                n.muted_reason = $reason,
+                n.muted_channel = '{MCP_MUTE_CHANNEL}',
+                n.muted_token = $token_prefix)
+        RETURN key, label, {_NODE_ID} AS node_id,
+               coalesce(n.name, n.title, n.detector_name, n.secret_type, n.type, '') AS name,
+               coalesce(n.severity, '') AS severity,
+               CASE WHEN already THEN 'already_muted' WHEN proven THEN 'proven'
+                    WHEN kept_visible THEN 'kept_visible' ELSE 'muted' END AS outcome,
+               CASE WHEN already THEN was_via ELSE NULL END AS was_via
+        """
+        with self.driver.session() as session:
+            rows = [dict(r) for r in session.run(
+                query, keys=mute_keys, exempt_pairs=pairs,
+                user_id=user_id, project_id=project_id,
+                muted_by=muted_by or user_id, reason=str(reason or "")[:500],
+                token_prefix=str(token_prefix or "")[:40])]
+
+        matched = set()
+        for r in rows:
+            matched.add(r["key"])
+            items.append({"ref": ref_of.get(r["key"], r["key"]), **r})
+        not_found.extend(ref_of[k] for k in mute_keys if k not in matched)
+        return {"items": items, "not_found": not_found}
+
+    def resolve_muted(self, user_id: str, project_id: str, keys=None, graph_ids=None,
+                      include_rule_mutes: bool = False) -> dict:
+        """What an unmute of these refs WOULD do. Reads only; writes nothing.
+
+        MCP `unmute_findings` records the Mute Rules exemptions BEFORE the
+        graph write, so a lost response cannot leave a finding unmuted with no
+        exemption, and it needs the (label, key) pairs to do that. This is where
+        they come from.
+
+        A rule mute is `skipped_rule_mute` unless `include_rule_mutes`: its
+        unmute becomes a standing exception to that rule. A ref that is not a
+        muted finding in this tenant is `not_found`.
+        """
+        clean_keys = sorted({str(k) for k in (keys or []) if k})[:MAX_UNMUTE_BATCH]
+        gids = _clean_graph_ids(graph_ids, MAX_UNMUTE_BATCH)
+        columns = f"""{_FUNCTIONAL_LABEL} AS label, {_NODE_ID} AS node_id,
+               coalesce(n.muted_by, '') AS muted_by, {_MUTED_VIA} AS was_via"""
+        rows: list = []
+        if clean_keys:
+            with self.driver.session() as session:
+                rows += [{**dict(r), "ref": r["key"]} for r in session.run(f"""
+        MATCH (n:Muted)
+        WHERE n.user_id = $user_id AND n.project_id = $project_id
+          AND (n.id IN $keys OR n.finding_id IN $keys)
+        RETURN CASE WHEN n.id IN $keys THEN n.id ELSE n.finding_id END AS key,
+               {columns}
+        """, keys=clean_keys, user_id=user_id, project_id=project_id)]
+        if gids:
+            with _graph_id_session(self.driver) as session:
+                rows += [{**dict(r), "ref": str(r["gid"])} for r in session.run(f"""
+        MATCH (n:Muted)
+        WHERE id(n) IN $gids AND n.user_id = $user_id AND n.project_id = $project_id
+        RETURN id(n) AS gid,
+               CASE WHEN n:MalPackageFinding THEN n.finding_id
+                    ELSE coalesce(n.id, n.finding_id) END AS key,
+               {columns}
+        """, gids=gids, user_id=user_id, project_id=project_id)]
+
+        to_unmute, skipped, seen, found_refs = [], [], set(), set()
+        for r in rows:
+            found_refs.add(r["ref"])
+            if not r.get("key"):
+                continue
+            ident = (r["label"], r["key"])
+            if ident in seen:
+                continue
+            seen.add(ident)
+            item = {"ref": r["ref"], "key": r["key"], "label": r["label"],
+                    "node_id": r.get("node_id"), "muted_by": r.get("muted_by") or "",
+                    "was_via": r.get("was_via")}
+            if r.get("was_via") == "rule" and not include_rule_mutes:
+                skipped.append(item)
+            else:
+                to_unmute.append(item)
+        refs = clean_keys + [str(g) for g in gids]
+        return {"to_unmute": to_unmute, "skipped_rule_mute": skipped,
+                "not_found": [ref for ref in refs if ref not in found_refs]}
 
     def unmute_finding(self, user_id: str, project_id: str, node_id: str) -> dict:
         """Restore a suppressed finding.
@@ -203,7 +454,7 @@ class TriageMixin:
         query = f"""
         MATCH (n:Muted)
         WHERE {_BY_ID} AND n.user_id = $user_id AND n.project_id = $project_id
-        REMOVE n:Muted, n.muted, n.muted_at, n.muted_by, n.muted_reason
+        REMOVE n:Muted, {_MUTE_PROPS}
         RETURN {_FUNCTIONAL_LABEL} AS label
         """
         with self.driver.session() as session:
@@ -217,19 +468,24 @@ class TriageMixin:
 
     @staticmethod
     def _muted_filter(label=None, muted_via=None, rule=None, search=None,
-                      live_rules=None) -> tuple[str, dict]:
+                      live_rules=None, token=None) -> tuple[str, dict]:
         """The WHERE clauses and parameters shared by the Muted list and its count.
 
         Built once so a page and the total it is "N of" can never disagree on
         what they filter. `label` is interpolated as a label expression, so it is
         accepted only from MUTEABLE_LABELS; anything else is ignored rather than
         interpolated. Every other value travels as a parameter.
+
+        `muted_via` is three-valued: `person` is a person in the UI only, `mcp`
+        is an external agent on a person's token, `rule` a Mute Rule.
         """
         clauses, params = [], {}
         if label in MUTEABLE_LABELS:
             clauses.append(f"n:{label}")
         if muted_via == "person":
-            clauses.append(f"NOT {_RULE_MUTED}")
+            clauses.append(f"NOT {_RULE_MUTED} AND NOT {_MCP_MUTED}")
+        elif muted_via == "mcp":
+            clauses.append(f"NOT {_RULE_MUTED} AND {_MCP_MUTED}")
         elif muted_via == "rule":
             clauses.append(_RULE_MUTED)
         elif muted_via == "deleted_rule":
@@ -240,13 +496,21 @@ class TriageMixin:
         if rule:
             clauses.append("n.muted_by = $rule")
             params["rule"] = str(rule)[:200]
+        if token:
+            clauses.append("n.muted_token = $token")
+            params["token"] = str(token)[:40]
         if search:
+            # An all-digit search is also an exact Node ID, the value a person
+            # copies from any table. Exact, so "12" does not match node 3120.
+            node_id = f" OR {_NODE_ID} = $search_raw" if str(search).strip().isdigit() else ""
             clauses.append(
                 "(toLower(coalesce(n.name, n.title, n.detector_name, n.secret_type, n.type, '')) CONTAINS $search"
                 " OR toLower(coalesce(n.id, n.finding_id, '')) CONTAINS $search"
                 f" OR toLower({_HOST}) CONTAINS $search"
-                " OR toLower(coalesce(n.muted_reason, '')) CONTAINS $search)")
+                f" OR toLower(coalesce(n.muted_reason, '')) CONTAINS $search{node_id})")
             params["search"] = str(search).strip().lower()[:200]
+            if node_id:
+                params["search_raw"] = str(search).strip()[:20]
         where = "".join(f"\n          AND {c}" for c in clauses)
         return where, params
 
@@ -254,7 +518,8 @@ class TriageMixin:
                    limit: int | None = None, offset: int | None = None,
                    label: str | None = None, muted_via: str | None = None,
                    rule: str | None = None, search: str | None = None,
-                   order: str | None = None, live_rules=None) -> list:
+                   order: str | None = None, live_rules=None,
+                   token: str | None = None) -> list:
         """Every suppressed finding in the project, one page at a time.
 
         The ONLY query in the codebase that deliberately matches `:Muted`. It is
@@ -275,7 +540,7 @@ class TriageMixin:
         orders every string after every datetime, so restored mutes would sort
         as a block regardless of when they happened.
         """
-        where, params = self._muted_filter(label, muted_via, rule, search, live_rules)
+        where, params = self._muted_filter(label, muted_via, rule, search, live_rules, token)
         first = f"CASE WHEN {_RULE_MUTED} THEN 1 ELSE 0 END, " if order == "person_first" else ""
         page = ""
         if offset:
@@ -296,7 +561,9 @@ class TriageMixin:
                {_HOST}                             AS host,
                toString(n.muted_at)                AS muted_at,
                coalesce(n.muted_by, '')            AS muted_by,
-               CASE WHEN {_RULE_MUTED} THEN 'rule' ELSE 'person' END AS muted_via,
+               {_MUTED_VIA} AS muted_via,
+               coalesce(n.muted_channel, '')       AS muted_channel,
+               coalesce(n.muted_token, '')         AS muted_token,
                coalesce(n.muted_reason, '')        AS muted_reason,
                toString(n.stale_since)             AS stale_since,
                coalesce(n.triage_status, 'unreviewed') AS triage_status,
@@ -310,9 +577,9 @@ class TriageMixin:
     def count_muted(self, user_id: str, project_id: str,
                     label: str | None = None, muted_via: str | None = None,
                     rule: str | None = None, search: str | None = None,
-                    live_rules=None) -> int:
+                    live_rules=None, token: str | None = None) -> int:
         """How many muted findings match the same filters as `list_muted`."""
-        where, params = self._muted_filter(label, muted_via, rule, search, live_rules)
+        where, params = self._muted_filter(label, muted_via, rule, search, live_rules, token)
         query = f"""
         MATCH (n:Muted)
         WHERE n.user_id = $user_id AND n.project_id = $project_id{where}
@@ -324,24 +591,30 @@ class TriageMixin:
         return int(record["total"]) if record else 0
 
     def muted_facets(self, user_id: str, project_id: str) -> dict:
-        """Counts per functional label and per `muted_by`, for the Muted Nodes filters.
+        """Counts per functional label, per `muted_by` rule and per MCP token.
 
         Per-rule counts are also the review surface for rule drift: a rule that
         hides thousands of findings, or none, is visible here without paging.
         People are collapsed into one bucket; the Kind and Rule menus do not
-        name individual operators.
+        name individual operators. Agent (MCP) mutes are counted apart from
+        people's, and per token prefix, so one token's mutes can be reviewed
+        and reverted together.
         """
         query = f"""
         MATCH (n:Muted)
         WHERE n.user_id = $user_id AND n.project_id = $project_id
         WITH {_FUNCTIONAL_LABEL} AS label,
+             {_MUTED_VIA} AS via,
              CASE WHEN {_RULE_MUTED} THEN n.muted_by ELSE '' END AS rule,
-             CASE WHEN {_RULE_MUTED} THEN coalesce(n.muted_reason, '') ELSE '' END AS reason
-        RETURN label, rule, head(collect(reason)) AS reason, count(*) AS c
+             CASE WHEN {_RULE_MUTED} THEN coalesce(n.muted_reason, '') ELSE '' END AS reason,
+             CASE WHEN {_RULE_MUTED} THEN '' ELSE coalesce(n.muted_token, '') END AS token
+        RETURN label, via, rule, token, head(collect(reason)) AS reason, count(*) AS c
         """
         labels: dict = {}
         rules: dict = {}
+        tokens: dict = {}
         person = 0
+        mcp = 0
         total = 0
         with self.driver.session() as session:
             for r in session.run(query, user_id=user_id, project_id=project_id):
@@ -351,41 +624,64 @@ class TriageMixin:
                 if r["rule"]:
                     entry = rules.setdefault(r["rule"], {"count": 0, "reason": r["reason"] or ""})
                     entry["count"] += c
+                elif r.get("via") == "mcp":
+                    mcp += c
+                    token = r.get("token") or ""
+                    if token:
+                        tokens[token] = tokens.get(token, 0) + c
                 else:
                     person += c
         return {
             "total": total,
             "by_person": person,
+            "by_mcp": mcp,
             "labels": labels,
             "rules": [{"muted_by": k, **v} for k, v in sorted(rules.items())],
+            "tokens": [{"token": k, "count": v}
+                       for k, v in sorted(tokens.items(), key=lambda kv: (-kv[1], kv[0]))],
         }
 
-    def unmute_findings(self, user_id: str, project_id: str, keys) -> dict:
+    def unmute_findings(self, user_id: str, project_id: str, keys,
+                        skip_rule_mutes: bool = False) -> dict:
         """Unmute several findings in one write, whoever muted them.
 
-        Returns what was actually unmuted, as `{key, label, muted_by}` rows: the
-        caller records an exemption per row (so no rule mutes it again) and the
-        audit names what each one had been muted by. A key that matched nothing
-        is absent from the result, never reported as done.
+        Returns what was actually unmuted, as `{key, label, muted_by, was_via}`
+        rows: the caller records an exemption per row (so no rule mutes it
+        again) and the audit names what each one had been muted by. A key that
+        matched nothing is absent from the result, never reported as done.
+
+        `skip_rule_mutes` leaves a rule's mute in place and reports it under
+        `skipped`: an MCP caller may release a rule mute only when it asked to
+        explicitly. The rule check is read under the node's write lock. The
+        default is the UI's behaviour, which unmutes whatever it is given.
         """
         clean = sorted({str(k) for k in (keys or []) if k})[:MAX_UNMUTE_BATCH]
         if not clean:
-            return {"unmuted": 0, "items": []}
+            return {"unmuted": 0, "items": [], "skipped": []}
         # One pass over the muted nodes with IN, not a pass per key: an OR on two
         # properties is served by no index, and rule mutes make the set large.
         query = f"""
         MATCH (n:Muted)
         WHERE n.user_id = $user_id AND n.project_id = $project_id
           AND (n.id IN $keys OR n.finding_id IN $keys)
+        SET n._mute_lock = true
+        REMOVE n._mute_lock
         WITH n, CASE WHEN n.id IN $keys THEN n.id ELSE n.finding_id END AS key,
-             coalesce(n.muted_by, '') AS was
-        REMOVE n:Muted, n.muted, n.muted_at, n.muted_by, n.muted_reason
-        RETURN key, {_FUNCTIONAL_LABEL} AS label, was AS muted_by
+             coalesce(n.muted_by, '') AS was, {_MUTED_VIA} AS was_via
+        WITH n, key, was, was_via, ($skip_rule_mutes AND was_via = 'rule') AS skipped
+        FOREACH (_ IN CASE WHEN skipped THEN [] ELSE [1] END |
+            REMOVE n:Muted, {_MUTE_PROPS})
+        RETURN key, {_FUNCTIONAL_LABEL} AS label, was AS muted_by, was_via, skipped
         """
         with self.driver.session() as session:
-            items = [dict(r) for r in session.run(
-                query, keys=clean, user_id=user_id, project_id=project_id)]
-        return {"unmuted": len(items), "items": items}
+            rows = [dict(r) for r in session.run(
+                query, keys=clean, user_id=user_id, project_id=project_id,
+                skip_rule_mutes=bool(skip_rule_mutes))]
+        items = [{k: r.get(k) for k in ("key", "label", "muted_by", "was_via")}
+                 for r in rows if not r.get("skipped")]
+        skipped = [{k: r.get(k) for k in ("key", "label", "muted_by")}
+                   for r in rows if r.get("skipped")]
+        return {"unmuted": len(items), "items": items, "skipped": skipped}
 
     def list_triage_findings(self, user_id: str, project_id: str, limit: int = 2000) -> list:
         """Every finding in triage scope that is NOT muted, for the Priority Board.
@@ -754,8 +1050,10 @@ class TriageMixin:
 
         `refuse_muted` is for a delegated caller. Any `human` verdict is a
         Mute Rules guard, so on a rule-muted finding it releases the mute at
-        the next apply or sweep: a verdict would be an unmute by another name,
-        and unmuting is reserved for a person.
+        the next apply or sweep: a verdict would be an unmute by another name.
+        An MCP caller unmutes only through `unmute_findings`, which needs its
+        own opt-in permission and an explicit flag for a rule mute, so the
+        verdict permission alone can never release one.
 
         The node's write lock is taken BEFORE `n:Muted` is read, the same idiom
         as `_lock` in graph_db/node_filters/cypher.py. Under read committed a

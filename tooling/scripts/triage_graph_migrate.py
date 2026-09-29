@@ -64,7 +64,13 @@ CARRIED_PROPS = (
     "triage_state", "triage_group_key", "triage_run_id", "triage_ai_verdict",
     "triage_ai_quote", "triage_ai_model", "triage_evidence_hash",
     "triage_proof", "triaged_at", "muted_at", "muted_by", "muted_reason",
+    "muted_channel", "muted_token",
 )
+
+#: An MCP mute's provenance. Carried only with the mute itself: grafted onto a
+#: survivor that was already muted by a person, it would re-attribute that
+#: person's mute to an access token.
+MUTE_PROVENANCE_PROPS = ("muted_channel", "muted_token")
 
 
 def services_are_up() -> list[str]:
@@ -164,6 +170,9 @@ def migrate_nuclei(session, apply: bool) -> dict:
                         and prop not in carried:
                     carried[prop] = value
         inherits_mute = any(n["muted"] for n in surplus) and not keep["muted"]
+        if not inherits_mute:
+            for prop in MUTE_PROVENANCE_PROPS:
+                carried.pop(prop, None)
 
         session.run(
             """

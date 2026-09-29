@@ -778,7 +778,8 @@ class TestBatchUnmute(unittest.TestCase):
 
     def test_an_empty_batch_runs_no_query(self):
         client = FakeClient(records=[])
-        self.assertEqual(client.unmute_findings(UID, PID, []), {"unmuted": 0, "items": []})
+        self.assertEqual(client.unmute_findings(UID, PID, []),
+                         {"unmuted": 0, "items": [], "skipped": []})
         self.assertEqual(client.queries, [])
 
     def test_the_batch_is_bounded(self):
@@ -842,6 +843,376 @@ class TestRowsCarryTheGraphNodeIdForDisplayOnly(unittest.TestCase):
             for query in client.queries:
                 with self.subTest(query=query.strip()[:40]):
                     self.assertNotIn("id(n)", query)
+
+
+
+class SeqClient(TriageMixin):
+    """A stub driver that answers each query with the next record list.
+
+    The delegated mute and `resolve_muted` run more than one statement, and
+    each needs its own rows.
+    """
+
+    def __init__(self, *answers):
+        self.queries, self.params, self.session_kwargs = [], [], []
+        self._answers = list(answers)
+        client = self
+
+        def run(query, **params):
+            client.queries.append(query)
+            client.params.append(params)
+            rows = client._answers.pop(0) if client._answers else []
+            result = MagicMock()
+            result.single.return_value = rows[0] if rows else None
+            result.__iter__ = lambda _self: iter(rows)
+            return result
+
+        session = MagicMock()
+        session.run = run
+        session.__enter__ = lambda _self: session
+        session.__exit__ = lambda *_: False
+
+        def open_session(**kwargs):
+            client.session_kwargs.append(kwargs)
+            return session
+
+        self.driver = MagicMock()
+        self.driver.session.side_effect = open_session
+
+
+def _mute_row(key, outcome="muted", label="Vulnerability", was_via=None):
+    return {"key": key, "label": label, "node_id": "812", "name": "Banner",
+            "severity": "info", "outcome": outcome, "was_via": was_via}
+
+
+class TestMuteProvenanceNeverLeaks(unittest.TestCase):
+    """`muted_channel`/`muted_token` mark an agent's (MCP) mute.
+
+    Every unmute removes them and every non-delegated mute clears them, or a
+    later mute would be attributed to an old access token.
+    """
+
+    PROVENANCE = ("n.muted_channel", "n.muted_token")
+
+    def test_every_triage_unmute_removes_them(self):
+        for call in (lambda c: c.unmute_finding(UID, PID, "v1"),
+                     lambda c: c.unmute_findings(UID, PID, ["v1"])):
+            client = FakeClient(records=[])
+            call(client)
+            remove = client.last[client.last.index("REMOVE n:Muted"):]
+            for prop in self.PROVENANCE:
+                with self.subTest(query=client.last.strip()[:30], prop=prop):
+                    self.assertIn(prop, remove)
+
+    def test_the_rule_sweep_clears_them_on_mute_and_restamp_and_removes_on_unmute(self):
+        from graph_db.node_filters.cypher import mute_query, restamp_query, unmute_query
+        kind = {"graph_label": "Vulnerability", "key": "id"}
+        for build in (mute_query, restamp_query):
+            with self.subTest(query=build.__name__):
+                self.assertIn("REMOVE n.muted_channel, n.muted_token", build(kind))
+        self.assertIn("n.muted_reason, n.muted_channel, n.muted_token", unmute_query(kind))
+
+    def test_the_rollback_script_removes_them(self):
+        import tooling.scripts.node_filters_rollback as rb
+        for prop in self.PROVENANCE:
+            self.assertIn(prop, rb.RELEASE)
+
+    def test_the_duplicate_merge_carries_them_only_with_the_mute(self):
+        import tooling.scripts.triage_graph_migrate as mig
+        for prop in ("muted_channel", "muted_token"):
+            self.assertIn(prop, mig.CARRIED_PROPS)
+            self.assertIn(prop, mig.MUTE_PROVENANCE_PROPS)
+
+
+class TestAPersonsMuteNeverOverwrites(unittest.TestCase):
+    """`mute_finding` (the UI's mute) is a no-op on an already-muted node."""
+
+    def test_the_lock_is_taken_before_the_muted_label_is_read(self):
+        client = FakeClient(records=[{"label": "Vulnerability", "already": False}])
+        client.mute_finding(UID, PID, "v1", "alice")
+        query = client.last
+        self.assertLess(query.index("SET n._mute_lock = true"), query.index("n:Muted AS already"))
+
+    def test_an_already_muted_node_is_left_untouched(self):
+        client = FakeClient(records=[{"label": "Vulnerability", "already": True}])
+        result = client.mute_finding(UID, PID, "v1", "alice", "noise")
+        self.assertEqual(result, {"muted": True, "already": True, "label": "Vulnerability"})
+        # Every mute property is written only inside the not-already branch.
+        query = client.last
+        gate = query.index("FOREACH (_ IN CASE WHEN already THEN [] ELSE [1] END")
+        self.assertGreater(query.index("n.muted_by = $muted_by"), gate)
+        self.assertGreater(query.index("SET n:Muted"), gate)
+
+    def test_a_fresh_mute_clears_leftover_agent_provenance(self):
+        client = FakeClient(records=[{"label": "Vulnerability", "already": False}])
+        client.mute_finding(UID, PID, "v1", "alice")
+        branch = client.last[client.last.index("FOREACH"):client.last.index("RETURN")]
+        self.assertIn("REMOVE n.muted_channel, n.muted_token", branch)
+        self.assertNotIn("muted_channel =", client.last)
+
+    def test_the_reason_is_bounded(self):
+        client = FakeClient(records=[])
+        client.mute_finding(UID, PID, "v1", "alice", "x" * 900)
+        self.assertEqual(len(client.params[-1]["reason"]), 500)
+
+
+class TestTheDelegatedMute(unittest.TestCase):
+    """`mute_findings_delegated`: the MCP mute. Its bounds live in the write."""
+
+    def mute(self, client, **kw):
+        args = dict(keys=["v1"], graph_ids=[], exempt_pairs=[["Secret", "s9"]],
+                    muted_by="u1", reason="noise", token_prefix="rdmn_mcp_ab12cd34")
+        args.update(kw)
+        return client.mute_findings_delegated(UID, PID, **args)
+
+    def test_it_is_tenant_scoped_and_matches_only_findings(self):
+        client = SeqClient([_mute_row("v1")])
+        self.mute(client)
+        query = client.queries[-1]
+        self.assertIn("n.user_id = $user_id AND n.project_id = $project_id", query)
+        for label in MUTEABLE_LABELS:
+            self.assertIn(label, query)
+        self.assertEqual(client.params[-1]["user_id"], UID)
+
+    def test_the_lock_is_taken_before_any_state_is_read(self):
+        client = SeqClient([_mute_row("v1")])
+        self.mute(client)
+        query = client.queries[-1]
+        lock = query.index("SET n._mute_lock = true")
+        for read in ("n:Muted AS already", "AS proven", "AS kept_visible"):
+            self.assertLess(lock, query.index(read), read)
+
+    def test_it_never_touches_an_existing_mute(self):
+        client = SeqClient([_mute_row("v1", "already_muted", was_via="rule")])
+        result = self.mute(client)
+        query = client.queries[-1]
+        gate = query.index("CASE WHEN already OR proven OR kept_visible THEN [] ELSE [1] END")
+        self.assertGreater(query.index("n.muted_by = $muted_by"), gate)
+        self.assertEqual(result["items"][0]["outcome"], "already_muted")
+        self.assertEqual(result["items"][0]["was_via"], "rule")
+
+    def test_a_proven_finding_is_refused_but_a_human_noise_verdict_is_not(self):
+        client = SeqClient([])
+        self.mute(client)
+        proven = client.queries[-1].split("AS proven")[0].rsplit("WITH", 1)[1]
+        for guard in ("'confirmed'", "n.triage_proof IS NOT NULL", "[:CONFIRMS]"):
+            self.assertIn(guard, proven)
+        # A person calling it noise is a reason TO mute, so g_human is not a guard.
+        self.assertNotIn("triage_source", client.queries[-1])
+
+    def test_an_exempt_finding_is_kept_visible(self):
+        client = SeqClient([])
+        self.mute(client)
+        self.assertIn("any(p IN $exempt_pairs WHERE p[0] = label", client.queries[-1])
+        self.assertEqual(client.params[-1]["exempt_pairs"], [["Secret", "s9"]])
+
+    def test_a_malformed_pair_never_reaches_the_query(self):
+        client = SeqClient([])
+        self.mute(client, exempt_pairs=[["Secret", "s9"], ["x"], "ab", None])
+        self.assertEqual(client.params[-1]["exempt_pairs"], [["Secret", "s9"]])
+
+    def test_the_mute_is_stamped_with_channel_and_token(self):
+        client = SeqClient([_mute_row("v1")])
+        self.mute(client)
+        query = client.queries[-1]
+        self.assertIn("n.muted_channel = 'mcp'", query)
+        self.assertIn("n.muted_token = $token_prefix", query)
+        self.assertEqual(client.params[-1]["token_prefix"], "rdmn_mcp_ab12cd34")
+        self.assertEqual(client.params[-1]["muted_by"], "u1")
+
+    def test_the_reason_is_a_bounded_parameter(self):
+        client = SeqClient([])
+        self.mute(client, reason="x' }) DETACH DELETE n //" + "y" * 900)
+        self.assertNotIn("DETACH DELETE", client.queries[-1])
+        self.assertEqual(len(client.params[-1]["reason"]), 500)
+
+    def test_the_batch_is_capped_at_25(self):
+        client = SeqClient([])
+        self.mute(client, keys=[f"v{i:02d}" for i in range(40)])
+        self.assertEqual(len(client.params[-1]["keys"]), 25)
+
+    def test_every_matched_row_is_reported_and_unmatched_keys_are_not_found(self):
+        client = SeqClient([_mute_row("v1"), _mute_row("v1", label="Secret")])
+        result = self.mute(client, keys=["v1", "gone"])
+        self.assertEqual([(i["key"], i["label"]) for i in result["items"]],
+                         [("v1", "Vulnerability"), ("v1", "Secret")])
+        self.assertEqual(result["not_found"], ["gone"])
+
+    def test_node_ids_resolve_inside_the_tenant_with_the_deprecation_silenced(self):
+        client = SeqClient(
+            [{"gid": 812, "labels": ["Vulnerability"], "id": "v7", "finding_id": None},
+             {"gid": 813, "labels": ["MalPackageFinding"], "id": None, "finding_id": "mf1"},
+             {"gid": 900, "labels": ["IP"], "id": "ip1", "finding_id": None}],
+            [_mute_row("v7"), _mute_row("mf1", label="MalPackageFinding")])
+        result = self.mute(client, keys=[], graph_ids=["812", "813", "900", "901", "x"])
+        resolve = client.queries[0]
+        self.assertIn("id(n) IN $gids", resolve)
+        self.assertIn("n.user_id = $user_id AND n.project_id = $project_id", resolve)
+        self.assertEqual(client.params[0]["gids"], [812, 813, 900, 901])
+        self.assertIn("notifications_disabled_classifications", client.session_kwargs[0])
+        # A MalPackageFinding is keyed on finding_id, everything else on id.
+        self.assertEqual(sorted(client.params[1]["keys"]), ["mf1", "v7"])
+        by_ref = {i["ref"]: i for i in result["items"]}
+        self.assertEqual(by_ref["812"]["outcome"], "muted")
+        self.assertEqual(by_ref["900"]["outcome"], "not_a_finding")
+        self.assertEqual(result["not_found"], ["901"])
+
+    def test_the_write_itself_is_never_keyed_on_the_internal_id(self):
+        client = SeqClient([])
+        self.mute(client)
+        self.assertNotIn("id(n)", client.queries[-1].replace("elementId(n)", ""))
+
+    def test_nothing_to_mute_runs_no_write(self):
+        client = SeqClient([{"gid": 5, "labels": ["IP"], "id": "ip", "finding_id": None}])
+        result = self.mute(client, keys=[], graph_ids=["5"])
+        self.assertEqual(len(client.queries), 1)
+        self.assertEqual(result["items"][0]["outcome"], "not_a_finding")
+
+
+class TestResolveMutedOnlyReads(unittest.TestCase):
+    def test_it_writes_nothing(self):
+        client = SeqClient([], [])
+        client.resolve_muted(UID, PID, keys=["v1"], graph_ids=["7"])
+        self.assertEqual(len(client.queries), 2)
+        for query in client.queries:
+            for clause in ("SET ", "REMOVE ", "MERGE ", "DELETE", "CREATE "):
+                self.assertNotIn(clause, query)
+            self.assertIn("MATCH (n:Muted)", query)
+            self.assertIn("n.user_id = $user_id AND n.project_id = $project_id", query)
+
+    def test_rule_mutes_are_skipped_unless_asked(self):
+        rows = [{"key": "v1", "label": "Vulnerability", "node_id": "1",
+                 "muted_by": "rule:vuln.nuclei/abc123", "was_via": "rule"},
+                {"key": "v2", "label": "Vulnerability", "node_id": "2",
+                 "muted_by": "u1", "was_via": "mcp"}]
+        result = SeqClient(rows).resolve_muted(UID, PID, keys=["v1", "v2", "v3"])
+        self.assertEqual([i["key"] for i in result["to_unmute"]], ["v2"])
+        self.assertEqual([i["key"] for i in result["skipped_rule_mute"]], ["v1"])
+        self.assertEqual(result["not_found"], ["v3"])
+        result = SeqClient(rows).resolve_muted(UID, PID, keys=["v1", "v2"],
+                                               include_rule_mutes=True)
+        self.assertEqual(sorted(i["key"] for i in result["to_unmute"]), ["v1", "v2"])
+
+    def test_a_node_id_resolves_to_its_finding_key(self):
+        client = SeqClient([{"gid": 7, "key": "mf1", "label": "MalPackageFinding",
+                             "node_id": "7", "muted_by": "u1", "was_via": "person"}])
+        result = client.resolve_muted(UID, PID, graph_ids=["7", "8"])
+        self.assertIn("id(n) IN $gids", client.queries[0])
+        self.assertIn("notifications_disabled_classifications", client.session_kwargs[0])
+        self.assertEqual(result["to_unmute"][0]["key"], "mf1")
+        self.assertEqual(result["to_unmute"][0]["ref"], "7")
+        self.assertEqual(result["not_found"], ["8"])
+
+
+class TestTheMutedListIsThreeValued(unittest.TestCase):
+    def test_rows_carry_mcp_provenance(self):
+        client = FakeClient(records=[])
+        client.list_muted(UID, PID)
+        for column in ("AS muted_channel", "AS muted_token"):
+            self.assertIn(column, client.last)
+        self.assertIn("WHEN coalesce(n.muted_channel, '') = 'mcp' THEN 'mcp'", client.last)
+
+    def test_person_excludes_agent_mutes_and_mcp_selects_them(self):
+        client = FakeClient(records=[])
+        client.list_muted(UID, PID, muted_via="person")
+        self.assertIn("AND NOT coalesce(n.muted_channel, '') = 'mcp'", client.last)
+        client.list_muted(UID, PID, muted_via="mcp")
+        self.assertIn("AND coalesce(n.muted_channel, '') = 'mcp'", client.last)
+
+    def test_the_token_filter_is_a_parameter(self):
+        client = FakeClient(records=[{"total": 1}])
+        client.list_muted(UID, PID, token="rdmn_mcp_ab12cd34' OR 1=1")
+        self.assertIn("n.muted_token = $token", client.last)
+        self.assertNotIn("OR 1=1", client.last)
+        client.count_muted(UID, PID, token="rdmn_mcp_ab12cd34")
+        self.assertEqual(client.params[-1]["token"], "rdmn_mcp_ab12cd34")
+
+    def test_an_all_digit_search_also_matches_the_exact_node_id(self):
+        client = FakeClient(records=[])
+        client.list_muted(UID, PID, search=" 812 ")
+        self.assertIn("OR last(split(elementId(n), ':')) = $search_raw", client.last)
+        self.assertEqual(client.params[-1]["search_raw"], "812")
+        client.list_muted(UID, PID, search="banner")
+        self.assertNotIn("$search_raw", client.last)
+
+    def test_facets_count_agents_apart_from_people_and_per_token(self):
+        client = FakeClient(records=[
+            {"label": "Vulnerability", "via": "rule", "rule": "rule:vuln.nuclei/abc123",
+             "token": "", "reason": "Filter rule: Info", "c": 5},
+            {"label": "Vulnerability", "via": "person", "rule": "", "token": "", "reason": "", "c": 2},
+            {"label": "Secret", "via": "mcp", "rule": "", "token": "rdmn_mcp_ab12cd34",
+             "reason": "", "c": 3},
+            {"label": "Vulnerability", "via": "mcp", "rule": "", "token": "rdmn_mcp_00000000",
+             "reason": "", "c": 1},
+        ])
+        facets = client.muted_facets(UID, PID)
+        self.assertEqual(facets["total"], 11)
+        self.assertEqual(facets["by_person"], 2)
+        self.assertEqual(facets["by_mcp"], 4)
+        self.assertEqual(facets["tokens"], [{"token": "rdmn_mcp_ab12cd34", "count": 3},
+                                            {"token": "rdmn_mcp_00000000", "count": 1}])
+
+
+class TestBatchUnmuteCanSpareRuleMutes(unittest.TestCase):
+    def test_the_rule_check_is_read_under_the_lock_and_gates_the_remove(self):
+        client = FakeClient(records=[])
+        client.unmute_findings(UID, PID, ["v1"], skip_rule_mutes=True)
+        query = client.last
+        self.assertLess(query.index("SET n._mute_lock = true"), query.index("AS was_via"))
+        self.assertLess(query.index("CASE WHEN skipped THEN [] ELSE [1] END"),
+                        query.index("REMOVE n:Muted"))
+        self.assertIs(client.params[-1]["skip_rule_mutes"], True)
+
+    def test_the_ui_default_unmutes_everything(self):
+        client = FakeClient(records=[])
+        client.unmute_findings(UID, PID, ["v1"])
+        self.assertIs(client.params[-1]["skip_rule_mutes"], False)
+
+    def test_skipped_rows_are_reported_apart_and_never_as_unmuted(self):
+        client = FakeClient(records=[
+            {"key": "v1", "label": "Vulnerability", "muted_by": "rule:x/abc123",
+             "was_via": "rule", "skipped": True},
+            {"key": "v2", "label": "Vulnerability", "muted_by": "u1",
+             "was_via": "mcp", "skipped": False},
+        ])
+        result = client.unmute_findings(UID, PID, ["v1", "v2"], skip_rule_mutes=True)
+        self.assertEqual(result["unmuted"], 1)
+        self.assertEqual([i["key"] for i in result["items"]], ["v2"])
+        self.assertEqual(result["items"][0]["was_via"], "mcp")
+        self.assertEqual(result["skipped"], [{"key": "v1", "label": "Vulnerability",
+                                              "muted_by": "rule:x/abc123"}])
+
+
+class TestPruneAndClearsLockBeforeReadingTheMute(unittest.TestCase):
+    """A mute committing between the `:Muted` read and the DETACH DELETE would be
+    deleted with the node. The write lock taken first closes that window."""
+
+    @staticmethod
+    def _source(module, method):
+        import importlib
+        import inspect
+        cls_name, meth = method.split(".")
+        return inspect.getsource(getattr(getattr(importlib.import_module(module), cls_name), meth))
+
+    def test_the_prune_locks_before_keep(self):
+        src = self._source("graph_db.mixins.base_mixin", "BaseMixin.prune_unseen_findings")
+        self.assertLess(src.index("SET n._prune_lock = true"), src.index("AS keep"))
+
+    def test_every_clear_locks_before_it_reads_the_mute(self):
+        cases = (
+            ("graph_db.mixins.base_mixin", "BaseMixin.clear_gvm_data",
+             ("NOT v:Muted", "NOT e:Muted"), ("v._prune_lock", "e._prune_lock")),
+            ("graph_db.mixins.secret_mixin", "SecretMixin.clear_github_hunt_data",
+             ("NOT gs:Muted", "NOT gsf:Muted", "WHERE f:Muted"),
+             ("gs._prune_lock", "gsf._prune_lock", "x._prune_lock")),
+            ("graph_db.mixins.secret_mixin", "SecretMixin.clear_trufflehog_data",
+             ("NOT n:Muted", "WHERE f:Muted"), ("n._prune_lock", "x._prune_lock")),
+        )
+        for module, method, reads, locks in cases:
+            src = self._source(module, method)
+            for read, lock in zip(reads, locks):
+                with self.subTest(method=method, read=read):
+                    self.assertLess(src.index(f"SET {lock} = true"), src.index(read))
 
 
 if __name__ == "__main__":
