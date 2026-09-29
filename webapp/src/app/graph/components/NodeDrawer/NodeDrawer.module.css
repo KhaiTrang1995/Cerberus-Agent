@@ -21,26 +21,60 @@
   color: var(--drawer-section-info);
 }
 
-.deleteButton {
+/* 30% smaller than the shared Drawer title (em = the Drawer's h2 size), scoped
+   to this drawer so other drawers keep the standard title. */
+.drawerTitleText {
+  font-size: 0.7em;
+}
+
+/* Square icon buttons on the Basic Info row: copy context, ask agent, delete. */
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
   background: none;
   border: 1px solid var(--border-subtle);
   border-radius: var(--radius-default);
-  color: var(--text-tertiary);
+  color: var(--text-secondary);
   cursor: pointer;
-  padding: var(--space-0-5) var(--space-2);
-  font-size: var(--text-sm);
-  transition: all 0.2s;
+  transition: all 0.15s;
 }
 
-.deleteButton:hover {
+.iconBtn:hover {
+  color: var(--text-primary);
+  border-color: var(--border-default);
+  background: var(--bg-hover);
+}
+
+.iconBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.iconBtnPrimary {
+  color: var(--accent-primary);
+  border-color: var(--accent-primary);
+}
+
+.iconBtnPrimary:hover {
+  color: var(--text-on-accent);
+  background: var(--accent-primary);
+  border-color: var(--accent-primary);
+}
+
+.iconBtnDanger:hover {
   color: #ef4444;
   border-color: #ef4444;
   background: rgba(239, 68, 68, 0.1);
 }
 
-.deleteButton:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.basicInfoActions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
 }
 
 .sectionTitleProperties {

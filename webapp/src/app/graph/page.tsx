@@ -7,6 +7,7 @@ import { FileSystemDrawer } from './components/FileSystemDrawer'
 import { GraphCanvas, AUTO_2D_THRESHOLD } from './components/GraphCanvas'
 import { NodeDrawer } from './components/NodeDrawer'
 import { AIAssistantDrawer } from './components/AIAssistantDrawer'
+import type { PendingNodeQuery } from './components/AIAssistantDrawer/types'
 import { PageBottomBar } from './components/PageBottomBar'
 import { ReconConfirmModal } from './components/ReconConfirmModal'
 import { GvmConfirmModal } from './components/GvmConfirmModal'
@@ -48,6 +49,7 @@ import { VersionManager } from './components/VersionManager'
 import { ReconDeltaTable } from './components/ReconDelta'
 import { TriageTable } from './components/Triage/TriageTable'
 import { MutedNodesTable } from './components/MutedNodes/MutedNodesTable'
+import { MuteNodeProvider } from './components/MuteNode'
 import { NodeFiltersView } from './components/NodeFilters/NodeFiltersView'
 import { useNodeFilterStatus } from './hooks/useNodeFilterStatus'
 import { ScanScheduleTable } from './components/ScanSchedule'
@@ -104,6 +106,7 @@ export default function GraphPage() {
     isLoading: graphPrefsLoading,
   } = useGraphViewPrefs(projectId)
   const [isAIOpen, setIsAIOpen] = useState(false)
+  const [pendingNodeQuery, setPendingNodeQuery] = useState<PendingNodeQuery | null>(null)
   const [isFileSystemOpen, setIsFileSystemOpen] = useState(false)
   const [isReconModalOpen, setIsReconModalOpen] = useState(false)
   const [activeLogsDrawer, setActiveLogsDrawer] = useState<'recon' | 'gvm' | 'githubHunt' | 'supplyChain' | `trufflehog:${string}` | `partialRecon:${string}` | null>(null)
@@ -148,6 +151,7 @@ export default function GraphPage() {
   // Close all drawers when project changes
   useEffect(() => {
     setIsAIOpen(false)
+    setPendingNodeQuery(null)
     setActiveLogsDrawer(null)
     clearSelection()
   }, [projectId, clearSelection])
@@ -1129,6 +1133,18 @@ export default function GraphPage() {
     setIsAIOpen(false)
   }, [])
 
+  // "Ask agent" from a node: close the node drawer, spin up a FRESH session
+  // (forces the agent socket to reconnect on the new id), open the AI drawer,
+  // and hand it the seed message. The drawer sends it once that socket is up.
+  const handleStartAgentSession = useCallback((request: string, context: string, nodeLabel: string) => {
+    clearSelection()
+    resetSession()
+    setIsAIOpen(true)
+    setPendingNodeQuery({ token: Date.now(), nodeLabel, context, request })
+  }, [clearSelection, resetSession])
+
+  const handlePendingNodeQueryConsumed = useCallback(() => setPendingNodeQuery(null), [])
+
   const handleToggleStealth = useCallback(async (newValue: boolean) => {
     if (!projectId) return
     try {
@@ -1254,6 +1270,14 @@ export default function GraphPage() {
     toast.success('Node deleted')
     refetchGraph()
   }, [projectId, refetchGraph, toast, isViewingPastVersion, alertError])
+
+  // "View muted" on the mute toast, which the drawer raises from the graph view.
+  const viewMutedNodes = useCallback(() => {
+    setActiveView('table')
+    setDeepLinkSheet(null)
+    setNodeFilterFocus(null)
+    setTableViewMode('muted')
+  }, [])
 
   const handleToggleLogs = useCallback(() => {
     setActiveLogsDrawer(prev => prev === 'recon' ? null : 'recon')
@@ -1448,7 +1472,9 @@ export default function GraphPage() {
     )
   }
 
-  return (
+  // Bound to a name rather than wrapped inline so the provider does not
+  // re-indent the whole page.
+  const page = (
     <div className={styles.page}>
       <GraphToolbar
         projectId={projectId || ''}
@@ -1626,6 +1652,10 @@ export default function GraphPage() {
             expandedChild={expandedChild}
             onExpandChild={expandChild}
             onCollapseChild={collapseChild}
+            graphData={data}
+            projectName={currentProject?.name}
+            targetDomain={currentProject?.targetDomain}
+            onStartAgentSession={isViewingPastVersion ? undefined : handleStartAgentSession}
           />
         )}
 
@@ -1921,6 +1951,8 @@ export default function GraphPage() {
         requireToolConfirmation={currentProject?.agentRequireToolConfirmation ?? true}
         graphViewCypher={selectedFilterCypher}
         onOpenFileSystem={toggleFileSystemDrawer}
+        pendingNodeQuery={pendingNodeQuery}
+        onPendingNodeQueryConsumed={handlePendingNodeQueryConsumed}
       />
 
       <FileSystemDrawer
@@ -1988,5 +2020,16 @@ export default function GraphPage() {
         onHideAllSessions={handleHideAllSessions}
       />
     </div>
+  )
+
+  return (
+    <MuteNodeProvider
+      projectId={projectId}
+      readOnly={isViewingPastVersion}
+      onViewMuted={viewMutedNodes}
+      onGraphChanged={refetchGraph}
+    >
+      {page}
+    </MuteNodeProvider>
   )
 }
