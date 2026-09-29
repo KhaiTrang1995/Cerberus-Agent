@@ -99,10 +99,12 @@ export interface UnmuteAuditItem {
 export async function auditUnmute(entry: {
   actorId: string
   projectId: string
-  source: 'ui' | 'mcp'
+  source: 'ui' | 'mcp' | 'multi_undo'
   realActorUserId: string | null
   items: UnmuteAuditItem[]
   exempted: number
+  /** A Multi mute Undo: the batch it reverted. */
+  batchId?: string
   tokenId?: string
   tokenPrefix?: string
   outcome?: 'ok' | 'unknown'
@@ -121,6 +123,7 @@ export async function auditUnmute(entry: {
       ...(entry.tokenId ? { tokenId: entry.tokenId, tokenPrefix: entry.tokenPrefix } : {}),
       ...(entry.outcome ? { outcome: entry.outcome } : {}),
       ...(entry.requested ? { requested: entry.requested } : {}),
+      ...(entry.batchId ? { batchId: entry.batchId } : {}),
     },
     source: entry.source,
   })

@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { requireProjectOwner, graphTriage } from '@/lib/triageClient'
 import { liveRuleMutedBy } from '@/lib/nodeFilters/model'
+import { MULTI_BATCH_PATTERN } from '@/lib/multiMute'
 import {
   annotateMutedFacets,
   annotateMutedRow,
@@ -15,10 +16,11 @@ import {
  * explicitly non-agent: the agent's Cypher chokepoint refuses any query that
  * even names the `Muted` label, and nothing here is reachable from it.
  *
- * Query: offset, limit (default 50), label, mutedVia (person | mcp | rule |
- * deleted_rule), rule (an exact muted_by), token (an MCP token prefix: one
- * token's mutes), search, order (recent | person_first), facets=1 for the
- * per-kind, per-rule and per-token counts.
+ * Query: offset, limit (default 50), label, mutedVia (person | multi | mcp |
+ * rule | deleted_rule), rule (an exact muted_by), token (an MCP token prefix,
+ * one token's mutes, or a Multi mute batch id, one batch's), search, order
+ * (recent | person_first), facets=1 for the per-kind, per-rule and per-token
+ * counts.
  *
  * Rule mutes are annotated from the project's rule document here, server-side:
  * `rule_name` for a rule that still exists, `rule_deleted` for one that does not.
@@ -27,7 +29,7 @@ const MUTED_PAGE_DEFAULT = 50
 /** Export reads the whole filtered view in one request. */
 const MUTED_PAGE_MAX = 5000
 
-const MUTED_VIA = new Set(['person', 'mcp', 'rule', 'deleted_rule'])
+const MUTED_VIA = new Set(['person', 'multi', 'mcp', 'rule', 'deleted_rule'])
 const ORDERS = new Set(['recent', 'person_first'])
 
 function intParam(raw: string | null, fallback: number, min: number, max: number): number {
@@ -54,8 +56,8 @@ export async function GET(request: NextRequest) {
     rule: q.get('rule')?.slice(0, 200) || undefined,
     search: q.get('search')?.slice(0, 200) || undefined,
     order: order && ORDERS.has(order) ? order : undefined,
-    // Dropped, not refused, when it is not a token prefix: the agent refuses one.
-    token: token && MUTED_TOKEN_PATTERN.test(token) ? token : undefined,
+    // Dropped, not refused, when it is neither: the agent refuses one.
+    token: token && (MUTED_TOKEN_PATTERN.test(token) || MULTI_BATCH_PATTERN.test(token)) ? token : undefined,
   }
   if (extra.muted_via === 'deleted_rule') extra.live_rules = liveRuleMutedBy(doc)
 

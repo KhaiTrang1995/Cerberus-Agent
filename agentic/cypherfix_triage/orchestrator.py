@@ -16,9 +16,11 @@ from .tools import TriageNeo4jToolManager
 from . import evidence, grouping, remediation, score_model
 from .prompts import remediation_prose, review
 from .prompts.review import validate_review
+from . import layers
 from .fact_queries import (
     FINDING_QUERIES,
     PROJECT_FACT_QUERIES,
+    STORED_LAYERS,
     build_project_facts,
     normalise_finding_row,
 )
@@ -38,30 +40,57 @@ REVIEW_BATCH_SIZE = 12
 REVIEW_BATCH_CHARS = 30000
 REVIEW_BUDGET_SECONDS = 20 * 60
 
+#: The most findings one run may review, whatever the project setting says. The
+#: setting's own bound is 1000 as well; this also covers a value stored before
+#: that bound existed, and a start over MCP asks for no more.
+MAX_REVIEW_BUDGET = 1000
+
+#: Rows per publish transaction. One 5,000-row write would hold locks across the
+#: whole publish; 500 keeps each transaction short enough for a verdict waiting
+#: on one of its nodes.
+PUBLISH_BATCH_SIZE = 500
+
 
 class TriageOrchestrator:
     """One triage run: score, group, review, remediate, publish.
 
     THE SHAPE THAT MATTERS. Steps A to D happen entirely in memory; Step E is
-    the only thing that writes. That is what makes a run safe to stop, safe to
-    refuse and safe to run beside a scan: until the publish is claimed, the
-    previous ranking is still what an operator sees, and a run that is killed
-    halfway has changed nothing at all.
+    the only thing that writes findings. That is what makes a run safe to
+    stop, safe to refuse and safe to run beside a scan: until the publish is
+    claimed, the previous ranking is still what an operator sees, and a run
+    that is stopped before it has changed no finding at all. (Step A does
+    refresh the shared `:CVE` intelligence cache.)
 
       [R] authorize   ask the webapp for a run, before reading anything
-      [A] score       fact sets + one row per finding -> score_model (no LLM)
+      [A] score       fact sets + one row per finding -> the BASE layer (no LLM)
+          layers      read each finding's stored review and decision
       [B] group       findings that share a fix (deterministic keys)
-      [C] review      the LLM corrects factors against quoted evidence
-      [D] remediate   one remediation per group
-      [E] publish     claim, write the graph in batches, upsert, finish
+      [C] review      the LLM corrects factors against quoted evidence, only
+                      where no still-valid review exists
+          combine     base + review + decision -> the final values
+      [D] remediate   one remediation per group, groups from the final values
+      [E] publish     claim, write the layers in batches, upsert, finish
+
+    A run never writes a decision, and never replaces a still-valid review an
+    external agent wrote. The publish re-reads both under the node lock, so a
+    verdict or a review given while the run works is honoured.
     """
 
     def __init__(self, user_id: str, project_id: str, callback,
-                 real_actor_user_id: str | None = None):
+                 real_actor_user_id: str | None = None,
+                 trigger: str = "app", token_id: str | None = None,
+                 max_review_budget: int | None = None):
         self.user_id = user_id
         self.project_id = project_id
         self.callback = callback
         self.real_actor_user_id = real_actor_user_id
+        self.trigger = trigger if trigger in ("app", "mcp") else "app"
+        self.token_id = token_id
+        # A constructor argument, not a setting: `run()` replaces `settings`.
+        self.max_review_budget = MAX_REVIEW_BUDGET if max_review_budget is None \
+            else max(0, min(int(max_review_budget), MAX_REVIEW_BUDGET))
+        self.review_budget = 0
+        self.model = ""
         self.neo4j = TriageNeo4jToolManager(user_id, project_id)
         self.llm_client = None
         self.run_client: TriageRunClient | None = None
@@ -86,19 +115,49 @@ class TriageOrchestrator:
         # and the review cache key omitted it, so switching models reused
         # the previous one's verdicts.
         model = str(settings.get("llm_model") or "")
+        self.model = model
 
         self.run_client = TriageRunClient(
             self.project_id, self.user_id, self.real_actor_user_id)
 
         try:
+            # A review needs the owner's Triage review model, and nothing stands
+            # in for it. Budget 0 needs none: the ranking and the fix list are
+            # deterministic. An empty `settings` means the load itself failed,
+            # which keeps the old behaviour (a math-only ranking).
+            # The EFFECTIVE budget decides: a start that asked for no review
+            # (an MCP start while the owner has no model) ranks rules-only.
+            budget = int(settings.get("triageReviewBudget", 150) or 0)
+            self.review_budget = max(0, min(budget, self.max_review_budget, MAX_REVIEW_BUDGET))
+            summary["review_budget"] = self.review_budget
+            if settings and self.review_budget > 0 and settings.get("settings_unavailable"):
+                await self._notify("on_start_refused",
+                                   "the project owner's model settings could not be loaded")
+                raise TriageRunAborted(
+                    "the project owner's model settings could not be loaded",
+                    "settings_unavailable")
+            if settings and self.review_budget > 0 and not model:
+                await self._notify("on_start_refused",
+                                   "no Triage review model is set for the project owner")
+                raise TriageRunAborted(
+                    "no Triage review model is set for the project owner",
+                    "model_required")
+
             # [R] AUTHORIZE. Before any read: a run that is not allowed to
             # publish must not spend minutes and LLM budget discovering that.
-            await self.callback.on_phase("authorizing", "Checking the project...", 2)
-            await self.run_client.authorize(model, score_model.SCORE_MODEL_VERSION)
+            await self._phase("authorizing", "Checking the project...", 2)
+            try:
+                await self.run_client.authorize(
+                    model, score_model.SCORE_MODEL_VERSION, trigger=self.trigger,
+                    token_id=self.token_id, review_budget=self.review_budget)
+            except TriageRunAborted as refused:
+                await self._notify("on_start_refused", refused.reason)
+                raise
+            await self._notify("on_authorized", self.run_client.run_id or "")
             self.run_client.start_heartbeat()
 
             # [A] SCORE. Deterministic, no LLM, nothing written.
-            await self.callback.on_phase("scoring", "Scoring findings...", 10)
+            await self._phase("scoring", "Scoring findings...", 10)
             scored = await self._score(state)
             state["verdicts"] = scored
             summary["scored"] = len(scored)
@@ -115,33 +174,51 @@ class TriageOrchestrator:
             # The LLM is set up only AFTER scoring, so a project with no
             # provider key still gets a fully ranked board (C15). The old order
             # raised here and left nothing scored at all.
-            self.llm_client = await self._init_llm_or_none(settings)
+            # No model (allowed only with budget 0): the fix list keeps its
+            # deterministic wording rather than borrowing another model.
+            self.llm_client = await self._init_llm_or_none(settings) if model else None
             summary["llm_available"] = 1 if self.llm_client else 0
 
-            # [B] GROUP, [C] REVIEW, [D] REMEDIATE.
+            # The review and decision layers already on each finding, and any
+            # review a v3.1 run left whose evidence has not changed.
+            await self._load_stored_layers(scored)
+            summary.update(self._adopt_legacy_reviews(scored))
+
+            # [B] GROUP (on the base, for the review order), [C] REVIEW.
             scored = await self._group(scored)
-            summary["groups"] = len({r.get("group_key") for r in scored
-                                     if r.get("group_key")})
             self.run_client.check_abort()
 
             review_summary = await self._review(state, scored)
             summary.update(review_summary)
             self.run_client.check_abort()
 
+            # Every finding's final values, then the groups again from them, so
+            # a false positive found by THIS run's review no longer lifts its
+            # group (B5).
+            self._combine_all(scored)
+            scored = await self._group(scored, announce=False)
+            summary["groups"] = len({r.get("group_key") for r in scored
+                                     if r.get("group_key")})
+
+            # [D] REMEDIATE.
             analysis = await self._remediate(state, scored)
             state["analysis_result"] = analysis
 
             # [E] PUBLISH. Claim first: a run that lost its claim writes nothing.
-            await self.callback.on_phase("publishing", "Publishing results...", 92)
+            await self._phase("publishing", "Publishing results...", 92)
             await self.run_client.claim_publish()
-            written = await self._publish(scored, self.run_client.run_id or "")
+            written, saved = await self._shielded_publish(scored, analysis)
             summary["nodes_written"] = written["updated"]
             summary["skipped_changed"] = written["skipped_changed"]
-
-            saved = await self._save_remediations(analysis, self.run_client.run_id or "")
+            summary["publish_failed"] = written["publish_failed"]
             summary.update(saved or {})
 
-            status = "completed_partial" if self.run_client.aborted else "completed"
+            if written["publish_failed"]:
+                # A batch the driver could not land even after its retries: the
+                # board is part-old, part-new, and the run must say so (B21).
+                status, error_class = "completed_partial", "publish_failed"
+            else:
+                status = "completed_partial" if self.run_client.aborted else "completed"
             await self.callback.on_complete(
                 total=analysis.count,
                 by_severity=analysis.by_severity,
@@ -162,6 +239,15 @@ class TriageOrchestrator:
             state["error"] = aborted.error_class
             return state
 
+        except asyncio.CancelledError:
+            # An operator's Stop cancels the task. It used to fall through to
+            # `failed` (B11); it is recorded as what it is, and the cancellation
+            # still propagates once `finish` has run.
+            status, error_class = "stopped", "stopped"
+            state["status"] = "error"
+            state["error"] = "stopped"
+            raise
+
         finally:
             # Always, including after an exception: a run left `running` blocks
             # activation until its heartbeat expires ten minutes later.
@@ -176,6 +262,22 @@ class TriageOrchestrator:
                 except Exception:                                 # noqa: BLE001
                     pass
                 self._log_run_event(status, summary, error_class)
+
+    async def _phase(self, phase: str, description: str, progress: int) -> None:
+        """Announce a phase to the tab, and to the webapp with the next heartbeat."""
+        if self.run_client is not None:
+            self.run_client.set_progress(phase, progress)
+        await self.callback.on_phase(phase, description, progress)
+
+    async def _notify(self, hook: str, *args) -> None:
+        """Call an optional callback hook. A socket-bound callback has none."""
+        method = getattr(self.callback, hook, None)
+        if method is None:
+            return
+        try:
+            await method(*args)
+        except Exception:                                         # noqa: BLE001
+            logger.debug("triage callback %s failed", hook, exc_info=True)
 
     async def _publish_nothing(self) -> None:
         """An empty project still finishes cleanly through the protocol."""
@@ -223,14 +325,20 @@ class TriageOrchestrator:
 
     # ── Step B: group by "what the fix is" ────────────────────────────────
 
-    async def _group(self, scored: list) -> list:
+    async def _group(self, scored: list, announce: bool = True) -> list:
         """Stamp a deterministic group key on every finding.
 
         No LLM. The old cluster call produced `triage_cluster_id`, which the UI
         never read, could not be verified in code, and grouped the same graph
         differently on two runs.
+
+        Called twice: before the review (on the base, so the budget reaches the
+        groups that matter first) and after `_combine_all` (on each member's
+        `group_view`, so the group scores the fix list is built from follow the
+        final values).
         """
-        await self.callback.on_phase("grouping", "Grouping findings by fix...", 30)
+        if announce:
+            await self._phase("grouping", "Grouping findings by fix...", 30)
         groups = grouping.assign_groups(scored)
         self.groups = groups
 
@@ -250,65 +358,75 @@ class TriageOrchestrator:
 
     # ── Step C: the evidence review ───────────────────────────────────────
 
+    def _stored_review(self, row: dict):
+        """The review this finding carries into the run: adopted, else stored."""
+        if row.get("review"):
+            return layers.review_from_props(row["review"])
+        return layers.review_from_props(row.get("stored") or {})
+
+    def _needs_review(self, row: dict) -> bool:
+        """Should the built-in AI (re)read this finding's evidence?
+
+        Never over a still-valid review an external agent wrote: the newest
+        review wins, and a run is not newer evidence. A still-valid built-in
+        review is kept unless it came from another model or an older prompt.
+        """
+        current = self._stored_review(row)
+        if current is None or not score_model.review_is_valid(current, row.get("evidence_hash") or ""):
+            return True
+        if current.channel == "mcp":
+            return False
+        props = row.get("review") or row.get("stored") or {}
+        return (str(props.get("triage_ai_model") or "") != self.model
+                or str(props.get("triage_ai_prompt_version") or "") != review.REVIEW_PROMPT_VERSION)
+
     async def _review(self, state: TriageState, scored: list) -> dict:
         """Let the model correct the factors, and verify every word of it.
 
-        Budgeted, cached and concurrent. Findings the budget or the clock does
-        not reach publish as "not reviewed" with their maths intact, which is
-        the difference between a slow provider costing detail and costing the
-        whole ranking.
+        Budgeted and concurrent. Only findings with no still-valid review are
+        asked about (B1: a review used to last exactly one run). Findings the
+        budget or the clock does not reach keep whatever review they had; one
+        with none at all is recorded `not_reviewed`, its maths intact.
         """
         summary = {"reviewed": 0, "cache_hits": 0, "not_reviewed": 0,
-                   "false_positives": 0, "llm_calls": 0}
-        settings = state.get("settings", {}) or {}
-        budget = int(settings.get("triageReviewBudget", 150) or 0)
+                   "false_positives": 0, "llm_calls": 0, "reviews_kept": 0,
+                   "external_reviews": 0}
+        budget = self.review_budget
 
-        candidates = [r for r in scored if evidence.should_review(r)]
-        for row in scored:
-            if row not in candidates:
-                row["ai_verdict"] = None
+        eligible = [r for r in scored if evidence.should_review(r)]
+        candidates = []
+        for row in eligible:
+            if self._needs_review(row):
+                candidates.append(row)
+                continue
+            summary["reviews_kept"] += 1
+            if self._stored_review(row).channel == "mcp":
+                summary["external_reviews"] += 1
+        summary["cache_hits"] = summary["reviews_kept"]
+
+        def unreached(rows):
+            for row in rows:
+                if self._stored_review(row) is None:
+                    row["mark_not_reviewed"] = True
+                    summary["not_reviewed"] += 1
 
         if not self.llm_client or budget <= 0 or not candidates:
-            for row in candidates:
-                row["ai_verdict"] = "not_reviewed"
-            summary["not_reviewed"] = len(candidates)
+            unreached(candidates)
             if candidates:
                 logger.info(f"Review skipped for {len(candidates)} findings "
-                            f"(no model or budget 0); the ranking still publishes")
+                            f"(no model or budget 0); stored reviews are kept and "
+                            f"the ranking still publishes")
             return summary
 
         # Highest group score first, so a budget that runs out runs out on the
         # findings that matter least.
         candidates.sort(key=lambda r: (-float(r.get("group_score") or r["score"]),
                                        str(r["id"])))
-        candidates = candidates[:budget]
-        # `llm_model` is the key load_cypherfix_settings actually returns.
-        # Reading "model" silently yielded "" everywhere it was used: the
-        # run recorded no model, every reviewed finding recorded no model,
-        # and the review cache key omitted it, so switching models reused
-        # the previous one's verdicts.
-        model = str(settings.get("llm_model") or "")
+        unreached(candidates[budget:])
+        pending = candidates[:budget]
+        model = self.model
 
-        pending = []
-        for row in candidates:
-            bundle = evidence.build_bundle(row.get("_row") or row)
-            row["_bundle"] = bundle
-            new_hash = evidence.evidence_hash(
-                bundle, review.REVIEW_PROMPT_VERSION, model)
-            if new_hash and new_hash == row.get("evidence_hash"):
-                # Nothing about this finding or this prompt has changed since
-                # the last run, so the stored verdict still answers the question.
-                summary["cache_hits"] += 1
-                row["ai_verdict"] = row.get("ai_verdict") or "unclear"
-                continue
-            row["evidence_hash"] = new_hash
-            pending.append(row)
-
-        if not pending:
-            logger.info(f"Review: all {summary['cache_hits']} findings were cached")
-            return summary
-
-        await self.callback.on_phase(
+        await self._phase(
             "reviewing", f"Reviewing evidence (0/{len(pending)})...", 45)
 
         batches = self._review_batches(pending)
@@ -323,7 +441,7 @@ class TriageOrchestrator:
                 summary["llm_calls"] += 1
                 answers = await self._review_batch(batch, model)
                 done = min(len(pending), (index + 1) * REVIEW_BATCH_SIZE)
-                await self.callback.on_phase(
+                await self._phase(
                     "reviewing", f"Reviewing evidence ({done}/{len(pending)})...",
                     45 + int(30 * done / max(1, len(pending))))
                 return answers
@@ -340,15 +458,18 @@ class TriageOrchestrator:
         for row in pending:
             answer = by_id.get(row["id"])
             if not answer:
-                row["ai_verdict"] = "not_reviewed"
+                unreached([row])
                 continue
             reviewed_ids.add(row["id"])
-            self._apply_review(row, answer)
-            if row.get("ai_verdict") == "false_positive":
+            row["review"] = layers.review_props(
+                answer, channel="builtin", by="", model=answer.get("model") or model,
+                evidence_hash=row.get("evidence_hash") or "",
+                prompt_version=review.REVIEW_PROMPT_VERSION)
+            row["review_origin"] = "run"
+            if answer["verdict"] == "false_positive":
                 summary["false_positives"] += 1
 
         summary["reviewed"] = len(reviewed_ids)
-        summary["not_reviewed"] = len(pending) - len(reviewed_ids)
         logger.info(f"Review: {summary}")
         return summary
 
@@ -403,81 +524,106 @@ class TriageOrchestrator:
                 answers[finding_id] = validated
         return answers
 
-    def _apply_review(self, row: dict, answer: dict) -> None:
-        """Re-run the rules with the AI's accepted corrections.
+    # ── The layers ────────────────────────────────────────────────────────
 
-        The AI moved factors; the tier and the score come from the same rules
-        that produced them in the first place, so it can never place a finding
-        somewhere the facts do not support.
+    async def _load_stored_layers(self, scored: list) -> None:
+        """Attach each finding's stored review and decision (`STORED_LAYERS`).
+
+        A failed read leaves them empty, which only costs a re-review: the
+        publish re-reads both layers under the node lock and never replaces a
+        still-valid external review, whatever this read said.
         """
-        factors = row.get("factors") or {}
-        c = float((factors.get("C") or {}).get("value") or 0.0)
-        l = float((factors.get("L") or {}).get("value") or 0.0)
-        i = float((factors.get("I") or {}).get("value") or 0.0)
-        r = float((factors.get("R") or {}).get("value") or 0.0)
+        try:
+            rows = await self.neo4j.run_static_query(STORED_LAYERS["query"])
+        except Exception as e:                                    # noqa: BLE001
+            logger.error(f"Stored-layers read failed (treated as none): {e}")
+            rows = []
+        by_key = {(str(r.get("label") or ""), str(r.get("id"))): r
+                  for r in rows or [] if isinstance(r, dict) and r.get("id")}
+        for row in scored:
+            row["stored"] = by_key.get((row["label"], row["id"])) or {}
 
-        verdict = answer["verdict"]
-        if verdict == "real":
-            c = max(c, 0.95)
-        elif verdict == "doubtful":
-            c = min(c, 0.25)
+    def _adopt_legacy_reviews(self, scored: list) -> dict:
+        """Keep the reviews a v3.1 run stored, where the evidence is unchanged.
 
-        for dispute in answer["disputed_facts"]:
-            fact = dispute["fact"]
-            if fact == "reachable":
-                r = score_model.REACH_UNKNOWN
-            elif fact in ("tool_confirmed", "extracted_proof"):
-                c = min(c, 0.75)
-            elif fact in ("dast_confirmed", "exploitable_class"):
-                l = min(l, 0.3)
-            elif fact == "public_poc":
-                l = min(l, 0.3)
-            elif fact == "sensitive_asset":
-                i = i / 1.2
-            elif fact == "credential_in_response":
-                l = min(l, 0.3)
+        A v3.1 review carries no `triage_ai_evidence_hash`, only the run's cache
+        key in `triage_evidence_hash`. If that key still matches today's
+        evidence (the v3.1 bundle, prompt and model), the review describes this
+        evidence and is kept as a built-in review, rehashed on the new bundle.
+        Its multiplier is dropped: v3.1 never quoted one.
+        """
+        adopted = 0
+        for row in scored:
+            stored = row.get("stored") or {}
+            if stored.get("triage_ai_evidence_hash") or \
+                    stored.get("triage_ai_verdict") not in score_model.REVIEW_VERDICTS:
+                continue
+            if not row.get("evidence_hash") or not stored.get("triage_evidence_hash"):
+                continue
+            legacy = evidence.evidence_hash(
+                evidence.build_bundle_legacy(row.get("_row") or row),
+                review.LEGACY_REVIEW_PROMPT_VERSION, str(stored.get("triage_ai_model") or ""))
+            if legacy != stored["triage_evidence_hash"]:
+                continue
+            corrections = layers._json(stored.get("triage_ai_corrections")) or {}
+            why = stored.get("triage_ai_why")
+            if not why and str(row.get("triage_source") or "") != "human":
+                why = stored.get("triage_reason")       # v3.1 wrote the AI's why there
+            row["review"] = layers.review_props(
+                {"verdict": stored["triage_ai_verdict"], "impact_multiplier": 1.0,
+                 "impact_quote": "",
+                 "disputed_facts": [d for d in (corrections.get("disputed_facts") or [])
+                                    if isinstance(d, dict) and d.get("fact")],
+                 "evidence_quote": stored.get("triage_ai_quote") or "",
+                 "why": why or "", "fix_lever": stored.get("triage_fix_lever") or ""},
+                channel="builtin", by="", model=str(stored.get("triage_ai_model") or ""),
+                evidence_hash=row["evidence_hash"],
+                prompt_version=review.LEGACY_REVIEW_PROMPT_VERSION)
+            row["review_origin"] = "adopted"
+            adopted += 1
+        if adopted:
+            logger.info(f"Adopted {adopted} v3.1 reviews whose evidence is unchanged")
+        return {"reviews_adopted": adopted}
 
-        i = min(1.2, max(0.0, i * answer["impact_multiplier"]))
+    def _combine_all(self, scored: list) -> None:
+        """base + review + decision -> the final values, for every finding.
 
-        row["ai_verdict"] = verdict
-        row["ai_quote"] = answer["evidence_quote"]
-        row["ai_model"] = answer.get("model", "")
-        row["ai_corrections"] = {
-            "verdict": verdict,
-            "impact_multiplier": answer["impact_multiplier"],
-            "disputed_facts": answer["disputed_facts"],
-            "before": {"C": c, "L": l, "I": i, "R": r},
-        }
-        row["reason"] = answer["why"] or None
-        row["fix_lever"] = answer["fix_lever"] or None
+        The same `combine_layers` a verdict or an external review runs inside
+        its write transaction, so the board a run publishes and the board a
+        click produces never disagree on the rules.
+        """
+        for row in scored:
+            base = row["base"]
+            decision = layers.decision_from_props(
+                {"triage_status": row.get("triage_status"),
+                 "triage_source": row.get("triage_source")})
+            current = self._stored_review(row)
+            digest = row.get("evidence_hash") or ""
+            final = score_model.combine_layers(base, current, decision, digest)
+            row["final"] = final
+            row.update(score=final.score, tier=final.tier, tier_rule=final.tier_rule,
+                       risk=final.risk, state=final.state, factors=final.factors,
+                       decided_by=final.decided_by)
 
-        if verdict == "false_positive":
-            # NEVER muted: it moves to its own section, one click from Real.
-            row["state"] = score_model.STATE_FALSE_POSITIVE
-            row["status"] = "likely_noise"
-            row["score"] = 0.0
-            row["risk"] = 0.0
-            return
+            valid = current is not None and score_model.review_is_valid(current, digest)
+            row["review_channel"] = current.channel if valid else None
+            # Fix-item text comes from the BUILT-IN review only. An external
+            # agent's fix lever or quote never reaches Remediation.solution or
+            # .evidence, and so never reaches CodeFix (C2).
+            props = row.get("review") or row.get("stored") or {}
+            builtin = valid and current.channel == "builtin"
+            row["fix_lever"] = (props.get("triage_fix_lever") or None) if builtin else None
+            row["ai_quote"] = (props.get("triage_ai_quote") or None) if builtin else None
 
-        factors["C"] = {"value": round(c, 4),
-                        "evidence": (factors.get("C") or {}).get("evidence", "")}
-        factors["L"] = {"value": round(l, 4),
-                        "evidence": (factors.get("L") or {}).get("evidence", "")}
-        factors["I"] = {"value": round(i, 4),
-                        "evidence": (factors.get("I") or {}).get("evidence", "")}
-        factors["R"] = {"value": round(r, 4),
-                        "evidence": (factors.get("R") or {}).get("evidence", "")}
-        row["factors"] = factors
-
-        source_row = row.get("_row") or {}
-        risk = min(1.0, c * l * i * r)
-        tier, tier_rule = score_model.tier_for(
-            source_row, self.facts or score_model.ProjectFacts(), self.intel,
-            c, l, i, r)
-        row["risk"] = round(risk, 6)
-        row["tier"] = tier
-        row["tier_rule"] = tier_rule
-        row["score"] = score_model.score_for(tier, risk)
+            # P2: an external agent's false positive keeps its member in the
+            # fix group, so a review can never silently delete a fix item.
+            if final.state == score_model.STATE_FALSE_POSITIVE and \
+                    final.decided_by == score_model.DECIDED_BY_REVIEW and \
+                    current is not None and current.channel == "mcp":
+                view = score_model.combine_layers(base, None, decision, digest)
+            else:
+                view = final
+            row["group_view"] = {"state": view.state, "tier": view.tier, "risk": view.risk}
 
     # ── Step A: score every finding, in memory ────────────────────────────
 
@@ -543,33 +689,7 @@ class TriageOrchestrator:
             result = score_model.score(row, facts, intel)
             for warning in result.warnings:
                 unknown_sources.add(warning)
-            scored.append({
-                "id": str(row["id"]),
-                "label": row.get("label") or "",
-                "name": row.get("name") or "",
-                "severity": row.get("severity") or "",
-                "source": row.get("source") or "",
-                # Phase 8a: the detector this operator's clicks are attached to.
-                "detector": score_model.detector_key(row),
-                "host": result.host,
-                "state": result.state,
-                "tier": result.tier,
-                "tier_rule": result.tier_rule,
-                "score": result.score,
-                "math_score": result.score,
-                "risk": result.risk,
-                "factors": result.as_factors_dict(),
-                "signals": result.signals,
-                "proven": result.proven,
-                "explanation": result.explanation,
-                "seen_updated_at": row.get("seen_updated_at"),
-                "evidence_hash": row.get("triage_evidence_hash"),
-                "triage_status": row.get("triage_status"),
-                "triage_source": row.get("triage_source"),
-                "proof": facts.proof_by_host.get(result.host) or None,
-                "model_version": score_model.SCORE_MODEL_VERSION,
-                "_row": row,
-            })
+            scored.append(self.scored_row(row, result, facts))
 
         for warning in sorted(unknown_sources):
             logger.warning(f"Score model: {warning}")
@@ -583,6 +703,43 @@ class TriageOrchestrator:
             by_tier[row["tier"]] = by_tier.get(row["tier"], 0) + 1
         logger.info(f"Scored {len(scored)} findings: {by_tier}")
         return scored
+
+    @staticmethod
+    def scored_row(row: dict, result, facts) -> dict:
+        """One finding as the run carries it: the base layer plus what to publish."""
+        # What a review of this finding is valid for: the normalised, redacted
+        # bundle every reviewer is shown. "" when there is no evidence, which
+        # no review can match.
+        bundle = evidence.build_bundle(row)
+        return {
+            "id": str(row["id"]),
+            "label": row.get("label") or "",
+            "name": row.get("name") or "",
+            "severity": row.get("severity") or "",
+            "source": row.get("source") or "",
+            # Phase 8a: the detector this operator's clicks are attached to.
+            "detector": score_model.detector_key(row),
+            "host": result.host,
+            "state": result.state,
+            "tier": result.tier,
+            "tier_rule": result.tier_rule,
+            "score": result.score,
+            "math_score": result.score,
+            "risk": result.risk,
+            "factors": result.as_factors_dict(),
+            "signals": result.signals,
+            "proven": result.proven,
+            "explanation": result.explanation,
+            "seen_updated_at": row.get("seen_updated_at"),
+            "evidence_hash": evidence.bundle_hash(bundle),
+            "_bundle": bundle,
+            "triage_status": row.get("triage_status"),
+            "triage_source": row.get("triage_source"),
+            "proof": (facts.proof_by_host.get(result.host) or None) if facts else None,
+            "model_version": score_model.SCORE_MODEL_VERSION,
+            "base": score_model.BaseLayer.from_result(result),
+            "_row": row,
+        }
 
     async def _load_intel(self, rows: list, state: TriageState) -> None:
         """KEV, EPSS and public-PoC status for the CVEs in scope.
@@ -613,61 +770,121 @@ class TriageOrchestrator:
 
     # ── Step E: publish, the only step that writes ────────────────────────
 
+    async def _shielded_publish(self, scored: list, analysis) -> tuple:
+        """Publish and save the fix list as one unit that a cancel cannot split.
+
+        A Stop is refused at the door once the run is publishing; this covers
+        what still cancels (a project delete, a shutdown). Half the batches on
+        the board and no fix list is the one outcome worse than either (B17), so
+        the work runs to its end and only then does the run finish.
+        """
+        run_id = self.run_client.run_id or ""
+
+        async def work():
+            written = await self._publish(scored, run_id)
+            saved = await self._save_remediations(analysis, run_id)
+            return written, saved or {}
+
+        task = asyncio.ensure_future(work())
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            logger.warning("Triage run cancelled while publishing; finishing the publish first")
+            return await task
+
+    def _publish_combine(self):
+        """The `combine` the mixin runs per node, inside the publish transaction.
+
+        `props` is what is on the node NOW, read under its lock. The decision is
+        always the current one (a verdict given while the run worked wins), and
+        the run's own review is written only when it produced one, no person
+        has decided since, and no still-valid external review is there: the
+        newest review wins, and a run is not newer evidence.
+        """
+        def combine(row: dict, props: dict, proven_now: bool) -> dict:
+            digest = row.get("evidence_hash") or ""
+            stored = layers.review_from_props(props)
+            keep_external = (stored is not None and stored.channel == "mcp"
+                             and score_model.review_is_valid(stored, digest))
+            decided = layers.decision_from_props(props) is not None
+            run_review = row.get("review")
+            write_review = run_review if (run_review and not keep_external and not decided) else None
+
+            merged = dict(props)
+            merged.update({
+                "triage_base_factors": row.get("base_factors"),
+                "triage_base_tier": row.get("base_tier"),
+                "triage_base_tier_rule": row.get("base_tier_rule"),
+                "triage_base_state": row.get("base_state"),
+                "triage_tier_inputs": row.get("tier_inputs"),
+                "triage_math_score": row.get("math_score"),
+                "triage_evidence_hash": digest,
+            })
+            if write_review:
+                merged.update(write_review)
+            return {"final": layers.combine_props(merged, proven_now) or {},
+                    "review": write_review}
+        return combine
+
     async def _publish(self, scored: list, run_id: str) -> dict:
-        """Write the ranking back, in batches, guarded by each node's updated_at.
+        """Write the layers back, in batches, guarded by each node's updated_at.
 
         A node a scan re-ingested while this run was working is skipped: its
         facts are no longer the ones that were scored. It keeps its previous
         triage state and the next run picks it up.
+
+        Each batch is one managed transaction, which the driver retries on a
+        deadlock with a scan. A batch that still fails is counted in
+        `publish_failed`, and the run then finishes `completed_partial` rather
+        than claiming a board it only half wrote (B21).
         """
-        totals = {"updated": 0, "skipped_human": 0, "skipped_changed": 0,
-                  "rejected": 0}
+        totals = {"updated": 0, "skipped_changed": 0, "missing": 0,
+                  "reviews_written": 0, "rejected": 0, "publish_failed": 0}
         if not scored:
             return totals
 
-        rows = [{
-            "id": row["id"],
-            "score": row["score"],
-            "math_score": row.get("math_score", row["score"]),
-            "risk": row.get("risk"),
-            "signals": row.get("signals") or [],
-            "state": row.get("state"),
-            "tier": row.get("tier"),
-            "tier_rule": row.get("tier_rule"),
-            "factors": row.get("factors"),
-            "host": row.get("host"),
-            "group_key": row.get("group_key"),
-            "detector": row.get("detector"),
-            "run_id": run_id,
-            "model_version": row.get("model_version"),
-            "intel_date": self.intel_date,
-            "proof": row.get("proof"),
-            "evidence_hash": row.get("evidence_hash"),
-            "fix_lever": row.get("fix_lever"),
-            "status": row.get("status"),
-            "confidence": row.get("confidence"),
-            "reason": row.get("reason"),
-            "ai_verdict": row.get("ai_verdict"),
-            "ai_corrections": row.get("ai_corrections"),
-            "ai_quote": row.get("ai_quote"),
-            "ai_model": row.get("ai_model"),
-            "seen_updated_at": row.get("seen_updated_at"),
-        } for row in scored]
+        rows = []
+        for row in scored:
+            base = row["base"]
+            review_props = row.get("review") if row.get("review_origin") in ("run", "adopted") else None
+            rows.append({
+                "id": row["id"],
+                "label": row.get("label") or "",
+                "math_score": base.score,
+                "base_factors": base.factors,
+                "base_tier": base.tier,
+                "base_tier_rule": base.tier_rule,
+                "base_state": base.state,
+                "tier_inputs": base.inputs.as_dict(),
+                "evidence_hash": row.get("evidence_hash") or None,
+                "signals": row.get("signals") or [],
+                "host": row.get("host"),
+                "group_key": row.get("group_key"),
+                "detector": row.get("detector"),
+                "run_id": run_id,
+                "model_version": row.get("model_version"),
+                "intel_date": self.intel_date,
+                "proof": row.get("proof"),
+                "mark_not_reviewed": bool(row.get("mark_not_reviewed")),
+                "review": review_props,
+                "seen_updated_at": row.get("seen_updated_at"),
+            })
 
-        # Batches of 500: one 5,000-row UNWIND is a single long transaction that
-        # holds locks across the whole publish, and a Stop mid-way would then
-        # roll back everything rather than leaving a consistent prefix.
         client = self._graph_client()
-        for start in range(0, len(rows), 500):
-            batch = rows[start:start + 500]
+        combine = self._publish_combine()
+        for start in range(0, len(rows), PUBLISH_BATCH_SIZE):
+            batch = rows[start:start + PUBLISH_BATCH_SIZE]
             try:
                 result = await asyncio.to_thread(
-                    client.apply_triage_scores, self.user_id, self.project_id, batch)
-            except Exception as e:
-                logger.error(f"Publish batch at {start} failed: {e}")
+                    client.publish_triage_layers, self.user_id, self.project_id,
+                    batch, combine)
+            except Exception as e:                                # noqa: BLE001
+                logger.error(f"Publish batch at {start} failed after retries: {e}")
+                totals["publish_failed"] += len(batch)
                 continue
             for key in totals:
-                totals[key] += int(result.get(key) or 0)
+                if key in (result or {}):
+                    totals[key] += int(result.get(key) or 0)
 
         logger.info(f"Published: {totals}")
         return totals
@@ -749,7 +966,7 @@ class TriageOrchestrator:
             self.remediation_rows = []
             return RemediationDraft(summary="No findings need a fix item.")
 
-        await self.callback.on_phase(
+        await self._phase(
             "writing_remediations",
             f"Writing fix items (0/{len(eligible)})...", 78)
 
@@ -814,7 +1031,7 @@ class TriageOrchestrator:
                         f"({e.__class__.__name__}); using the standard text")
                     return {}
             done = min(len(groups), (index + 1) * size)
-            await self.callback.on_phase(
+            await self._phase(
                 "writing_remediations",
                 f"Writing fix items ({done}/{len(groups)})...",
                 78 + int(12 * done / max(1, len(groups))))

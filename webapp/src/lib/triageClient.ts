@@ -82,6 +82,7 @@ export async function realActorUserId(): Promise<string | null> {
 export type TriageOp =
   | 'mute' | 'unmute' | 'unmute_many' | 'list_muted' | 'muted_facets'
   | 'list_findings' | 'human_verdict' | 'preflight' | 'stop_run'
+  | 'mute_batch'
 
 /**
  * Call the agent's internal `/graph/triage`, where the graph writes live, and

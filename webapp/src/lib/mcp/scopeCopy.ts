@@ -98,9 +98,9 @@ export const MCP_SCOPE_COPY: Record<McpScope, ScopeCopy> = {
       'on this surface - no read tool returns the value.',
   },
   'triage:read': {
-    label: 'Read suppressed findings and remediations',
+    label: 'Read suppressed findings, remediations and triage detail',
     access: 'read',
-    blurb: 'Read the muted findings, whether a person muted them as noise or one of the project\'s Mute Rules did, including who or which rule muted them and why, and the remediation write-ups (their solutions, evidence summaries and PR status). Muted findings are hidden from every other permission on this surface, so this is the only way an agent can tell "nothing was found" apart from "someone suppressed it". Separate from Read recon + graph on purpose: these are not reachable any other way.',
+    blurb: 'Read the muted findings, whether a person muted them as noise or one of the project\'s Mute Rules did, including who or which rule muted them and why, and the remediation write-ups (their solutions, evidence summaries and PR status). Muted findings are hidden from every other permission on this surface, so this is the only way an agent can tell "nothing was found" apart from "someone suppressed it". Separate from Read recon + graph on purpose: these are not reachable any other way. It also reads, for any finding, the full breakdown behind its Priority Board score and the evidence a reviewer reads.',
   },
   'recon:queue': {
     label: 'Queue scans to run later',
@@ -110,7 +110,7 @@ export const MCP_SCOPE_COPY: Record<McpScope, ScopeCopy> = {
   'triage:write': {
     label: 'Record a verdict on a finding',
     access: 'write',
-    blurb: 'Let an agent mark a finding confirmed, likely noise, or back to unreviewed, as if you had clicked it yourself. The verdict is DURABLE: it survives re-scans and stops later AI triage runs from overruling it, and the node records that it arrived over MCP. A verdict only ranks a finding, it never hides one, and it is refused on a muted finding: on one a Mute Rule muted, a verdict would release the mute. Muting is a separate permission. Nothing on this surface can undo a verdict except another verdict.',
+    blurb: 'Let an agent mark a finding Real (which raises its score) or a false positive, or reset a verdict it made, as if you had clicked it yourself. The verdict is DURABLE: it survives re-scans and outranks any AI or agent review, and the node records that it arrived over MCP. A verdict a person made in the app can never be changed or reset from here. A verdict only ranks a finding, it never hides one, and it is refused on a muted finding: on one a Mute Rule muted, a verdict would release the mute. Muting is a separate permission.',
   },
   'triage:mute': {
     label: 'Mute and unmute findings',
@@ -141,6 +141,16 @@ export const MCP_SCOPE_COPY: Record<McpScope, ScopeCopy> = {
         href: `${WIKI}/MCP-Server#mute_findings-and-unmute_findings-hiding-and-revealing-findings`,
       },
     ],
+  },
+  'triage:review': {
+    label: 'Submit evidence reviews',
+    access: 'write',
+    blurb: 'Let an agent act as a second reviewer: it reads a finding\'s evidence and corrects the factors behind its score, quoting the evidence for every correction. RedAmon checks every quote and recomputes the score itself; the agent never sets a number. Its reviews are labelled as an agent\'s on the Priority Board, are replaced by a newer review or when the evidence changes, and never override a person\'s Real or False positive.',
+  },
+  'triage:run': {
+    label: 'Start and stop triage runs',
+    access: 'write',
+    blurb: 'Let an agent re-rank the project: start a Priority Board run, or stop one before it publishes. A run rewrites the board\'s order and the CypherFix fix list, and its evidence review spends your configured model\'s budget. While it runs, version switching, Recon Delta and Mute Rules wait for it, so runs an agent starts are spaced out and capped per day.',
   },
   'graph:cypher': {
     label: 'Run raw Cypher',
@@ -292,17 +302,17 @@ export const SCOPE_GROUPS: ScopeGroup[] = [
   },
   {
     id: 'scan',
-    label: 'Run scans',
+    label: 'Run scans and triage',
     hint: 'Start work that writes the attack-surface graph.',
     tone: 'action',
-    scopes: ['recon:scan', 'recon:queue', 'recon:overwrite'],
+    scopes: ['recon:scan', 'recon:queue', 'recon:overwrite', 'triage:run'],
   },
   {
     id: 'write',
     label: 'Change settings and findings',
     hint: 'Writes that are not scans.',
     tone: 'action',
-    scopes: ['recon:settings', 'triage:write', 'triage:mute', 'preset:write', 'preset:apply'],
+    scopes: ['recon:settings', 'triage:write', 'triage:mute', 'triage:review', 'preset:write', 'preset:apply'],
   },
   {
     id: 'engagement',

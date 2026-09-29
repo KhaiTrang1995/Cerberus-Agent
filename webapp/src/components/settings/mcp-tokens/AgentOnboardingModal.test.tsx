@@ -161,6 +161,30 @@ describe('it says what it is', () => {
     expect(screen.queryByText(/cannot check or undo its own mutes/)).toBeNull()
   })
 
+  test('a review permission without the evidence read is called out', () => {
+    render(<AgentOnboardingModal {...props({ initialScopes: ['recon:read', 'triage:review'] })} />)
+    expect(screen.getByText(/every review it sends will be refused/)).toBeTruthy()
+  })
+
+  test('a run permission without the read is called out', () => {
+    render(<AgentOnboardingModal {...props({ initialScopes: ['recon:read', 'triage:run'] })} />)
+    expect(screen.getByText(/cannot see their progress or results/)).toBeTruthy()
+  })
+
+  test('runs beside the settings permission name the caps that still hold', () => {
+    render(<AgentOnboardingModal {...props({
+      initialScopes: ['recon:read', 'triage:read', 'triage:run', 'recon:settings'] })} />)
+    expect(screen.getByText(/capped at 1000 reviews and 12 a day/)).toBeTruthy()
+    expect(screen.queryByText(/cannot see their progress/)).toBeNull()
+  })
+
+  test('the review and run permissions with the read raise no read warning', () => {
+    render(<AgentOnboardingModal {...props({
+      initialScopes: ['recon:read', 'triage:read', 'triage:review', 'triage:run'] })} />)
+    expect(screen.queryByText(/every review it sends will be refused/)).toBeNull()
+    expect(screen.queryByText(/cannot see their progress/)).toBeNull()
+  })
+
   test('a queue permission warns that queued work outlives the token', () => {
     render(<AgentOnboardingModal {...props({ initialScopes: ['recon:read', 'recon:queue'] })} />)
     expect(screen.getByText(/NOT cancelled when you revoke the token/)).toBeTruthy()

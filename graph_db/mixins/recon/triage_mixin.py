@@ -1,9 +1,13 @@
-"""Finding triage: AI verdicts, and the mute / unmute suppression state.
+"""Finding triage: the Priority Board's layers, and the mute / unmute suppression state.
 
 Two separate things live here, and keeping them separate is the point:
 
-- A **verdict** (`triage_status` and friends) is the classifier's opinion. It
-  ranks a finding and never hides it, and the AI can write nothing else.
+- **Triage** ranks a finding and never hides it. It is three stored layers
+  (BASE from a run's rules, REVIEW from the built-in AI or an external agent,
+  DECISION from a person) and one computed result, the FINAL values the board
+  sorts by. Nobody writes a final value: `combine_layers` in
+  agentic/cypherfix_triage/score_model.py produces them, and every write here
+  that changes a layer rescores its finding in the same transaction.
 - A **mute** is a decision to suppress a finding as noise. It adds the
   `:Muted` label, which makes the node invisible to every agent query and every
   analytics, report and graph read.
@@ -19,7 +23,7 @@ Three things mute:
   their authority, and the mute is always stamped `muted_channel = 'mcp'` and
   `muted_token = <token prefix>` so it is never read as a person's judgement.
 
-RedAmon's own AI never mutes: `apply_triage_scores` -- the one path a triage
+RedAmon's own AI never mutes: `publish_triage_layers` -- the one path a triage
 run writes through -- cannot set `:Muted` no matter what the model returns, so
 a prompt injection in scanner output (`raw_response`, `evidence`) can at worst
 mislabel a verdict a human can overrule. What bounds an EXTERNAL agent is
@@ -94,10 +98,17 @@ _MCP_MUTED = f"coalesce(n.muted_channel, '') = '{MCP_MUTE_CHANNEL}'"
 _MUTE_PROVENANCE = "n.muted_channel, n.muted_token"
 _MUTE_PROPS = f"n.muted, n.muted_at, n.muted_by, n.muted_reason, {_MUTE_PROVENANCE}"
 
-#: Who a mute is by, three-valued. A rule wins over the channel: a rule write
+#: A person's Multi mute: `muted_by` is that person, but the findings were
+#: chosen in bulk from AI suggestions, so it is shown apart from a mute they
+#: judged one by one. `muted_token` holds the batch id (`mm-` + 8 hex).
+MULTI_MUTE_CHANNEL = "multi"
+_MULTI_MUTED = f"coalesce(n.muted_channel, '') = '{MULTI_MUTE_CHANNEL}'"
+
+#: Who a mute is by, four-valued. A rule wins over the channel: a rule write
 #: clears the channel, so both can only hold on a hand-edited node.
 _MUTED_VIA = (f"CASE WHEN {_RULE_MUTED} THEN 'rule' "
-              f"WHEN {_MCP_MUTED} THEN 'mcp' ELSE 'person' END")
+              f"WHEN {_MCP_MUTED} THEN 'mcp' "
+              f"WHEN {_MULTI_MUTED} THEN 'multi' ELSE 'person' END")
 
 #: The host a finding is about, from the fields the writers actually use.
 _HOST = "coalesce(n.triage_host, n.host, n.hostname, n.target_hostname, '')"
@@ -109,6 +120,80 @@ MAX_UNMUTE_BATCH = 500
 #: Upper bound on one delegated (MCP) mute. The webapp caps it too; this is the
 #: bound a master-key caller that skipped the webapp still hits.
 MAX_DELEGATED_MUTE_BATCH = 25
+
+#: Upper bound on one Multi mute write. The modal chunks a larger selection
+#: into several calls under the same batch id.
+MAX_MULTI_MUTE_BATCH = 500
+
+#: Each label's severity and source exactly as its triage-board query
+#: (FINDING_QUERIES in `agentic/cypherfix_triage/fact_queries.py`) projects
+#: them, defaults included. The Multi mute pool ranks those projected values,
+#: so the write must re-check the same ones: a MalPackageFinding records its
+#: tool as `source_tool` (an unset one is OSV), and an unset severity is the
+#: board's per-label default, not "unknown". `tests/test_triage_mute_batch.py`
+#: re-derives this table from the query text.
+_PROJECTED_SEVERITY_SOURCE = {
+    "Vulnerability": ("n.severity", "n.source"),
+    "Secret": ("coalesce(n.severity, 'medium')", "coalesce(n.source, 'js_recon')"),
+    "JsReconFinding": ("coalesce(n.severity, 'low')", "'js_recon'"),
+    "MultiscannerFinding": ("coalesce(n.severity, 'high')",
+                            "coalesce(n.source, n.source_type, 'trufflehog')"),
+    "GithubSecret": ("coalesce(n.severity, 'high')", "'github_hunt'"),
+    "GithubSensitiveFile": ("coalesce(n.severity, 'medium')", "'github_hunt'"),
+    "MalPackageFinding": ("coalesce(n.severity, 'high')", "coalesce(n.source_tool, 'osv')"),
+    "ExploitGvm": ("coalesce(n.severity, 'critical')", "'gvm'"),
+}
+
+
+def _ceiling_severity_rank(label: str | None = None) -> str:
+    """A finding's severity as a rank, 0 (info) to 4 (critical).
+
+    Mirrors `agentic/multi_mute/pool.severity_rank` over the label's projected
+    severity and source: a word through the rank table, a CVSS-like number
+    (0-10, or 0-100 divided by 10) through the score bands, `info` from OSV
+    ("never graded") and anything unknown as medium.
+    """
+    severity, source = _PROJECTED_SEVERITY_SOURCE.get(label, ("n.severity", "n.source"))
+    text = f"toLower(trim(toString(coalesce({severity}, ''))))"
+    num = (f"CASE WHEN toFloatOrNull({text}) > 10 THEN toFloatOrNull({text}) / 10.0 "
+           f"ELSE toFloatOrNull({text}) END")
+    return f"""CASE
+             WHEN {text} IN ['info', 'informational', 'none']
+                  AND toLower(trim(coalesce({source}, ''))) = 'osv' THEN 2
+             WHEN {text} IN ['info', 'informational', 'none'] THEN 0
+             WHEN {text} = 'low' THEN 1
+             WHEN {text} IN ['medium', 'moderate'] THEN 2
+             WHEN {text} = 'high' THEN 3
+             WHEN {text} = 'critical' THEN 4
+             WHEN {num} >= 9.0 THEN 4
+             WHEN {num} >= 7.0 THEN 3
+             WHEN {num} >= 4.0 THEN 2
+             WHEN {num} > 0 THEN 1
+             WHEN {num} IS NOT NULL THEN 0
+             ELSE 2 END"""
+
+
+#: The label-agnostic rank, over the raw properties.
+_CEILING_SEVERITY_RANK = _ceiling_severity_rank()
+
+#: Triage tier as `score_model.TIER_LEVELS` ranks it (T1 = 3, the most urgent).
+_CEILING_TIER_RANK = """CASE toUpper(trim(coalesce(n.triage_tier, '')))
+             WHEN 'T1' THEN 3 WHEN 'T2' THEN 2 WHEN 'T3' THEN 1 WHEN 'T4' THEN 0
+             ELSE null END"""
+
+
+def _within_ceiling(label: str | None = None) -> str:
+    """Within the seed's ceiling: no higher severity, no more urgent tier when
+    both are triaged, and no proof marker the seed itself lacks."""
+    return f"""({_ceiling_severity_rank(label)} <= $ceiling.severity_rank
+             AND ($ceiling.tier_rank IS NULL OR {_CEILING_TIER_RANK} IS NULL
+                  OR {_CEILING_TIER_RANK} <= $ceiling.tier_rank)
+             AND ($ceiling.validated
+                  OR toLower(trim(coalesce(n.validation_status, ''))) <> 'validated')
+             AND ($ceiling.malicious OR toLower(trim(coalesce(n.verdict, ''))) <> 'malicious')
+             AND ($ceiling.confirmed
+                  OR toLower(trim(coalesce(n.confidence_tier, ''))) <> 'confirmed'))"""
+
 
 #: The evidence that makes a finding un-hideable by an agent: a confirmed
 #: verdict, a stored proof, or a chain finding that confirms it. The Mute Rules
@@ -147,46 +232,135 @@ _SEVERITY_RANK = """CASE toLower(coalesce(n.severity, ''))
              WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2
              WHEN 'low' THEN 3 WHEN 'info' THEN 4 ELSE 5 END"""
 
-#: Verdict + priority properties the triage phase owns. Listed once so the write
-#: and the unmute cleanup cannot drift apart.
+#: Every property the triage layers own, in three layers plus the result.
+#: `combine_layers` (agentic/cypherfix_triage/score_model.py) is the only thing
+#: that produces the FINAL values; everything else writes one layer.
 TRIAGE_PROPS = (
-    "triage_status",
-    "triage_confidence",
-    "triage_reason",
-    "triage_source",
-    "triage_cluster_id",
-    "triaged_at",
-    # Prioritisation (deterministic scorer). triage_priority_score is THE sort
-    # key: higher = more urgent. Deliberately no inverted "priority number".
-    "triage_priority_score",
+    # ---- DECISION: a person (UI, or an MCP token carrying their authority) ----
+    "triage_status",          # confirmed | likely_noise | unreviewed
+    "triage_confidence",      # 1.0 on a decision
+    "triage_reason",          # the person's reason
+    "triage_source",          # 'human' while a decision exists; removed on Reset
+    "triage_verdict_channel", # app | mcp; ABSENT means app (pre-channel decisions)
+    "triage_verdict_by",
+    "triage_verdict_token",   # the token prefix of an MCP decision
+    "triage_verdict_at",
+    # ---- BASE: the rules, written only by a run's publish ----
+    "triage_math_score",      # the rules-only score
+    "triage_base_factors",    # JSON: C, L, I, R with the evidence for each
+    "triage_base_tier",
+    "triage_base_tier_rule",
+    "triage_base_state",      # open | fixed | gone | inactive (never false_positive)
+    "triage_tier_inputs",     # JSON {proven, kev}
+    "triage_evidence_hash",   # sha256 of the normalised, redacted bundle
     "triage_signals",
-    # Score model v3. The score is one number, but an operator who cannot see
-    # WHY it ranked there has no way to disagree with it, so the whole
-    # derivation is stored beside it.
-    "triage_state",           # open | fixed | gone | inactive | false_positive
-    "triage_tier",            # T1 | T2 | T3 | T4
-    "triage_tier_rule",       # the rule that placed it in that tier
-    "triage_factors",         # JSON: C, L, I, R with the evidence for each
-    "triage_math_score",      # the score before any AI correction
-    "triage_risk",            # C x L x I x R, before the tier is folded in
     "triage_host",            # the host the model resolved, deterministically
-    "triage_group_key",       # one problem, one fix (replaces triage_cluster_id)
+    "triage_group_key",       # one problem, one fix
     "triage_detector",        # which detector fired, so Real/False clicks teach it
     "triage_run_id",          # drives "new since the last triage"
+    "triaged_at",             # when a RUN last published this finding
     "triage_model_version",
     "triage_intel_date",
-    # The AI review (Step C).
-    "triage_ai_verdict",      # real | doubtful | false_positive | unclear | not_reviewed
-    "triage_ai_corrections",  # JSON
-    "triage_ai_quote",        # verified: a substring of the evidence we sent
-    "triage_ai_model",
-    "triage_ai_at",
-    "triage_fix_lever",
-    "triage_evidence_hash",   # the review cache key
     # X9: the chain findings that proved this, so the proof survives an
     # activation that drops the bridge edges but keeps the chain nodes.
     "triage_proof",
+    "triage_cluster_id",      # legacy, no longer written
+    # ---- REVIEW: the built-in AI in a run, or an external agent over MCP ----
+    "triage_ai_verdict",      # real | doubtful | false_positive | unclear | not_reviewed
+    "triage_ai_corrections",  # JSON {verdict, impact_multiplier, impact_quote, disputed_facts}
+    "triage_ai_quote",        # verified: a substring of the evidence it read
+    "triage_ai_model",
+    "triage_ai_at",
+    "triage_ai_why",
+    "triage_ai_channel",      # builtin | mcp
+    "triage_ai_by",           # the token prefix for mcp, '' for the built-in AI
+    "triage_ai_evidence_hash",  # the review is valid while this = triage_evidence_hash
+    "triage_ai_prompt_version",
+    "triage_fix_lever",
+    # ---- FINAL: combine_layers, written by a publish or an instant rescore ----
+    "triage_priority_score",  # THE sort key: higher = more urgent
+    "triage_tier",            # T1 | T2 | T3 | T4
+    "triage_tier_rule",
+    "triage_risk",            # C x L x I x R, before the tier is folded in
+    "triage_factors",         # JSON, the factors after review and decision
+    "triage_state",           # open | fixed | gone | inactive | false_positive
+    "triage_decided_by",      # rules | review | person
+    "triage_rescored_at",
 )
+
+#: The decision layer minus `triage_status`, which a Reset sets to `unreviewed`
+#: rather than removing.
+_DECISION_REMOVE = ("n.triage_source, n.triage_verdict_channel, n.triage_verdict_by, "
+                    "n.triage_verdict_token, n.triage_verdict_at, n.triage_reason, "
+                    "n.triage_confidence")
+
+#: A person decided this finding. `unreviewed` is the absence of a decision,
+#: whatever source a pre-v3.2 Reset left behind it; a legacy `ai` source is
+#: never one.
+_PERSON_DECIDED = ("(coalesce(n.triage_source, '') = 'human' "
+                   "AND coalesce(n.triage_status, '') IN ['confirmed', 'likely_noise'])")
+
+#: Proof read LIVE, so a finding proven after the last run cannot be talked
+#: down by a review. Mirrors `score_model.is_proven` and the chain-finding
+#: proof query in `agentic/cypherfix_triage/fact_queries.py`. NOT
+#: `triage_proof`: that records proof on the finding's HOST, so counting it
+#: here would lift every finding on a compromised host to T1 "proven".
+_PROOF_TYPES = ("['exploit_success', 'access_gained', 'privilege_escalation', "
+                "'credential_found', 'vulnerability_confirmed']")
+_LIVE_PROOF = f"""(n:ExploitGvm
+          OR coalesce(toInteger(n.confirmed_exploits), 0) > 0
+          OR toLower(coalesce(n.validation_status, '')) = 'validated'
+          OR toLower(coalesce(n.verdict, '')) = 'malicious'
+          OR toUpper(coalesce(n.finding_id, n.id, '')) STARTS WITH 'MAL-'
+          OR EXISTS {{ MATCH (cf:ChainFinding)-[:CONFIRMS]->(n)
+                      WHERE cf.user_id = n.user_id AND cf.project_id = n.project_id
+                        AND cf.finding_type IN {_PROOF_TYPES} }})"""
+
+#: Which layer set the final values. A node no v3.2 publish has touched has no
+#: `triage_decided_by`, so it is derived the way a tolerant reader must.
+_DECIDED_BY = (f"coalesce(n.triage_decided_by, CASE WHEN {_PERSON_DECIDED} THEN 'person' "
+               "WHEN coalesce(n.triage_source, '') = 'ai' THEN 'review' ELSE 'rules' END)")
+_HAS_REVIEW = "coalesce(n.triage_ai_verdict, '') IN ['real', 'doubtful', 'false_positive', 'unclear']"
+_REVIEWED_VIA = (f"CASE WHEN NOT {_HAS_REVIEW} THEN 'none' "
+                 "WHEN coalesce(n.triage_ai_channel, '') = 'mcp' THEN 'mcp' ELSE 'builtin' END")
+#: current | stale | none. A review with no recorded hash predates v3.2: nothing
+#: says what it read, so it is reported stale until a run adopts or replaces it.
+_REVIEW_STATE = (f"CASE WHEN NOT {_HAS_REVIEW} THEN 'none' "
+                 "WHEN n.triage_ai_evidence_hash IS NOT NULL "
+                 "AND n.triage_ai_evidence_hash = n.triage_evidence_hash THEN 'current' "
+                 "ELSE 'stale' END")
+
+VALID_DECIDED_BY = ("person", "review", "rules")
+VALID_REVIEWED_VIA = ("builtin", "mcp", "none")
+VALID_REVIEW_STATE = ("current", "stale", "none")
+
+
+def _legacy_cleanup(condition: str = "true") -> str:
+    """Retire v3.1 shapes the layered model no longer reads as decisions.
+
+    - AI text in `triage_reason` (a v3.1 run wrote the review's "why" there) moves
+      to `triage_ai_why`, so the reason field only ever holds a person's words;
+    - a legacy `triage_source = 'ai'` false positive becomes `unreviewed` with no
+      source: its verdict lives on, if at all, as a review the next run adopts;
+    - a pre-v3.2 Reset (`human` + `unreviewed`) loses its leftover decision
+      stamps, which is what a Reset does now.
+
+    Written by a run's publish and by unmute (a muted node is never published).
+    """
+    return f"""
+        FOREACH (_ IN CASE WHEN ({condition}) AND coalesce(n.triage_source, '') <> 'human'
+                             AND n.triage_reason IS NOT NULL THEN [1] ELSE [] END |
+            SET n.triage_ai_why = coalesce(n.triage_ai_why, n.triage_reason)
+            REMOVE n.triage_reason)
+        FOREACH (_ IN CASE WHEN ({condition}) AND coalesce(n.triage_source, '') = 'ai'
+                           THEN [1] ELSE [] END |
+            SET n.triage_status = 'unreviewed'
+            REMOVE n.triage_source, n.triage_confidence)
+        FOREACH (_ IN CASE WHEN ({condition}) AND coalesce(n.triage_source, '') = 'human'
+                             AND coalesce(n.triage_status, 'unreviewed') = 'unreviewed'
+                           THEN [1] ELSE [] END |
+            REMOVE {_DECISION_REMOVE})"""
+
 
 #: `needs_verification` is gone. The old classifier answered it for almost
 #: everything, because it was the safe-looking answer and nothing punished it,
@@ -383,6 +557,108 @@ class TriageMixin:
         not_found.extend(ref_of[k] for k in mute_keys if k not in matched)
         return {"items": items, "not_found": not_found}
 
+    def mute_findings_batch(self, user_id: str, project_id: str, label: str, keys,
+                            seed_key: str = "", ceiling: dict | None = None,
+                            exempt_pairs=None, muted_by: str = "", reason: str = "",
+                            batch_id: str = "") -> dict:
+        """A person's Multi mute: several findings of one kind, in one write.
+
+        The keys come from a suggestion the agent stored as a batch, and the
+        person confirmed them, but the suggestion may be minutes old. So every
+        guard the suggestion applied is re-checked HERE, per node, under the
+        node's write lock and in the same statement as the write:
+
+        - an already-muted node is never touched (`already_muted`);
+        - a stale finding (`stale`) or a JS file container (`not_muteable`) is
+          not muted: the container's findings hang off it;
+        - a proven finding (`proven`, see `_PROVEN`) or one a person brought
+          back (`kept_visible`) is refused;
+        - a finding now above the seed (`above_seed`): a higher severity, a
+          more urgent tier, or a proof marker the seed lacks. `ceiling` is the
+          seed's, stored with the batch (`multi_mute.pool.ceiling_for`).
+
+        The seed itself skips the stale, proven, kept-visible and ceiling
+        checks, as a person's single mute does (the person chose that finding
+        by hand), but still never overwrites a mute and is never a JS file
+        container.
+
+        Keys are locked in sorted order so two writers over overlapping sets
+        cannot deadlock, and the whole write runs in `execute_write`, which
+        retries a transient error (a deadlock with a recon ingest or a rule
+        flush) as one unit. Nothing here writes `updated_at`, so a triage
+        publish's changed-since guard is unaffected.
+
+        A mute that lands is stamped `muted_channel = 'multi'` and
+        `muted_token = batch_id`, with `muted_by` the person.
+
+        Returns {"items": [{key, label, node_id, name, severity, outcome}],
+        "not_found": [key]}.
+        """
+        if label not in MUTEABLE_LABELS:
+            raise ValueError(f"not a muteable label: {label!r}")
+        clean = sorted({str(k) for k in (keys or []) if k})[:MAX_MULTI_MUTE_BATCH]
+        if not clean:
+            return {"items": [], "not_found": []}
+        pairs = [[str(p[0]), str(p[1])] for p in (exempt_pairs or [])
+                 if isinstance(p, (list, tuple)) and len(p) == 2]
+        c = ceiling or {}
+        ceiling_param = {
+            "severity_rank": int(c.get("severity_rank", 4)),
+            "tier_rank": c.get("tier_rank") if isinstance(c.get("tier_rank"), int) else None,
+            "validated": bool(c.get("validated")),
+            "malicious": bool(c.get("malicious")),
+            "confirmed": bool(c.get("confirmed")),
+        }
+
+        query = f"""
+        UNWIND $keys AS key
+        WITH key ORDER BY key
+        MATCH (n:{label})
+        WHERE n.user_id = $user_id AND n.project_id = $project_id
+          AND (n.id = key OR n.finding_id = key)
+        SET n._mute_lock = true
+        REMOVE n._mute_lock
+        WITH key, n, n:Muted AS already, {_PROVEN} AS proven,
+             any(p IN $exempt_pairs WHERE p[0] = $label
+                 AND (p[1] = n.id OR p[1] = n.finding_id)) AS kept_visible,
+             (key = $seed_key) AS is_seed,
+             {_within_ceiling(label)} AS within,
+             n.stale_since IS NOT NULL AS stale,
+             coalesce(n.finding_type, '') = 'js_file' AS js_file
+        WITH key, n, already, is_seed, js_file,
+             CASE WHEN already THEN 'already_muted'
+                  WHEN js_file THEN 'not_muteable'
+                  WHEN is_seed THEN 'muted'
+                  WHEN stale THEN 'stale'
+                  WHEN proven THEN 'proven'
+                  WHEN kept_visible THEN 'kept_visible'
+                  WHEN NOT within THEN 'above_seed'
+                  ELSE 'muted' END AS outcome
+        FOREACH (_ IN CASE WHEN outcome = 'muted' THEN [1] ELSE [] END |
+            SET n:Muted,
+                n.muted = true,
+                n.muted_at = datetime(),
+                n.muted_by = $muted_by,
+                n.muted_reason = $reason,
+                n.muted_channel = '{MULTI_MUTE_CHANNEL}',
+                n.muted_token = $batch_id)
+        RETURN key, {_FUNCTIONAL_LABEL} AS label, {_NODE_ID} AS node_id,
+               coalesce(n.name, n.title, n.detector_name, n.secret_type, n.type, '') AS name,
+               coalesce(n.severity, '') AS severity, outcome
+        """
+        params = dict(keys=clean, label=label, user_id=user_id, project_id=project_id,
+                      seed_key=str(seed_key or ""), ceiling=ceiling_param,
+                      exempt_pairs=pairs, muted_by=muted_by or user_id,
+                      reason=str(reason or "")[:500], batch_id=str(batch_id or "")[:40])
+
+        def work(tx):
+            return [dict(r) for r in tx.run(query, **params)]
+
+        with self.driver.session() as session:
+            rows = session.execute_write(work)
+        matched = {r["key"] for r in rows}
+        return {"items": rows, "not_found": [k for k in clean if k not in matched]}
+
     def resolve_muted(self, user_id: str, project_id: str, keys=None, graph_ids=None,
                       include_rule_mutes: bool = False) -> dict:
         """What an unmute of these refs WOULD do. Reads only; writes nothing.
@@ -444,17 +720,19 @@ class TriageMixin:
     def unmute_finding(self, user_id: str, project_id: str, node_id: str) -> dict:
         """Restore a suppressed finding.
 
-        Removes the label and the muted properties and touches nothing else, so
-        the finding comes back with every relationship and scan property it had.
-        Idempotent.
+        Removes the label and the muted properties, so the finding comes back
+        with every relationship and scan property it had. Idempotent.
 
-        Note this deliberately does NOT clear the triage verdict: unmuting is
-        "show me this again", not "forget what we concluded about it".
+        Note this deliberately does NOT clear a person's verdict: unmuting is
+        "show me this again", not "forget what we concluded about it". It does
+        retire the v3.1 triage shapes (`_legacy_cleanup`), because a muted node
+        is never published and would otherwise carry them back onto the board.
         """
         query = f"""
         MATCH (n:Muted)
         WHERE {_BY_ID} AND n.user_id = $user_id AND n.project_id = $project_id
         REMOVE n:Muted, {_MUTE_PROPS}
+        {_legacy_cleanup()}
         RETURN {_FUNCTIONAL_LABEL} AS label
         """
         with self.driver.session() as session:
@@ -476,16 +754,20 @@ class TriageMixin:
         accepted only from MUTEABLE_LABELS; anything else is ignored rather than
         interpolated. Every other value travels as a parameter.
 
-        `muted_via` is three-valued: `person` is a person in the UI only, `mcp`
-        is an external agent on a person's token, `rule` a Mute Rule.
+        `muted_via` is four-valued: `person` is a person in the UI, one finding
+        at a time; `multi` a person's Multi mute, chosen in bulk from AI
+        suggestions; `mcp` an external agent on a person's token; `rule` a Mute
+        Rule. `token` is an MCP token prefix or a Multi mute batch id.
         """
         clauses, params = [], {}
         if label in MUTEABLE_LABELS:
             clauses.append(f"n:{label}")
         if muted_via == "person":
-            clauses.append(f"NOT {_RULE_MUTED} AND NOT {_MCP_MUTED}")
+            clauses.append(f"NOT {_RULE_MUTED} AND NOT {_MCP_MUTED} AND NOT {_MULTI_MUTED}")
         elif muted_via == "mcp":
             clauses.append(f"NOT {_RULE_MUTED} AND {_MCP_MUTED}")
+        elif muted_via == "multi":
+            clauses.append(f"NOT {_RULE_MUTED} AND {_MULTI_MUTED}")
         elif muted_via == "rule":
             clauses.append(_RULE_MUTED)
         elif muted_via == "deleted_rule":
@@ -598,7 +880,7 @@ class TriageMixin:
         People are collapsed into one bucket; the Kind and Rule menus do not
         name individual operators. Agent (MCP) mutes are counted apart from
         people's, and per token prefix, so one token's mutes can be reviewed
-        and reverted together.
+        and reverted together. Multi mutes likewise, per batch id.
         """
         query = f"""
         MATCH (n:Muted)
@@ -613,8 +895,10 @@ class TriageMixin:
         labels: dict = {}
         rules: dict = {}
         tokens: dict = {}
+        batches: dict = {}
         person = 0
         mcp = 0
+        multi = 0
         total = 0
         with self.driver.session() as session:
             for r in session.run(query, user_id=user_id, project_id=project_id):
@@ -629,20 +913,29 @@ class TriageMixin:
                     token = r.get("token") or ""
                     if token:
                         tokens[token] = tokens.get(token, 0) + c
+                elif r.get("via") == "multi":
+                    multi += c
+                    batch = r.get("token") or ""
+                    if batch:
+                        batches[batch] = batches.get(batch, 0) + c
                 else:
                     person += c
         return {
             "total": total,
             "by_person": person,
             "by_mcp": mcp,
+            "by_multi": multi,
             "labels": labels,
             "rules": [{"muted_by": k, **v} for k, v in sorted(rules.items())],
             "tokens": [{"token": k, "count": v}
                        for k, v in sorted(tokens.items(), key=lambda kv: (-kv[1], kv[0]))],
+            "batches": [{"batch": k, "count": v}
+                        for k, v in sorted(batches.items(), key=lambda kv: (-kv[1], kv[0]))],
         }
 
     def unmute_findings(self, user_id: str, project_id: str, keys,
-                        skip_rule_mutes: bool = False) -> dict:
+                        skip_rule_mutes: bool = False,
+                        only_batch: str | None = None) -> dict:
         """Unmute several findings in one write, whoever muted them.
 
         Returns what was actually unmuted, as `{key, label, muted_by, was_via}`
@@ -654,66 +947,74 @@ class TriageMixin:
         `skipped`: an MCP caller may release a rule mute only when it asked to
         explicitly. The rule check is read under the node's write lock. The
         default is the UI's behaviour, which unmutes whatever it is given.
+
+        `only_batch` is a Multi mute Undo: only a node this person's batch
+        muted, and still carries that batch's stamp, is unmuted. A node muted
+        since by another batch or channel no longer carries the stamp, so it
+        matches nothing and is absent from the result; one that carries the
+        stamp but not this person's `muted_by` or the `multi` channel is
+        `skipped`.
         """
         clean = sorted({str(k) for k in (keys or []) if k})[:MAX_UNMUTE_BATCH]
         if not clean:
             return {"unmuted": 0, "items": [], "skipped": []}
         # One pass over the muted nodes with IN, not a pass per key: an OR on two
         # properties is served by no index, and rule mutes make the set large.
+        batch_filter = "\n          AND n.muted_token = $only_batch" if only_batch else ""
         query = f"""
         MATCH (n:Muted)
         WHERE n.user_id = $user_id AND n.project_id = $project_id
-          AND (n.id IN $keys OR n.finding_id IN $keys)
+          AND (n.id IN $keys OR n.finding_id IN $keys){batch_filter}
         SET n._mute_lock = true
         REMOVE n._mute_lock
         WITH n, CASE WHEN n.id IN $keys THEN n.id ELSE n.finding_id END AS key,
              coalesce(n.muted_by, '') AS was, {_MUTED_VIA} AS was_via
-        WITH n, key, was, was_via, ($skip_rule_mutes AND was_via = 'rule') AS skipped
+        WITH n, key, was, was_via,
+             (($skip_rule_mutes AND was_via = 'rule')
+              OR ($only_batch IS NOT NULL
+                  AND NOT ({_MULTI_MUTED} AND n.muted_token = $only_batch
+                           AND n.muted_by = $user_id))) AS skipped
         FOREACH (_ IN CASE WHEN skipped THEN [] ELSE [1] END |
             REMOVE n:Muted, {_MUTE_PROPS})
+        {_legacy_cleanup("NOT skipped")}
         RETURN key, {_FUNCTIONAL_LABEL} AS label, was AS muted_by, was_via, skipped
         """
         with self.driver.session() as session:
             rows = [dict(r) for r in session.run(
                 query, keys=clean, user_id=user_id, project_id=project_id,
-                skip_rule_mutes=bool(skip_rule_mutes))]
+                skip_rule_mutes=bool(skip_rule_mutes),
+                only_batch=str(only_batch)[:40] if only_batch else None)]
         items = [{k: r.get(k) for k in ("key", "label", "muted_by", "was_via")}
                  for r in rows if not r.get("skipped")]
         skipped = [{k: r.get(k) for k in ("key", "label", "muted_by")}
                    for r in rows if r.get("skipped")]
         return {"unmuted": len(items), "items": items, "skipped": skipped}
 
-    def list_triage_findings(self, user_id: str, project_id: str, limit: int = 2000) -> list:
-        """Every finding in triage scope that is NOT muted, for the Priority Board.
+    # ------------------------------------------------------------------
+    # The Priority Board. One row shape serves the list, the detail and the
+    # answer to every write, so a row replaced in place after a verdict is
+    # exactly the row a reload would show.
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _board_row(extra: str = "") -> str:
+        """From a bound `n` plus `decided_by, reviewed_via, review_state` to a board row.
 
-        THE ORDERING CONTRACT. The board has four sections, always in this order,
-        and the server decides which one each finding is in so the client cannot
-        disagree with it:
+        THE ORDERING CONTRACT. The board has four sections, always in this
+        order, and the server decides which one each finding is in so the
+        client cannot disagree with it:
 
           0 Ranked            open, carries a triage_run_id, sorted by score
           1 Not triaged yet   open, never scored, sorted by severity
-          2 Likely false pos  the AI or a human called it noise
+          2 Likely false pos  a person or a valid review called it noise
           3 Resolved          fixed, gone or inactive
-
-        Within a section the key is (score DESC, severity, id), with the id as a
-        stable final tiebreak so two runs over an unchanged graph produce exactly
-        the same order.
-
-        A capped list keeps the top N, because the score is a near-total order;
-        `count_triage_findings` gives the caller the real total so the table can
-        say "showing N of M" rather than presenting a truncated list as the whole
-        picture.
         """
-        query = f"""
-        MATCH (n:{_MUTEABLE})
-        WHERE n.user_id = $user_id AND n.project_id = $project_id
-          AND NOT n:Muted
+        return f"""
         OPTIONAL MATCH (parent)-[:HAS_VULNERABILITY|FOUND_AT|HAS_SECRET|HAS_FINDING]-(n)
-        WITH n, head(collect(parent)) AS parent
-        WITH n, parent,
+        WITH n, decided_by, reviewed_via, review_state, head(collect(parent)) AS parent
+        WITH n, decided_by, reviewed_via, review_state, parent,
              coalesce(n.triage_state, 'open') AS state,
              coalesce(n.triage_status, 'unreviewed') AS status
-        WITH n, parent, state, status,
+        WITH n, decided_by, reviewed_via, review_state, parent, state, status,
              CASE
                WHEN state IN ['fixed', 'gone', 'inactive'] THEN {SECTION_RESOLVED}
                WHEN state = 'false_positive' OR status = 'likely_noise'
@@ -738,7 +1039,8 @@ class TriageMixin:
                state                               AS triage_state,
                status                              AS triage_status,
                n.triage_confidence                 AS triage_confidence,
-               n.triage_reason                     AS triage_reason,
+               // A person's reason, and only while a person's decision stands.
+               CASE WHEN {_PERSON_DECIDED} THEN n.triage_reason ELSE NULL END AS triage_reason,
                coalesce(n.triage_source, '')       AS triage_source,
                coalesce(n.triage_tier, '')         AS triage_tier,
                coalesce(n.triage_tier_rule, '')    AS triage_tier_rule,
@@ -749,15 +1051,78 @@ class TriageMixin:
                coalesce(n.triage_signals, [])      AS triage_signals,
                coalesce(n.triage_group_key, n.triage_cluster_id, '') AS triage_group_key,
                coalesce(n.triage_run_id, '')       AS triage_run_id,
+               coalesce(n.triage_detector, '')     AS triage_detector,
+               n.triage_base_factors               AS triage_base_factors,
+               coalesce(n.triage_base_tier, '')    AS triage_base_tier,
+               coalesce(n.triage_base_tier_rule, '') AS triage_base_tier_rule,
+               n.triage_base_state                 AS triage_base_state,
+               n.triage_tier_inputs                AS triage_tier_inputs,
+               decided_by                          AS triage_decided_by,
+               CASE WHEN {_PERSON_DECIDED}
+                    THEN coalesce(n.triage_verdict_channel, 'app') ELSE '' END AS decided_via,
+               CASE WHEN {_PERSON_DECIDED}
+                    THEN coalesce(n.triage_verdict_token, '') ELSE '' END AS triage_verdict_token,
+               toString(n.triage_verdict_at)       AS triage_verdict_at,
+               toString(n.triage_rescored_at)      AS triage_rescored_at,
                coalesce(n.triage_ai_verdict, '')   AS triage_ai_verdict,
                n.triage_ai_corrections             AS triage_ai_corrections,
                n.triage_ai_quote                   AS triage_ai_quote,
                coalesce(n.triage_ai_model, '')     AS triage_ai_model,
                toString(n.triage_ai_at)            AS triage_ai_at,
+               coalesce(n.triage_ai_why, '')       AS triage_ai_why,
+               reviewed_via                        AS reviewed_via,
+               coalesce(n.triage_ai_by, '')        AS triage_ai_by,
+               review_state                        AS review_state,
                coalesce(n.triage_fix_lever, '')    AS triage_fix_lever,
                n.triage_proof                      AS triage_proof,
                toString(n.triaged_at)              AS triaged_at,
-               toString(n.updated_at)              AS updated_at
+               toString(n.updated_at)              AS updated_at,
+               toString(n.stale_since)             AS stale_since{extra}
+        """
+
+    _DERIVED = (f"{_DECIDED_BY} AS decided_by, {_REVIEWED_VIA} AS reviewed_via, "
+                f"{_REVIEW_STATE} AS review_state")
+
+    @staticmethod
+    def _triage_filter(decided_by=None, reviewed_via=None, review_current=None) -> tuple[str, dict]:
+        """The board's pushed-down filters, applied before LIMIT so a filtered
+        page and its `total` are exact. Enum-checked: an unknown value raises
+        rather than silently returning the unfiltered board."""
+        clauses, params = [], {}
+        for value, valid, column, name in (
+                (decided_by, VALID_DECIDED_BY, "decided_by", "f_decided_by"),
+                (reviewed_via, VALID_REVIEWED_VIA, "reviewed_via", "f_reviewed_via"),
+                (review_current, VALID_REVIEW_STATE, "review_state", "f_review_state")):
+            if value in (None, ""):
+                continue
+            if value not in valid:
+                raise ValueError(f"unknown {column} filter {value!r}")
+            clauses.append(f"{column} = ${name}")
+            params[name] = value
+        where = ("\n        WHERE " + " AND ".join(clauses)) if clauses else ""
+        return where, params
+
+    def list_triage_findings(self, user_id: str, project_id: str, limit: int = 2000,
+                             decided_by: str | None = None, reviewed_via: str | None = None,
+                             review_current: str | None = None) -> list:
+        """Every finding in triage scope that is NOT muted, for the Priority Board.
+
+        Within a section the key is (score DESC, severity, id), with the id as a
+        stable final tiebreak so two runs over an unchanged graph produce exactly
+        the same order.
+
+        A capped list keeps the top N, because the score is a near-total order;
+        `count_triage_findings` with the same filters gives the caller the real
+        total so the table can say "showing N of M" rather than presenting a
+        truncated list as the whole picture.
+        """
+        where, params = self._triage_filter(decided_by, reviewed_via, review_current)
+        query = f"""
+        MATCH (n:{_MUTEABLE})
+        WHERE n.user_id = $user_id AND n.project_id = $project_id
+          AND NOT n:Muted
+        WITH n, {self._DERIVED}{where}
+        {self._board_row()}
         ORDER BY section,
                  coalesce(n.triage_priority_score, -1) DESC,
                  {_SEVERITY_RANK},
@@ -766,7 +1131,7 @@ class TriageMixin:
         """
         with self.driver.session() as session:
             return [dict(r) for r in session.run(
-                query, user_id=user_id, project_id=project_id, limit=limit)]
+                query, user_id=user_id, project_id=project_id, limit=limit, **params)]
 
     def triage_preflight(self, user_id: str, project_id: str) -> dict:
         """What the confirmation dialog needs to tell the operator, in one read.
@@ -780,7 +1145,8 @@ class TriageMixin:
           AND NOT n:Muted
         WITH n,
              coalesce(n.triage_state, 'open') AS state,
-             coalesce(n.triage_run_id, '') AS run_id
+             coalesce(n.triage_run_id, '') AS run_id,
+             {_REVIEW_STATE} AS review_state
         RETURN count(n) AS in_scope,
                count(CASE WHEN run_id = '' THEN 1 END) AS never_triaged,
                count(CASE WHEN state = 'open' THEN 1 END) AS open_findings,
@@ -788,166 +1154,467 @@ class TriageMixin:
                // What the review would actually cost: facts and advisories are
                // skipped, and they are the bulk of a real project.
                count(CASE WHEN run_id = ''
-                            AND coalesce(n.source, '') <> 'security_check'
-                            AND coalesce(n.source, '') <> 'osv'
+                            AND NOT coalesce(n.source, '') IN ['security_check', 'osv', 'retirejs']
                             AND state = 'open'
-                          THEN 1 END) AS reviewable
+                          THEN 1 END) AS reviewable,
+               // Reviews a run keeps rather than pays for again, while their
+               // evidence is unchanged.
+               count(CASE WHEN review_state = 'current' THEN 1 END) AS reviews_kept,
+               count(CASE WHEN review_state = 'current'
+                            AND coalesce(n.triage_ai_channel, '') = 'mcp' THEN 1 END)
+                 AS external_reviews
         """
         with self.driver.session() as session:
             record = session.run(
                 query, user_id=user_id, project_id=project_id).single()
         if not record:
             return {"in_scope": 0, "never_triaged": 0, "open_findings": 0,
-                    "reviewable": 0, "last_triaged_at": None}
+                    "reviewable": 0, "last_triaged_at": None,
+                    "reviews_kept": 0, "external_reviews": 0}
         return {
             "in_scope": int(record["in_scope"] or 0),
             "never_triaged": int(record["never_triaged"] or 0),
             "open_findings": int(record["open_findings"] or 0),
             "reviewable": int(record["reviewable"] or 0),
             "last_triaged_at": record["last_triaged_at"],
+            "reviews_kept": int(record["reviews_kept"] or 0),
+            "external_reviews": int(record["external_reviews"] or 0),
         }
 
-    def count_triage_findings(self, user_id: str, project_id: str) -> int:
+    def count_triage_findings(self, user_id: str, project_id: str,
+                              decided_by: str | None = None, reviewed_via: str | None = None,
+                              review_current: str | None = None) -> int:
         """How many findings are in triage scope, ignoring the display cap.
 
-        The Triage table is capped, so this is what lets the UI say "showing N
-        of M" instead of presenting a truncated list as the whole picture.
+        Same filters as `list_triage_findings`, so a filtered page's total is
+        exact rather than "at least".
+        """
+        where, params = self._triage_filter(decided_by, reviewed_via, review_current)
+        query = f"""
+        MATCH (n:{_MUTEABLE})
+        WHERE n.user_id = $user_id AND n.project_id = $project_id
+          AND NOT n:Muted
+        WITH n, {self._DERIVED}{where}
+        RETURN count(n) AS total
+        """
+        with self.driver.session() as session:
+            record = session.run(
+                query, user_id=user_id, project_id=project_id, **params).single()
+        return int(record["total"]) if record else 0
+
+    def triage_facets(self, user_id: str, project_id: str) -> dict:
+        """Uncapped counts behind the board's filters, in one read.
+
+        `tiers` counts RANKED rows only: an untriaged or resolved row has no tier
+        worth counting under Track (U6).
         """
         query = f"""
         MATCH (n:{_MUTEABLE})
         WHERE n.user_id = $user_id AND n.project_id = $project_id
           AND NOT n:Muted
-        RETURN count(n) AS total
+        WITH n, {self._DERIVED},
+             CASE WHEN {_PERSON_DECIDED}
+                  THEN coalesce(n.triage_verdict_channel, 'app') ELSE '' END AS decided_via,
+             coalesce(n.triage_state, 'open') AS state,
+             coalesce(n.triage_status, 'unreviewed') AS status,
+             coalesce(n.triage_run_id, '') AS run_id,
+             coalesce(n.triage_tier, '') AS tier
+        WITH decided_by, reviewed_via, review_state, decided_via, tier,
+             CASE
+               WHEN state IN ['fixed', 'gone', 'inactive'] THEN {SECTION_RESOLVED}
+               WHEN state = 'false_positive' OR status = 'likely_noise'
+                 THEN {SECTION_FALSE_POSITIVE}
+               WHEN run_id = '' THEN {SECTION_NOT_TRIAGED}
+               ELSE {SECTION_RANKED}
+             END AS section
+        RETURN decided_by, reviewed_via, review_state, decided_via, section, tier,
+               count(*) AS c
         """
+        out = {
+            "total": 0,
+            "decided_by": {k: 0 for k in VALID_DECIDED_BY},
+            "decided_via": {"app": 0, "mcp": 0},
+            "reviewed_via": {k: 0 for k in VALID_REVIEWED_VIA},
+            "review_current": {k: 0 for k in VALID_REVIEW_STATE},
+            "sections": {str(k): 0 for k in (SECTION_RANKED, SECTION_NOT_TRIAGED,
+                                             SECTION_FALSE_POSITIVE, SECTION_RESOLVED)},
+            "tiers": {t: 0 for t in ("T1", "T2", "T3", "T4")},
+        }
         with self.driver.session() as session:
-            record = session.run(
-                query, user_id=user_id, project_id=project_id).single()
-        return int(record["total"]) if record else 0
+            for r in session.run(query, user_id=user_id, project_id=project_id):
+                c = int(r["c"] or 0)
+                out["total"] += c
+                for key, value in (("decided_by", r["decided_by"]),
+                                   ("reviewed_via", r["reviewed_via"]),
+                                   ("review_current", r["review_state"]),
+                                   ("decided_via", r["decided_via"])):
+                    if value in out[key]:
+                        out[key][value] += c
+                out["sections"][str(r["section"])] = out["sections"].get(str(r["section"]), 0) + c
+                if r["section"] == SECTION_RANKED and r["tier"] in out["tiers"]:
+                    out["tiers"][r["tier"]] += c
+        return out
 
-    def apply_triage_scores(self, user_id: str, project_id: str, rows: list,
-                            guard_updated_at: bool = True) -> dict:
-        """Publish a triage run's results onto the findings. Step E, and the
-        only step that writes.
+    def get_triage_detail(self, user_id: str, project_id: str, node_id: str,
+                          label: str | None = None) -> dict:
+        """Everything behind one finding's place on the board. Reads only.
 
-        `rows` carry the whole derivation, not just a number: state, the four
-        factors with the evidence behind each, the tier and the rule that chose
-        it, the resolved host, the group key, the run id, and the AI's verdict
-        where one was produced. An operator who cannot see why a finding ranked
-        where it did has no way to disagree with it.
-
-        Three rules are enforced HERE, in Cypher, rather than trusted to the
-        caller:
-
-        1. **A human's verdict is theirs.** Facts, factors and the score always
-           update, because those are measurements and staleness helps nobody.
-           `triage_status`, `triage_reason` and `triage_confidence` on a
-           human-owned finding are never touched, and `triage_source` stays
-           'human' (C14).
-        2. **Nothing is muted here.** There is no `SET n:Muted` in this method
-           and there never must be: a run produces verdicts, and only a person
-           suppresses a finding.
-        3. **A node a scan changed mid-run is skipped.** Steps A to D read the
-           graph minutes before this writes. If a scanner re-ingested a finding
-           in between, its facts are no longer the ones that were scored, so the
-           row is left alone and counted as `skipped_changed`; the next run
-           picks it up. Triage never sets `updated_at` itself (only
-           `triaged_at`), so this compares against scanner writes only.
-
-        Returns counts, never finding text.
+        A muted finding, a wrong id and another tenant's id are the same answer
+        (`found: False`). An id shared by two labels is `ambiguous` and names
+        them, so the caller can retry with `label`.
         """
-        clean = []
-        for r in rows or []:
-            node_id = (r or {}).get("id")
-            if not node_id:
-                continue
-            clean.append(self._clean_publish_row(r))
-
-        if not clean:
-            return {"updated": 0, "skipped_human": 0, "skipped_changed": 0,
-                    "rejected": len(rows or [])}
-
-        # `seen_updated_at` is the node's updated_at as Step A read it. A row
-        # that never carried one (a caller that does not track it) opts out of
-        # the guard rather than being skipped for ever.
+        label_expr = label if label in MUTEABLE_LABELS else _MUTEABLE
+        extra = f""",
+               n.triage_evidence_hash              AS triage_evidence_hash,
+               n.triage_ai_evidence_hash           AS triage_ai_evidence_hash,
+               coalesce(n.triage_ai_prompt_version, '') AS triage_ai_prompt_version,
+               coalesce(n.triage_ai_channel, '')   AS triage_ai_channel,
+               CASE WHEN {_PERSON_DECIDED}
+                    THEN coalesce(n.triage_verdict_by, '') ELSE '' END AS triage_verdict_by,
+               coalesce(n.triage_model_version, '') AS triage_model_version,
+               n.triage_intel_date                 AS triage_intel_date,
+               {_LIVE_PROOF}                       AS proven_now,
+               [(cf:ChainFinding)-[:CONFIRMS]->(n)
+                  WHERE cf.user_id = n.user_id AND cf.project_id = n.project_id
+                    AND cf.finding_type IN {_PROOF_TYPES} | cf.finding_type] AS proof_types"""
         query = f"""
-        UNWIND $rows AS row
-        MATCH (n:{_MUTEABLE})
-        WHERE (n.id = row.id OR n.finding_id = row.id)
-          AND n.user_id = $user_id AND n.project_id = $project_id
-        WITH n, row,
-             // coalesce, or a never-triaged node (triage_source NULL) makes
-             // `NOT isHuman` NULL and the verdict is silently never written.
-             coalesce(n.triage_source, '') = 'human' AS isHuman,
-             (NOT $guard
-              OR row.seen_updated_at IS NULL
-              OR toString(n.updated_at) = row.seen_updated_at) AS unchanged
-        FOREACH (_ IN CASE WHEN unchanged THEN [1] ELSE [] END |
-          // Measurements: always written, human-owned or not (C14).
-          SET n.triage_priority_score = row.score,
-              n.triage_math_score     = row.math_score,
-              n.triage_risk           = row.risk,
-              n.triage_signals        = row.signals,
-              n.triage_state          = row.state,
-              n.triage_tier           = row.tier,
-              n.triage_tier_rule      = row.tier_rule,
-              n.triage_factors        = row.factors,
-              n.triage_host           = row.host,
-              n.triage_group_key      = row.group_key,
-              n.triage_detector       = row.detector,
-              n.triage_run_id         = row.run_id,
-              n.triage_model_version  = row.model_version,
-              n.triaged_at            = datetime()
-        )
-        FOREACH (_ IN CASE WHEN unchanged AND row.proof IS NOT NULL THEN [1] ELSE [] END |
-          SET n.triage_proof = row.proof)
-        FOREACH (_ IN CASE WHEN unchanged AND row.intel_date IS NOT NULL THEN [1] ELSE [] END |
-          SET n.triage_intel_date = row.intel_date)
-        FOREACH (_ IN CASE WHEN unchanged AND row.evidence_hash IS NOT NULL THEN [1] ELSE [] END |
-          SET n.triage_evidence_hash = row.evidence_hash)
-        FOREACH (_ IN CASE WHEN unchanged AND row.fix_lever IS NOT NULL THEN [1] ELSE [] END |
-          SET n.triage_fix_lever = row.fix_lever)
-        // The AI review and the verdict it implies: never over a human.
-        FOREACH (_ IN CASE WHEN unchanged AND NOT isHuman AND row.ai_verdict IS NOT NULL
-                           THEN [1] ELSE [] END |
-          SET n.triage_ai_verdict     = row.ai_verdict,
-              n.triage_ai_corrections = row.ai_corrections,
-              n.triage_ai_quote       = row.ai_quote,
-              n.triage_ai_model       = row.ai_model,
-              n.triage_ai_at          = datetime()
-        )
-        FOREACH (_ IN CASE WHEN unchanged AND NOT isHuman AND row.status IS NOT NULL
-                           THEN [1] ELSE [] END |
-          SET n.triage_status     = row.status,
-              n.triage_confidence = row.confidence,
-              n.triage_source     = 'ai'
-        )
-        FOREACH (_ IN CASE WHEN unchanged AND NOT isHuman AND row.reason IS NOT NULL
-                           THEN [1] ELSE [] END |
-          SET n.triage_reason = row.reason)
-        RETURN count(CASE WHEN NOT unchanged THEN 1 END) AS skipped_changed,
-               count(CASE WHEN unchanged AND isHuman THEN 1 END) AS skipped_human,
-               count(CASE WHEN unchanged THEN 1 END) AS updated
+        MATCH (n:{label_expr})
+        WHERE {_BY_ID} AND n.user_id = $user_id AND n.project_id = $project_id
+          AND NOT n:Muted
+        WITH n, {self._DERIVED}
+        {self._board_row(extra)}
         """
         with self.driver.session() as session:
-            record = session.run(
-                query, rows=clean, user_id=user_id, project_id=project_id,
-                guard=bool(guard_updated_at),
-            ).single()
+            rows = [dict(r) for r in session.run(
+                query, node_id=node_id, user_id=user_id, project_id=project_id)]
+            if not rows:
+                return {"found": False}
+            if len(rows) > 1:
+                return {"found": False, "ambiguous": sorted(r["label"] for r in rows)}
+            row = rows[0]
 
+            group = []
+            if row.get("triage_group_key"):
+                group = [dict(r) for r in session.run(f"""
+        MATCH (n:{_MUTEABLE})
+        WHERE n.user_id = $user_id AND n.project_id = $project_id AND NOT n:Muted
+          AND n.triage_group_key = $group_key
+        RETURN coalesce(n.id, n.finding_id) AS id, {_FUNCTIONAL_LABEL} AS label,
+               coalesce(n.name, n.detector_name, n.secret_type, n.type, '') AS name,
+               coalesce(n.triage_state, 'open') AS state,
+               n.triage_priority_score AS score, coalesce(n.triage_tier, '') AS tier,
+               coalesce(n.triage_host, '') AS host
+        ORDER BY coalesce(n.triage_priority_score, -1) DESC, id
+        LIMIT 50
+        """, user_id=user_id, project_id=project_id, group_key=row["triage_group_key"])]
+
+            detector = {"key": row.get("triage_detector") or "", "real": 0, "fp": 0}
+            if detector["key"]:
+                # The same filter detector learning uses: this user's own clicks
+                # in the app, across their projects, muted included.
+                record = session.run(f"""
+        MATCH (n:{_MUTEABLE} {{user_id: $user_id}})
+        WHERE n.triage_detector = $detector
+          AND {_PERSON_DECIDED}
+          AND coalesce(n.triage_verdict_by, n.user_id) = $user_id
+          AND coalesce(n.triage_verdict_channel, 'app') = 'app'
+        RETURN count(CASE WHEN n.triage_status = 'confirmed' THEN 1 END) AS real,
+               count(CASE WHEN n.triage_status = 'likely_noise' THEN 1 END) AS fp
+        """, user_id=user_id, detector=detector["key"]).single()
+                if record:
+                    detector["real"] = int(record["real"] or 0)
+                    detector["fp"] = int(record["fp"] or 0)
+
+        return {"found": True, "row": row, "group": group, "detector": detector}
+
+    # ------------------------------------------------------------------
+    # Writes. Each one is ONE managed transaction (`execute_write`, which the
+    # driver retries on a deadlock) that locks before it reads, re-checks under
+    # the lock, writes one layer and rescores the finding from the layers.
+    # Nobody writes a final value directly: `combine` (score_model.
+    # combine_layers, passed in from the agent) is the only producer.
+    # None of them touches `updated_at` or `:Muted`.
+    # ------------------------------------------------------------------
+    _DATETIME_PROPS = ("triaged_at", "triage_ai_at", "triage_verdict_at", "triage_rescored_at")
+
+    @classmethod
+    def _layer_map(cls) -> str:
+        """Every triage property of `n`, datetimes as strings, as one map."""
+        parts = [f"{p}: toString(n.{p})" if p in cls._DATETIME_PROPS else f".{p}"
+                 for p in TRIAGE_PROPS]
+        return "n {" + ", ".join(parts) + "}"
+
+    def _lock_findings(self, tx, user_id: str, project_id: str, node_id: str,
+                       label: str | None) -> list:
+        """Every finding matching the id, write-locked, with its layers.
+
+        The lock is taken BEFORE anything is read, the same idiom as
+        `_lock` in graph_db/node_filters/cypher.py: under read committed a read
+        without it can see a state a concurrent write is about to replace.
+        """
+        label_expr = label if label in MUTEABLE_LABELS else _MUTEABLE
+        return [dict(r) for r in tx.run(f"""
+        MATCH (n:{label_expr})
+        WHERE {_BY_ID} AND n.user_id = $user_id AND n.project_id = $project_id
+        SET n._triage_lock = true
+        REMOVE n._triage_lock
+        RETURN elementId(n) AS eid, {_FUNCTIONAL_LABEL} AS label, n:Muted AS muted,
+               {_LIVE_PROOF} AS proven_now, toString(n.updated_at) AS updated_at,
+               {self._layer_map()} AS props
+        """, node_id=node_id, user_id=user_id, project_id=project_id)]
+
+    def _row_by_eid(self, tx, eid: str) -> dict | None:
+        record = tx.run(f"""
+        MATCH (n) WHERE elementId(n) = $eid
+        WITH n, {self._DERIVED}
+        {self._board_row()}
+        """, eid=eid).single()
+        return dict(record) if record else None
+
+    @staticmethod
+    def _section_of(props: dict) -> int:
+        state = props.get("triage_state") or "open"
+        status = props.get("triage_status") or "unreviewed"
+        if state in ("fixed", "gone", "inactive"):
+            return SECTION_RESOLVED
+        if state == "false_positive" or status == "likely_noise":
+            return SECTION_FALSE_POSITIVE
+        if not props.get("triage_run_id"):
+            return SECTION_NOT_TRIAGED
+        return SECTION_RANKED
+
+    @classmethod
+    def _summary(cls, props: dict) -> dict:
         return {
-            "updated": (record["updated"] if record else 0) or 0,
-            "skipped_human": (record["skipped_human"] if record else 0) or 0,
-            "skipped_changed": (record["skipped_changed"] if record else 0) or 0,
-            "rejected": len(rows or []) - len(clean),
+            "score": props.get("triage_priority_score"),
+            "tier": props.get("triage_tier") or "",
+            "state": props.get("triage_state") or "open",
+            "section": cls._section_of(props),
         }
 
     @staticmethod
-    def _clean_publish_row(r: dict) -> dict:
+    def _rescore_blocker(props: dict) -> str | None:
+        """Why this finding cannot be rescored in place, or None."""
+        if not props.get("triage_run_id"):
+            return "not_scored"
+        if not props.get("triage_base_factors"):
+            return "scored_by_older_run"
+        return None
+
+    @staticmethod
+    def _clean_final(final: dict) -> dict:
+        """The last gate before the graph for combine's output."""
+        import json as _json
+
+        def _float(value, low, high):
+            try:
+                return max(low, min(high, float(value)))
+            except (TypeError, ValueError):
+                return low
+
+        state = final.get("state")
+        if state not in VALID_TRIAGE_STATE:
+            state = "open"
+        tier = final.get("tier") if final.get("tier") in ("T1", "T2", "T3", "T4") else "T4"
+        decided_by = final.get("decided_by")
+        if decided_by not in VALID_DECIDED_BY:
+            decided_by = "rules"
+        factors = final.get("factors")
+        if not isinstance(factors, str):
+            try:
+                factors = _json.dumps(factors or {}, default=str)
+            except (TypeError, ValueError):
+                factors = "{}"
+        return {
+            "score": _float(final.get("score"), 0.0, 100.0),
+            "tier": tier,
+            "tier_rule": str(final.get("tier_rule") or "")[:200],
+            "risk": _float(final.get("risk"), 0.0, 1.0),
+            "factors": factors[:8000],
+            "state": state,
+            "decided_by": decided_by,
+        }
+
+    _FINAL_SET = """n.triage_priority_score = $final.score,
+            n.triage_tier           = $final.tier,
+            n.triage_tier_rule      = $final.tier_rule,
+            n.triage_risk           = $final.risk,
+            n.triage_factors        = $final.factors,
+            n.triage_state          = $final.state,
+            n.triage_decided_by     = $final.decided_by,
+            n.triage_rescored_at    = datetime()"""
+
+    #: What a review may write, and nothing else.
+    _REVIEW_KEYS = ("triage_ai_verdict", "triage_ai_corrections", "triage_ai_quote",
+                    "triage_ai_model", "triage_ai_why", "triage_ai_channel", "triage_ai_by",
+                    "triage_ai_evidence_hash", "triage_ai_prompt_version", "triage_fix_lever")
+
+    @classmethod
+    def _clean_review(cls, review: dict) -> dict:
+        import json as _json
+        caps = {"triage_ai_quote": 1000, "triage_ai_model": 120, "triage_ai_why": 300,
+                "triage_ai_channel": 16, "triage_ai_by": 40, "triage_ai_evidence_hash": 80,
+                "triage_ai_prompt_version": 40, "triage_fix_lever": 120,
+                "triage_ai_corrections": 4000}
+        out = {}
+        for key in cls._REVIEW_KEYS:
+            value = (review or {}).get(key)
+            if key == "triage_ai_corrections" and value is not None and not isinstance(value, str):
+                value = _json.dumps(value, default=str)
+            if value is None or value == "":
+                out[key] = None if key != "triage_ai_by" else ""
+                continue
+            out[key] = str(value)[:caps.get(key, 200)]
+        if out.get("triage_ai_verdict") not in VALID_AI_VERDICT:
+            raise ValueError("a review needs a valid verdict")
+        if out.get("triage_ai_channel") not in ("builtin", "mcp"):
+            raise ValueError("a review needs a channel")
+        return out
+
+    @staticmethod
+    def _write_tx(driver, work, timeout: float):
+        """One managed write transaction with a timeout; a timeout is TriageWriteBusy."""
+        try:
+            from neo4j import unit_of_work
+            fn = unit_of_work(timeout=timeout)(work)
+        except ImportError:  # pragma: no cover
+            fn = work
+        try:
+            with driver.session() as session:
+                return session.execute_write(fn)
+        except Exception as e:
+            # A timeout that fires while the transaction waits on a node lock
+            # (a run's publish holding it) surfaces as LockClientStopped.
+            code = str(getattr(e, "code", "") or "")
+            if any(marker in code for marker in (
+                    "TransactionTimedOut", "LockAcquisitionTimeout", "LockClientStopped")) \
+                    or "TransactionTimedOut" in type(e).__name__:
+                raise TriageWriteBusy(str(e)) from e
+            raise
+
+    def publish_triage_layers(self, user_id: str, project_id: str, rows: list,
+                              combine, guard_updated_at: bool = True,
+                              timeout: float = 120.0) -> dict:
+        """Publish one batch of a run: the base layer, a winning review, the result.
+
+        The only step of a run that writes, as one managed transaction per
+        batch:
+
+        1. lock the batch's nodes, then read their CURRENT review, decision and
+           live proof;
+        2. skip a node a scan changed since the run read it (`skipped_changed`):
+           its facts are no longer the ones that were scored, and the next run
+           picks it up. Triage never sets `updated_at` itself, so this compares
+           against scanner writes only;
+        3. `combine(row, props, proven_now)` decides, in the agent, which review
+           wins (never the run's over a still-valid review an external agent
+           wrote) and returns the final values with the decision as it stands
+           NOW, so a verdict given while the run worked is honoured;
+        4. write the base, the winning review if the run produced it, and the
+           result.
+
+        It never writes the decision layer, `updated_at` or `:Muted`: a run
+        produces measurements and reviews, and only a person decides or hides.
+        A muted node is not published.
+
+        Returns counts, never finding text.
+        """
+        clean = [self._clean_layer_row(r) for r in rows or [] if (r or {}).get("id")]
+        counts = {"updated": 0, "skipped_changed": 0, "missing": 0,
+                  "reviews_written": 0, "rejected": len(rows or []) - len(clean)}
+        if not clean:
+            return counts
+        keys = [{"id": r["id"], "label": r["label"]} for r in clean]
+
+        def work(tx):
+            found = {}
+            for rec in tx.run(f"""
+        UNWIND $keys AS k
+        MATCH (n:{_MUTEABLE})
+        WHERE (n.id = k.id OR n.finding_id = k.id)
+          AND (k.label = '' OR k.label IN labels(n))
+          AND n.user_id = $user_id AND n.project_id = $project_id
+          AND NOT n:Muted
+        SET n._triage_lock = true
+        REMOVE n._triage_lock
+        RETURN k.id AS id, k.label AS label, elementId(n) AS eid,
+               toString(n.updated_at) AS updated_at, {_LIVE_PROOF} AS proven_now,
+               {self._layer_map()} AS props
+        """, keys=keys, user_id=user_id, project_id=project_id):
+                found.setdefault((rec["id"], rec["label"]), []).append(dict(rec))
+
+            local = {"updated": 0, "skipped_changed": 0, "missing": 0, "reviews_written": 0}
+            writes = []
+            for row in clean:
+                for rec in found.get((row["id"], row["label"]), []) or []:
+                    if guard_updated_at and row["seen_updated_at"] is not None \
+                            and rec["updated_at"] != row["seen_updated_at"]:
+                        local["skipped_changed"] += 1
+                        continue
+                    outcome = combine(row, rec["props"], bool(rec["proven_now"])) or {}
+                    review = outcome.get("review")
+                    if review is not None:
+                        review = self._clean_review(review)
+                        local["reviews_written"] += 1
+                    writes.append({**{k: v for k, v in row.items()
+                                      if k not in ("id", "label", "base", "review")},
+                                   "eid": rec["eid"],
+                                   "final": self._clean_final(outcome.get("final") or {}),
+                                   "review": review})
+                    local["updated"] += 1
+                if not found.get((row["id"], row["label"])):
+                    local["missing"] += 1
+            if writes:
+                tx.run(f"""
+        UNWIND $rows AS row
+        MATCH (n) WHERE elementId(n) = row.eid
+        SET n.triage_math_score     = row.math_score,
+            n.triage_base_factors   = row.base_factors,
+            n.triage_base_tier      = row.base_tier,
+            n.triage_base_tier_rule = row.base_tier_rule,
+            n.triage_base_state     = row.base_state,
+            n.triage_tier_inputs    = row.tier_inputs,
+            n.triage_evidence_hash  = row.evidence_hash,
+            n.triage_signals        = row.signals,
+            n.triage_host           = row.host,
+            n.triage_group_key      = row.group_key,
+            n.triage_detector       = row.detector,
+            n.triage_run_id         = row.run_id,
+            n.triage_model_version  = row.model_version,
+            n.triaged_at            = datetime(),
+            n.triage_priority_score = row.final.score,
+            n.triage_tier           = row.final.tier,
+            n.triage_tier_rule      = row.final.tier_rule,
+            n.triage_risk           = row.final.risk,
+            n.triage_factors        = row.final.factors,
+            n.triage_state          = row.final.state,
+            n.triage_decided_by     = row.final.decided_by,
+            n.triage_rescored_at    = datetime()
+        FOREACH (_ IN CASE WHEN row.proof IS NOT NULL THEN [1] ELSE [] END |
+          SET n.triage_proof = row.proof)
+        FOREACH (_ IN CASE WHEN row.intel_date IS NOT NULL THEN [1] ELSE [] END |
+          SET n.triage_intel_date = row.intel_date)
+        FOREACH (_ IN CASE WHEN row.review IS NOT NULL THEN [1] ELSE [] END |
+          SET n += row.review, n.triage_ai_at = datetime())
+        FOREACH (_ IN CASE WHEN row.review IS NULL AND row.mark_not_reviewed
+                             AND n.triage_ai_verdict IS NULL THEN [1] ELSE [] END |
+          SET n.triage_ai_verdict = 'not_reviewed')
+        {_legacy_cleanup()}
+        """, rows=writes)
+            return local
+
+        result = self._write_tx(self.driver, work, timeout)
+        for key, value in (result or {}).items():
+            counts[key] = counts.get(key, 0) + int(value or 0)
+        return counts
+
+    @staticmethod
+    def _clean_layer_row(r: dict) -> dict:
         """Coerce one publish row, refusing anything outside its enum.
 
-        Everything here either came from the pure score model or passed the
-        review's quote check, but this is the last gate before the graph, so an
-        out-of-range number or an invented state is dropped rather than stored.
+        Everything here came from the pure score model, but this is the last
+        gate before the graph, so an out-of-range number or an invented state is
+        dropped rather than stored.
         """
         import json as _json
 
@@ -971,40 +1638,24 @@ class TriageMixin:
             except (TypeError, ValueError):
                 return None
 
-        status = r.get("status")
-        if status not in VALID_TRIAGE_STATUS:
-            status = None
-        confidence = r.get("confidence")
-        try:
-            confidence = None if confidence is None else max(0.0, min(1.0, float(confidence)))
-        except (TypeError, ValueError):
-            confidence = None
-
-        state = r.get("state")
-        if state not in VALID_TRIAGE_STATE:
-            state = "open"
-        tier = r.get("tier") if r.get("tier") in ("T1", "T2", "T3", "T4") else "T4"
-        ai_verdict = r.get("ai_verdict")
-        if ai_verdict not in VALID_AI_VERDICT:
-            ai_verdict = None
-
+        base_state = r.get("base_state")
+        if base_state not in ("open", "fixed", "gone", "inactive"):
+            base_state = "open"
+        base_tier = r.get("base_tier") if r.get("base_tier") in ("T1", "T2", "T3", "T4") else "T4"
         signals = r.get("signals") or []
         if not isinstance(signals, list):
             signals = [str(signals)]
-
         return {
             "id": str(r.get("id")),
-            "score": max(0.0, min(100.0, _float(r.get("score")))),
-            "math_score": max(0.0, min(100.0, _float(r.get("math_score", r.get("score"))))),
-            # The raw risk, kept separate from the score so the project-level
-            # roll-up can combine findings properly instead of averaging a
-            # number that already has the tier folded into it.
-            "risk": max(0.0, min(1.0, _float(r.get("risk")))),
+            "label": str(r.get("label") or ""),
+            "math_score": max(0.0, min(100.0, _float(r.get("math_score")))),
+            "base_factors": _json_text(r.get("base_factors")) or "{}",
+            "base_tier": base_tier,
+            "base_tier_rule": _text(r.get("base_tier_rule"), 200) or "",
+            "base_state": base_state,
+            "tier_inputs": _json_text(r.get("tier_inputs"), 200) or "{}",
+            "evidence_hash": _text(r.get("evidence_hash"), 80),
             "signals": [str(x)[:120] for x in signals][:30],
-            "state": state,
-            "tier": tier,
-            "tier_rule": _text(r.get("tier_rule"), 200) or "",
-            "factors": _json_text(r.get("factors")) or "{}",
             "host": _text(r.get("host"), 300) or "",
             "group_key": _text(r.get("group_key"), 200) or "",
             "detector": _text(r.get("detector"), 200) or "",
@@ -1012,85 +1663,193 @@ class TriageMixin:
             "model_version": _text(r.get("model_version"), 40) or "",
             "intel_date": _text(r.get("intel_date"), 40),
             "proof": _json_text(r.get("proof"), 4000),
-            "evidence_hash": _text(r.get("evidence_hash"), 80),
-            "fix_lever": _text(r.get("fix_lever"), 120),
-            "status": status,
-            "confidence": confidence,
-            "reason": _text(r.get("reason"), 500),
-            "ai_verdict": ai_verdict,
-            "ai_corrections": _json_text(r.get("ai_corrections"), 4000),
-            "ai_quote": _text(r.get("ai_quote"), 1000),
-            "ai_model": _text(r.get("ai_model"), 120) or "",
+            "mark_not_reviewed": bool(r.get("mark_not_reviewed")),
             "seen_updated_at": _text(r.get("seen_updated_at"), 60),
+            # Carried to `combine` only, never written by this method.
+            "review": r.get("review"),
+            "base": r.get("base"),
         }
 
     def set_human_verdict(self, user_id: str, project_id: str, node_id: str,
                           status: str, reason: str = "",
                           channel: str = "", verdict_by: str = "",
-                          refuse_muted: bool = False) -> dict:
-        """Record an operator's own verdict, which the AI may not later overwrite.
+                          refuse_muted: bool = False, combine=None,
+                          token: str = "", label: str | None = None,
+                          timeout: float = 15.0) -> dict:
+        """Record a person's decision and rescore the finding in the same transaction.
 
-        Stamping `triage_source = 'human'` is what makes the skip in
-        `apply_triage_scores` fire on the next run: facts and factors keep
-        updating, but the verdict stays theirs.
+        `confirmed` (Real) and `likely_noise` (False positive) stamp
+        `triage_source = 'human'`, which is what the prune keeps, the Mute Rules
+        guards read and a run never overwrites. `unreviewed` is a RESET: it
+        removes the decision stamps entirely, so the finding is rescored from
+        its base and review and is no longer protected from prune or Mute Rules.
 
-        A verdict delegated through an access token is STILL `'human'`, and
-        writing a third value there would be actively wrong. It is the closed
-        two-value set four other behaviours branch on: the ingest-then-prune
-        keep predicate keeps an operator mute OR `coalesce(n.triage_source,'') = 'human'`,
-        so a third value makes the finding prune-eligible and a re-scan DELETES
-        it; the publish guard re-reads the same equality, so a later AI run
-        overwrites the verdict; `finding_state` tests
-        `triage_source in ("human","ai")`, so `likely_noise` stops meaning
-        false-positive; and the board renders anything else as "Not reviewed".
+        A decision delegated through an MCP token is still `'human'` (the token
+        carries the operator's authority) and its CHANNEL is recorded apart, in
+        `triage_verdict_channel`, with the token prefix in
+        `triage_verdict_token`. An absent channel means the app: every decision
+        before the channel existed was a person's click.
 
-        So the VALUE stays `human` and the CHANNEL is recorded separately.
-        `verdict_by` mirrors `muted_by`: without it the node recorded only who
-        the verdict was not.
+        Over MCP (`channel='mcp'`):
+        - a decision a person made in the app cannot be changed or reset
+          (`decided_in_app`);
+        - `refuse_muted`: a verdict on a muted finding is refused. Any `human`
+          verdict is a Mute Rules guard, so on a rule-muted finding it would
+          release the mute at the next apply: an unmute by another name.
 
-        `refuse_muted` is for a delegated caller. Any `human` verdict is a
-        Mute Rules guard, so on a rule-muted finding it releases the mute at
-        the next apply or sweep: a verdict would be an unmute by another name.
-        An MCP caller unmutes only through `unmute_findings`, which needs its
-        own opt-in permission and an explicit flag for a rule mute, so the
-        verdict permission alone can never release one.
+        Matches EXACTLY one finding. An id shared by two labels is `ambiguous`
+        (pass `label`) and nothing is written. `combine(props, proven_now)` is
+        `score_model.combine_layers` over the stored layers; without a base
+        layer (never scored, or scored before v3.2) the result is not
+        recomputed, except that a False positive still leaves the ranking.
 
-        The node's write lock is taken BEFORE `n:Muted` is read, the same idiom
-        as `_lock` in graph_db/node_filters/cypher.py. Under read committed a
-        label read without it can see "not muted", then wait on a mute's lock
-        and write the verdict onto the node that mute just committed.
+        Never touches `triaged_at`: that says when a RUN last published.
         """
         if status not in VALID_TRIAGE_STATUS:
             return {"updated": False, "reason": f"invalid status {status!r}"}
+        channel = str(channel or "app")[:32]
+        verdict_by = str(verdict_by or user_id)[:128]
+        token = str(token or "")[:40] if channel == "mcp" else ""
 
-        query = f"""
-        MATCH (n:{_MUTEABLE})
-        WHERE {_BY_ID} AND n.user_id = $user_id AND n.project_id = $project_id
-        SET n._verdict_lock = true
-        REMOVE n._verdict_lock
-        WITH n, ($refuse_muted AND n:Muted) AS refused
-        FOREACH (_ IN CASE WHEN refused THEN [] ELSE [1] END |
-            SET n.triage_status = $status,
-                n.triage_reason = $reason,
-                n.triage_source = 'human',
-                n.triage_verdict_channel = $channel,
-                n.triage_verdict_by = $verdict_by,
-                n.triage_confidence = 1.0,
-                n.triaged_at = datetime())
-        RETURN {_FUNCTIONAL_LABEL} AS label, refused
+        def work(tx):
+            found = self._lock_findings(tx, user_id, project_id, node_id, label)
+            if not found:
+                return {"updated": False, "label": None, "reason": "not_found"}
+            if len(found) > 1:
+                return {"updated": False, "label": None, "reason": "ambiguous",
+                        "labels": sorted(str(f.get("label")) for f in found)}
+            rec = found[0]
+            props = dict(rec.get("props") or {})
+            if refuse_muted and rec.get("muted"):
+                return {"updated": False, "reason": "muted", "label": rec.get("label")}
+            decided = (props.get("triage_source") == "human"
+                       and props.get("triage_status") in ("confirmed", "likely_noise"))
+            if channel == "mcp" and decided and \
+                    (props.get("triage_verdict_channel") or "app") == "app":
+                return {"updated": False, "reason": "decided_in_app", "label": rec.get("label")}
+
+            before = self._summary(props)
+            if status == "unreviewed":
+                tx.run(f"""
+        MATCH (n) WHERE elementId(n) = $eid
+        SET n.triage_status = 'unreviewed'
+        REMOVE {_DECISION_REMOVE}
+        """, eid=rec.get("eid"))
+                for key in ("triage_source", "triage_verdict_channel", "triage_verdict_by",
+                            "triage_verdict_token", "triage_verdict_at", "triage_reason",
+                            "triage_confidence"):
+                    props.pop(key, None)
+                props["triage_status"] = "unreviewed"
+            else:
+                tx.run("""
+        MATCH (n) WHERE elementId(n) = $eid
+        SET n.triage_status = $status,
+            n.triage_reason = $reason,
+            n.triage_source = 'human',
+            n.triage_verdict_channel = $channel,
+            n.triage_verdict_by = $verdict_by,
+            n.triage_verdict_token = CASE WHEN $token = '' THEN NULL ELSE $token END,
+            n.triage_verdict_at = datetime(),
+            n.triage_confidence = 1.0
+        """, eid=rec.get("eid"), status=status, reason=str(reason or "")[:500],
+                       channel=channel, verdict_by=verdict_by, token=token)
+                props.update(triage_status=status, triage_source="human",
+                             triage_verdict_channel=channel, triage_verdict_by=verdict_by,
+                             triage_reason=str(reason or "")[:500])
+
+            blocker = self._rescore_blocker(props)
+            rescored = False
+            if blocker is None and combine is not None:
+                final = self._clean_final(combine(props, bool(rec.get("proven_now"))) or {})
+                tx.run(f"MATCH (n) WHERE elementId(n) = $eid SET {self._FINAL_SET}",
+                       eid=rec.get("eid"), final=final)
+                rescored = True
+            elif status == "likely_noise":
+                # No base to recompute from, but the section moves at once.
+                tx.run("""
+        MATCH (n) WHERE elementId(n) = $eid
+        SET n.triage_state = 'false_positive', n.triage_priority_score = 0.0,
+            n.triage_decided_by = 'person', n.triage_rescored_at = datetime()
+        """, eid=rec.get("eid"))
+            elif props.get("triage_state") == "false_positive":
+                # A legacy false positive released: back to its rules-only score.
+                tx.run("""
+        MATCH (n) WHERE elementId(n) = $eid
+        SET n.triage_state = 'open',
+            n.triage_priority_score = coalesce(n.triage_math_score, n.triage_priority_score),
+            n.triage_decided_by = CASE WHEN $status = 'confirmed' THEN 'person' ELSE 'rules' END,
+            n.triage_rescored_at = datetime()
+        """, eid=rec.get("eid"), status=status)
+
+            row = self._row_by_eid(tx, rec.get("eid")) or {}
+            after = {"score": row.get("triage_priority_score"),
+                     "tier": row.get("triage_tier") or "",
+                     "state": row.get("triage_state") or "open",
+                     "section": row.get("section")}
+            out = {"updated": True, "label": rec.get("label"), "rescored": rescored,
+                   "before": before, "after": after, "row": row}
+            if not rescored:
+                out["rescore_reason"] = blocker or "not_scored"
+            return out
+
+        return self._write_tx(self.driver, work, timeout)
+
+    def write_review(self, user_id: str, project_id: str, node_id: str,
+                     decide, combine, label: str | None = None,
+                     timeout: float = 15.0) -> dict:
+        """Record an external agent's review and rescore the finding, atomically.
+
+        `decide(props, proven_now, updated_at, label)` runs INSIDE the
+        transaction, after the lock, and returns either `{"refused": code}` or
+        `{"review": {...review properties...}, "dropped": [...]}`. Every
+        eligibility rule (a person decided it, it is proven and the review would
+        lower it, the evidence changed, it was never scored, ...) is decided
+        there, from what is on the node NOW, so nothing read beforehand can go
+        stale. A muted finding is `not_found`, indistinguishable from a wrong id.
         """
-        with self.driver.session() as session:
-            record = session.run(
-                query, node_id=node_id, user_id=user_id, project_id=project_id,
-                status=status, reason=str(reason or "")[:500],
-                channel=str(channel or "app")[:32],
-                # Defaults to the tenant, which is who a UI verdict is by.
-                verdict_by=str(verdict_by or user_id)[:128],
-                refuse_muted=bool(refuse_muted),
-            ).single()
+        def work(tx):
+            found = self._lock_findings(tx, user_id, project_id, node_id, label)
+            if not found or all(f.get("muted") for f in found):
+                return {"written": False, "label": None, "reason": "not_found"}
+            found = [f for f in found if not f.get("muted")]
+            if len(found) > 1:
+                return {"written": False, "label": None, "reason": "ambiguous",
+                        "labels": sorted(str(f.get("label")) for f in found)}
+            rec = found[0]
+            props = dict(rec.get("props") or {})
+            outcome = decide(props, bool(rec.get("proven_now")), rec.get("updated_at"), rec.get("label")) or {}
+            if outcome.get("refused"):
+                return {"written": False, "label": rec.get("label"),
+                        "reason": str(outcome["refused"])}
+            review = self._clean_review(outcome.get("review") or {})
+            before = self._summary(props)
+            tx.run("""
+        MATCH (n) WHERE elementId(n) = $eid
+        SET n += $review, n.triage_ai_at = datetime()
+        """, eid=rec.get("eid"), review=review)
+            props.update(review)
 
-        if record is None:
-            return {"updated": False, "label": None}
-        if record.get("refused"):
-            return {"updated": False, "reason": "muted", "label": record["label"]}
-        return {"updated": True, "label": record["label"]}
+            rescored = False
+            blocker = self._rescore_blocker(props)
+            if blocker is None and combine is not None:
+                final = self._clean_final(combine(props, bool(rec.get("proven_now"))) or {})
+                tx.run(f"MATCH (n) WHERE elementId(n) = $eid SET {self._FINAL_SET}",
+                       eid=rec.get("eid"), final=final)
+                rescored = True
+            row = self._row_by_eid(tx, rec.get("eid")) or {}
+            after = {"score": row.get("triage_priority_score"),
+                     "tier": row.get("triage_tier") or "",
+                     "state": row.get("triage_state") or "open",
+                     "section": row.get("section")}
+            out = {"written": True, "label": rec.get("label"), "rescored": rescored,
+                   "before": before, "after": after, "row": row,
+                   "dropped": outcome.get("dropped") or []}
+            if not rescored:
+                out["rescore_reason"] = blocker or "not_scored"
+            return out
+
+        return self._write_tx(self.driver, work, timeout)
+
+
+class TriageWriteBusy(Exception):
+    """A triage write hit its transaction timeout, usually behind a run's publish lock."""

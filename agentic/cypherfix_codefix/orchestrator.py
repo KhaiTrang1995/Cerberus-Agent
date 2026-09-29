@@ -83,6 +83,23 @@ class CodeFixOrchestrator:
                      f"max_iterations={self.state.settings.max_iterations}, "
                      f"require_approval={self.state.settings.require_approval}")
 
+        # Checked before anything is loaded, cloned or built: a fix with no
+        # chosen model has nothing to run on, and no default stands in for it.
+        # Settings that could not be read are not a missing model: saying
+        # `model_required` would send the owner to pick one they already have.
+        if not settings_dict or settings_dict.get("settings_unavailable"):
+            logger.warning("CodeFix refused: the project or its owner's settings could not be loaded")
+            await self.callback.on_error(
+                safe_error("settings_unavailable", codefix=True),
+                recoverable=True, code="settings_unavailable")
+            return
+        if not (self.state.settings.model or "").strip():
+            logger.warning("CodeFix refused: no CodeFix model is set for the project owner")
+            await self.callback.on_error(
+                safe_error("model_required", codefix=True),
+                recoverable=False, code="model_required")
+            return
+
         # Load remediation
         await self.callback.on_phase("cloning_repo", "Loading remediation details...")
         remediation = await self._load_remediation(remediation_id)

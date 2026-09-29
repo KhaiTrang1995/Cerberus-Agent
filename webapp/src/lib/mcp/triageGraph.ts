@@ -188,13 +188,17 @@ export function __resetAgentVersionWarning(): void {
   staleAgentWarned = false
 }
 
-/** `list_findings`, with the row cap pushed down to the agent. */
+/**
+ * `list_findings`, with the row cap and the layer filters pushed down to the
+ * agent, so a filtered total is exact.
+ */
 export async function listTriageFindings(
   userId: string,
   projectId: string,
-  limit: number
+  limit: number,
+  filters: { decided_by?: string; reviewed_via?: string; review_current?: string } = {}
 ): Promise<TriageFindingsResult> {
-  const body = await callTriage('list_findings', userId, projectId, { limit })
+  const body = await callTriage('list_findings', userId, projectId, { limit, ...filters })
   const findings = Array.isArray(body.findings) ? (body.findings as TriageFinding[]) : null
   if (!findings) throw new McpToolError('The findings could not be read.', 'agent_failed')
   return {

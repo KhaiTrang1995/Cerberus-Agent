@@ -13,8 +13,13 @@ import { NextRequest, NextResponse } from 'next/server'
 const mockProviders = vi.fn()
 const mockEffectiveUser = vi.fn()
 
+const mockSettings = vi.fn()
+
 vi.mock('@/lib/prisma', () => ({
-  default: { userLlmProvider: { findMany: (...a: unknown[]) => mockProviders(...a) } },
+  default: {
+    userLlmProvider: { findMany: (...a: unknown[]) => mockProviders(...a) },
+    userSettings: { findUnique: (...a: unknown[]) => mockSettings(...a) },
+  },
 }))
 vi.mock('@/lib/access', () => ({ requireEffectiveUser: () => mockEffectiveUser() }))
 
@@ -31,6 +36,7 @@ function generate(body: Record<string, unknown>) {
 beforeEach(() => {
   vi.clearAllMocks()
   mockProviders.mockResolvedValue([])
+  mockSettings.mockResolvedValue({ featureModels: { preset_generator: 'gpt-4o' } })
   mockEffectiveUser.mockResolvedValue({ userId: 'session-user', isAdmin: false })
 })
 

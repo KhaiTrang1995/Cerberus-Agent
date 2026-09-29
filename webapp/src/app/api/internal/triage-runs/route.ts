@@ -38,6 +38,16 @@ export async function POST(request: NextRequest) {
   const model = typeof body.model === 'string' ? body.model.slice(0, 200) : ''
   const scoreModelVersion =
     typeof body.scoreModelVersion === 'string' ? body.scoreModelVersion.slice(0, 40) : ''
+  // Who started it. Anything but an MCP start is the app, whatever was sent.
+  const trigger = body.trigger === 'mcp' ? 'mcp' : 'app'
+  const tokenId =
+    trigger === 'mcp' && typeof body.tokenId === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(body.tokenId)
+      ? body.tokenId
+      : null
+  const reviewBudget =
+    typeof body.reviewBudget === 'number' && Number.isFinite(body.reviewBudget)
+      ? Math.max(0, Math.round(body.reviewBudget))
+      : null
 
   if (!projectId || !actorUserId) {
     return NextResponse.json(
@@ -65,6 +75,8 @@ export async function POST(request: NextRequest) {
       model,
       scoreModelVersion,
       status: 'running',
+      trigger,
+      tokenId,
     },
     select: { id: true, startedAt: true },
   })
@@ -74,7 +86,10 @@ export async function POST(request: NextRequest) {
     action: 'triage.start',
     targetType: 'project',
     targetId: projectId,
-    after: { runId: run.id, model, scoreModelVersion, effectiveUser: actorUserId },
+    after: {
+      runId: run.id, model, scoreModelVersion, effectiveUser: actorUserId,
+      trigger, tokenId, reviewBudget,
+    },
     source: 'system',
   })
 

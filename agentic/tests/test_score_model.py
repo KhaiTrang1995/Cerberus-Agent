@@ -394,9 +394,15 @@ class TestState(unittest.TestCase):
         self.assertEqual(result.state, sm.STATE_GONE)
 
     def test_a_human_false_positive_leaves_the_ranked_section(self):
+        """Through the decision layer: the base state stays open, and the
+        person's False positive is applied by combine_layers."""
         result = sm.score(finding(triage_status="likely_noise",
                                   triage_source="human"))
-        self.assertEqual(result.state, sm.STATE_FALSE_POSITIVE)
+        self.assertEqual(result.state, sm.STATE_OPEN)
+        final = sm.combine_layers(sm.BaseLayer.from_result(result), None,
+                                  sm.DecisionLayer("likely_noise"), "")
+        self.assertEqual(final.state, sm.STATE_FALSE_POSITIVE)
+        self.assertEqual(final.score, 0.0)
 
 
 # ---------------------------------------------------------------------------
@@ -530,7 +536,6 @@ class TestGuarantees(unittest.TestCase):
             finding(remediated=True, severity="critical", confirmed_exploits=1),
             finding(stale_since="2026-01-01", severity="critical"),
             finding(validation_status="unvalidated", validated_at="2026-01-01"),
-            finding(triage_status="likely_noise", triage_source="ai"),
         ):
             with self.subTest(row=row):
                 result = sm.score(row, sm.ProjectFacts())
@@ -577,6 +582,243 @@ class TestGuarantees(unittest.TestCase):
     def test_8c_the_best_tier_in_a_group_wins(self):
         self.assertEqual(sm.best_tier(["T3", "T1", "T4"]), "T1")
         self.assertEqual(sm.best_tier([]), "T4")
+
+
+# ---------------------------------------------------------------------------
+# The three layers (base, review, decision) and combine_layers
+# ---------------------------------------------------------------------------
+def _reference_tier_for(row, facts, intel, c, l, i, r):
+    """The v3.1 `tier_for`, frozen here, so `tier_rule` is pinned to it."""
+    if sm.is_proven(row, facts):
+        return "T1", "proven"
+    if i <= sm.SEVERITY_IMPACT["info"]:
+        return "T4", "nothing here has any impact"
+    cves = [str(x).upper() for x in sm._as_list(row.get("cve_ids"))]
+    kev = sm._truthy(row.get("cisa_kev")) or sm._best_cve_intel(cves, intel).get("kev")
+    if kev and c >= 0.75 and r >= 0.7:
+        return "T1", "KEV-listed, confidently detected and reachable"
+    if sm._lower(row.get("validation_status")) == "validated":
+        return "T1", "a validated credential"
+    if c >= 0.75 and l >= 0.6 and i >= 0.45 and r >= 0.7:
+        return "T2", "likely real, likely exploited, real impact, reachable"
+    if c >= 0.4 and i >= 0.2:
+        return "T3", "credible, with impact worth planning for"
+    return "T4", "no rule placed this higher"
+
+
+def _base(**kwargs):
+    """A scored open finding's base layer."""
+    fields = dict(source="nuclei", severity="high", matcher_status=True,
+                  extracted_results=["proof"],
+                  cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H")
+    fields.update(kwargs)
+    row = finding(**fields)
+    return sm.BaseLayer.from_result(sm.score(row, sm.ProjectFacts(live_hosts={"h1"})))
+
+
+HASH = "a" * 40
+
+
+def _review(**kwargs):
+    data = dict(verdict="unclear", evidence_hash=HASH, channel="builtin")
+    data.update(kwargs)
+    return sm.ReviewLayer(**data)
+
+
+class TestCombineLayers(unittest.TestCase):
+    SEED = 20260929
+
+    def test_1_identity_no_review_no_decision_is_the_base(self):
+        base = _base()
+        final = sm.combine_layers(base, None, None, HASH)
+        self.assertEqual((final.score, final.tier, final.tier_rule, final.risk, final.state),
+                         (base.score, base.tier, base.tier_rule, base.risk, "open"))
+        self.assertEqual(final.decided_by, "rules")
+
+    def test_2_a_decision_wins_over_any_review(self):
+        base = _base()
+        for verdict in ("real", "doubtful", "false_positive", "unclear"):
+            review = _review(verdict=verdict)
+            with self.subTest(verdict=verdict):
+                noise = sm.combine_layers(base, review, sm.DecisionLayer("likely_noise"), HASH)
+                self.assertEqual((noise.state, noise.score, noise.decided_by),
+                                 ("false_positive", 0.0, "person"))
+                real = sm.combine_layers(base, review, sm.DecisionLayer("confirmed"), HASH)
+                self.assertEqual(real.state, "open")
+                self.assertEqual(real.factors["C"]["value"], 1.0)
+                self.assertEqual(real.decided_by, "person")
+
+    def test_3_a_stale_review_is_ignored(self):
+        base = _base()
+        stale = _review(verdict="false_positive", evidence_hash="b" * 40)
+        self.assertEqual(sm.combine_layers(base, stale, None, HASH).score, base.score)
+        doubtful = _review(verdict="doubtful", evidence_hash="b" * 40)
+        self.assertEqual(sm.combine_layers(base, doubtful, None, HASH).decided_by, "rules")
+
+    def test_4_proof_is_never_lowered_by_a_review(self):
+        proven = _base(confirmed_exploits=1)
+        self.assertTrue(proven.inputs.proven)
+        for review in (_review(verdict="false_positive"), _review(verdict="doubtful"),
+                       _review(disputed_facts=[{"fact": "reachable"}, {"fact": "public_poc"}]),
+                       _review(impact_multiplier=0.5, impact_quote="quoted")):
+            with self.subTest(review=review):
+                final = sm.combine_layers(proven, review, None, HASH)
+                self.assertEqual(final.tier, "T1")
+                self.assertGreaterEqual(final.score, proven.score)
+
+    def test_4b_proof_read_live_protects_a_finding_proven_after_the_run(self):
+        base = _base()
+        self.assertFalse(base.inputs.proven)
+        final = sm.combine_layers(base, _review(verdict="false_positive"), None, HASH,
+                                  proven_now=True)
+        self.assertEqual(final.state, "open")
+        self.assertEqual(final.tier, "T1")
+
+    def test_5_an_unquoted_multiplier_does_nothing(self):
+        base = _base()
+        final = sm.combine_layers(base, _review(impact_multiplier=0.5, impact_quote=""),
+                                  None, HASH)
+        self.assertEqual(final.score, base.score)
+        quoted = sm.combine_layers(base, _review(impact_multiplier=0.5, impact_quote="q"),
+                                   None, HASH)
+        self.assertLess(quoted.score, base.score)
+        self.assertEqual(quoted.decided_by, "review")
+
+    def test_6_combining_is_idempotent(self):
+        rng = random.Random(self.SEED)
+        for _ in range(200):
+            base = _base(severity=rng.choice(["low", "medium", "high", "critical"]))
+            review = rng.choice([None, _review(verdict=rng.choice(sm.REVIEW_VERDICTS),
+                                               impact_multiplier=rng.uniform(0.5, 1.5),
+                                               impact_quote=rng.choice(["", "q"]))])
+            decision = rng.choice([None, sm.DecisionLayer("confirmed"),
+                                   sm.DecisionLayer("likely_noise")])
+            self.assertEqual(sm.combine_layers(base, review, decision, HASH),
+                             sm.combine_layers(base, review, decision, HASH))
+
+    def test_7_tier_parity_with_the_v31_rules(self):
+        rng = random.Random(self.SEED + 1)
+        for _ in range(600):
+            row = finding(
+                source=rng.choice(list(sm.CONFIDENCE_BY_SOURCE)),
+                severity=rng.choice(["info", "low", "medium", "high", "critical"]),
+                cisa_kev=rng.choice([True, False, None]),
+                cve_ids=rng.choice([[], ["CVE-2021-1"], ["CVE-2021-2"]]),
+                confirmed_exploits=rng.choice([0, 0, 0, 1]),
+                validation_status=rng.choice([None, "validated", "unvalidated"]),
+                label=rng.choice(["Vulnerability", "ExploitGvm", "Secret"]),
+            )
+            facts = sm.ProjectFacts(proven_cve_ids=rng.choice([set(), {"CVE-2021-2"}]))
+            intel = rng.choice([{}, {"CVE-2021-1": {"kev": True}}])
+            c, l, i, r = (rng.random() for _ in range(4))
+            with self.subTest(row=row):
+                self.assertEqual(
+                    sm.tier_rule(sm.tier_inputs(row, facts, intel), c, l, i, r),
+                    _reference_tier_for(row, facts, intel, c, l, i, r))
+                self.assertEqual(sm.tier_for(row, facts, intel, c, l, i, r),
+                                 _reference_tier_for(row, facts, intel, c, l, i, r))
+
+    def test_8_only_combine_layers_produces_final_values(self):
+        """Nobody writes a score: outside the two publish/rescore statements in
+        the triage mixin, no graph write sets the final properties."""
+        import re
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        allowed = {os.path.join("graph_db", "mixins", "recon", "triage_mixin.py")}
+        pattern = re.compile(
+            r"\bSET\b[^;]*?\b[A-Za-z_]\w*\.(triage_priority_score|triage_tier|triage_state)\s*=(?!=)",
+            re.S)
+        offenders = []
+        for top in ("graph_db", "agentic"):
+            root = os.path.join(repo, top)
+            if not os.path.isdir(root):
+                continue
+            for dirpath, dirnames, files in os.walk(root):
+                dirnames[:] = [d for d in dirnames if d not in ("tests", "__pycache__", "node_modules")]
+                for name in files:
+                    if not name.endswith(".py"):
+                        continue
+                    path = os.path.join(dirpath, name)
+                    rel = os.path.relpath(path, repo)
+                    if rel in allowed or rel.replace("agentic" + os.sep, "", 1) in allowed:
+                        continue
+                    with open(path, encoding="utf-8", errors="replace") as fh:
+                        text = fh.read()
+                    if pattern.search(text):
+                        offenders.append(rel)
+        if not os.path.isdir(os.path.join(repo, "graph_db")):
+            self.skipTest("graph_db is not beside agentic in this image")
+        self.assertEqual(offenders, [])
+
+    def test_a_resolved_base_wins_over_everything(self):
+        row = finding(remediated=True, severity="critical")
+        base = sm.BaseLayer.from_result(sm.score(row))
+        final = sm.combine_layers(base, _review(verdict="real"),
+                                  sm.DecisionLayer("confirmed"), HASH)
+        self.assertEqual((final.state, final.score, final.tier, final.decided_by),
+                         ("fixed", 0.0, "T4", "rules"))
+
+    def test_a_valid_false_positive_review_leaves_the_ranking(self):
+        final = sm.combine_layers(_base(), _review(verdict="false_positive"), None, HASH)
+        self.assertEqual((final.state, final.score, final.tier, final.decided_by),
+                         ("false_positive", 0.0, "T4", "review"))
+        mcp = sm.combine_layers(_base(), _review(verdict="false_positive", channel="mcp"),
+                                None, HASH)
+        self.assertIn("external agent", mcp.tier_rule)
+
+    def test_a_person_s_real_overrules_a_false_positive_review(self):
+        final = sm.combine_layers(_base(), _review(verdict="false_positive"),
+                                  sm.DecisionLayer("confirmed"), HASH)
+        self.assertEqual(final.state, "open")
+        self.assertEqual(final.decided_by, "person")
+
+    def test_real_raises_the_score(self):
+        """B7: a person's Real used to change nothing but a detector prior."""
+        row = finding(source="shodan", severity="high",
+                      cvss_vector="CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H")
+        base = sm.BaseLayer.from_result(sm.score(row, sm.ProjectFacts(live_hosts={"h1"})))
+        self.assertLess(base.factors["C"]["value"], 1.0)
+        final = sm.combine_layers(base, None, sm.DecisionLayer("confirmed"), HASH)
+        self.assertGreater(final.score, base.score)
+
+    def test_doubtful_drops_confidence_and_can_drop_the_tier(self):
+        base = _base()
+        final = sm.combine_layers(base, _review(verdict="doubtful"), None, HASH)
+        self.assertEqual(final.factors["C"]["value"], 0.25)
+        self.assertLess(final.score, base.score)
+
+    def test_disputing_reach_never_raises_it(self):
+        row = finding(source="nuclei", severity="high",
+                      cvss_vector="CVSS:3.1/AV:L/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H")
+        base = sm.BaseLayer.from_result(sm.score(row))
+        self.assertLess(base.factors["R"]["value"], sm.REACH_UNKNOWN)
+        final = sm.combine_layers(base, _review(disputed_facts=[{"fact": "reachable"}]),
+                                  None, HASH)
+        self.assertEqual(final.factors["R"]["value"], base.factors["R"]["value"])
+
+    def test_unknown_decision_values_are_no_decision(self):
+        base = _base()
+        for status in ("unreviewed", "", None, "needs_verification"):
+            with self.subTest(status=status):
+                final = sm.combine_layers(base, None, sm.DecisionLayer(status), HASH)
+                self.assertEqual(final.decided_by, "rules")
+
+    def test_a_legacy_ai_false_positive_is_open_at_the_base(self):
+        """False positives are a combine outcome now, never a base state."""
+        state, _ = sm.finding_state(
+            finding(triage_status="likely_noise", triage_source="ai"), sm.ProjectFacts())
+        self.assertEqual(state, sm.STATE_OPEN)
+        state, _ = sm.finding_state(
+            finding(triage_status="likely_noise", triage_source="human"), sm.ProjectFacts())
+        self.assertEqual(state, sm.STATE_OPEN)
+
+    def test_tier_inputs_round_trip(self):
+        inputs = sm.TierInputs(proven=True, kev=False)
+        self.assertEqual(sm.TierInputs.from_dict(inputs.as_dict()), inputs)
+        self.assertEqual(sm.TierInputs.from_dict(None), sm.TierInputs())
+
+    def test_score_returns_its_tier_inputs(self):
+        result = sm.score(finding(cisa_kev=True, confirmed_exploits=1))
+        self.assertEqual(result.tier_inputs, sm.TierInputs(proven=True, kev=True))
 
 
 # ---------------------------------------------------------------------------

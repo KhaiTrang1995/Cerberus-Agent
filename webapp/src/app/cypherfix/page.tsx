@@ -22,6 +22,12 @@ export default function CypherFixPage() {
   const triage = useCypherFixTriageWS({
     userId: userId || '',
     projectId: projectId || '',
+    enabled: !!projectId && !!userId,
+    // Connect on open, as the Priority Board does: the server re-attaches a
+    // socket to a run already going, which is the only way this page learns of
+    // a run started on the board or over MCP. Without it, Run during such a
+    // run hit the preflight's "already in progress" and never connected (U11).
+    autoConnect: true,
     onComplete: () => {
       refetchRemediations()
     },
@@ -32,9 +38,15 @@ export default function CypherFixPage() {
     triage.startTriage()
   }, [triage])
 
+  const handleOpenTriageProgress = useCallback(() => setShowTriageProgress(true), [])
+
   const handleCloseTriageProgress = useCallback(() => {
     setShowTriageProgress(false)
-    triage.disconnect()
+    // Closing the panel is not "stop the run", and dropping the socket
+    // mid-run would lose the progress this page is about to want again.
+    if (triage.status !== 'running' && triage.status !== 'connecting') {
+      triage.disconnect()
+    }
     if (triage.status === 'completed') {
       refetchRemediations()
     }
@@ -65,6 +77,7 @@ export default function CypherFixPage() {
         triage={triage}
         showTriageProgress={showTriageProgress}
         onStartTriage={handleStartTriage}
+        onOpenTriageProgress={handleOpenTriageProgress}
         onCloseTriageProgress={handleCloseTriageProgress}
       />
     </div>

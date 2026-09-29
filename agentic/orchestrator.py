@@ -37,6 +37,7 @@ from orchestrator_helpers import (
 )
 from orchestrator_helpers.llm_setup import setup_llm, apply_project_settings
 from agent_context import current_llm
+from prompt_safety import fence_node_context
 from orchestrator_helpers.streaming import clear_stale_streaming_state, emit_streaming_events
 from orchestrator_helpers.nodes import (
     initialize_node,
@@ -284,7 +285,7 @@ class AgentOrchestrator:
                 self._tradecraft_manager.set_resources(tc_resources)
                 self._tradecraft_manager.set_github_token(github_token)
                 self._tradecraft_manager.llm = self.llm
-                self._tradecraft_manager.section_picker_llm = self._build_section_picker_llm() or self.llm
+                self._tradecraft_manager.section_picker_llm = self._build_section_picker_llm()
                 # tier2_threshold_bytes / fetch_timeout / default_ttl are read per
                 # session at use-time from the task-isolated TRADECRAFT_* settings.
                 # Swap this session's per-resource catalog into the prompt (overlay).
@@ -329,35 +330,26 @@ class AgentOrchestrator:
             logger.warning(f"User MCP manifest reload check failed: {e}")
 
     def _build_section_picker_llm(self):
-        """Instantiate a Haiku LLM for the tradecraft section picker.
+        """This session's "Tradecraft section picker" LLM, or None.
 
-        Returns None on any failure -> the manager will fall back to self.llm.
+        Read from the task-isolated USER_SETTINGS / USER_LLM_PROVIDERS (never
+        the shared `self._user_settings`, which holds whichever project loaded
+        last). None means no model is set or it cannot be built, and the picker
+        then chooses the page by text match.
         """
+        from feature_models import feature_model
+        user_settings = get_setting('USER_SETTINGS', {}) or {}
+        model = feature_model(user_settings, 'tradecraft_section_picker')
+        if not model:
+            return None
         try:
-            picker_model = get_setting(
-                'TRADECRAFT_SECTION_PICKER_MODEL', 'claude-haiku-4-5-20251001'
-            )
-            from langchain_anthropic import ChatAnthropic
-            from orchestrator_helpers.llm_setup import (
-                _resolve_provider_key,
-                _anthropic_supports_temperature,
-            )
-            from project_settings import get_settings
-            user_providers = get_settings().get('USER_LLM_PROVIDERS') or []
-            anthropic_p = _resolve_provider_key(user_providers, 'anthropic')
-            api_key = (anthropic_p or {}).get('apiKey')
-            if not api_key:
-                return None
-            picker_kwargs = dict(
-                model=picker_model,
-                anthropic_api_key=api_key,
-                max_tokens=64,
-            )
-            if _anthropic_supports_temperature(picker_model):
-                picker_kwargs["temperature"] = 0
-            return ChatAnthropic(**picker_kwargs)
-        except Exception as e:
-            logger.debug(f"Section picker LLM build skipped: {e}")
+            from llm_builder import build_llm_from_providers
+            providers = get_setting('USER_LLM_PROVIDERS', []) or []
+            return build_llm_from_providers(model, providers)
+        except Exception as e:                                    # noqa: BLE001
+            logger.warning(
+                f"Section picker model {model} could not be built "
+                f"({e.__class__.__name__}); pages are picked by text match")
             return None
 
     def _setup_llm(self) -> None:
@@ -1008,7 +1000,8 @@ class AgentOrchestrator:
         try:
             config = create_config(user_id, project_id, session_id)
             input_data = {
-                "messages": [HumanMessage(content=question)]
+                # A node-scoped question carries scanner text: fenced (B20).
+                "messages": [HumanMessage(content=fence_node_context(question))]
             }
 
             final_state = await self.graph.ainvoke(input_data, config)
@@ -1121,7 +1114,8 @@ class AgentOrchestrator:
         try:
             config = create_config(user_id, project_id, session_id)
             input_data = clear_stale_streaming_state({
-                "messages": [HumanMessage(content=question)]
+                # A node-scoped question carries scanner text: fenced (B20).
+                "messages": [HumanMessage(content=fence_node_context(question))]
             })
 
             # Stream graph execution

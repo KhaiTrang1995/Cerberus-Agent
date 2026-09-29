@@ -161,6 +161,11 @@ async def generate_report_narratives(
         logger.error(f"Report summarizer: invalid JSON from LLM: {type(e).__name__}: {e}")
         return _empty_narratives()
     except Exception as e:
+        # A refused key or unknown model is the person's to fix, so it reaches
+        # the endpoint and opens the model picker; empty narratives would hide it.
+        from llm_builder import is_model_unavailable_error
+        if is_model_unavailable_error(e):
+            raise
         logger.error(f"Report summarizer error: {type(e).__name__}: {e}")
         return _empty_narratives()
 

@@ -102,11 +102,18 @@ class TestTheHandlerWiresTheLockOnBothExitPaths(unittest.TestCase):
 
     def test_a_refused_claim_does_not_start_an_orchestrator(self):
         src = self._handler_source()
-        claim = src.index("_claim_triage_slot")
+        claim = src.index("if not _claim_triage_slot(project_id):")
         orchestrator = src.index("orchestrator = TriageOrchestrator", claim)
         between = src[claim:orchestrator]
-        self.assertIn("continue", between,
+        self.assertIn("return None, False, STILL_FINISHING", between,
                       "a refused claim must skip the run, not fall through to it")
+
+    def test_a_socket_stop_does_not_free_the_slot_before_the_run_finishes(self):
+        """C19: freeing it in the stop handler let a new start race the old
+        run's `finish`, and the webapp answered 'already in progress'."""
+        src = self._handler_source()
+        stop = src[src.index('elif msg_type == "stop"'):src.index("    except WebSocketDisconnect")]
+        self.assertNotIn("_release_triage_slot(", stop)
 
     def test_the_run_releases_its_own_slot(self):
         # The run outlives the socket, so its own `finally` is the release that
@@ -139,11 +146,23 @@ class TestTheRunOutlivesTheSocket(unittest.TestCase):
     def test_a_second_start_attaches_instead_of_starting_a_second_run(self):
         # Single-flight is still enforced -- the run is reused, not duplicated.
         src = self._handler_source()
-        start = src[src.index('elif msg_type == "start_triage"'):
+        start = src[src.index("def start_detached_run("):
                     src.index("orchestrator = TriageOrchestrator")]
         self.assertIn("_active_run(", start)
-        self.assertIn("running.attach(websocket)", start)
-        self.assertIn("continue", start)
+        self.assertIn("running.attach(socket)", start)
+        self.assertIn("return running, True, None", start)
+        handler = src[src.index('elif msg_type == "start_triage"'):
+                      src.index('elif msg_type == "stop"')]
+        self.assertIn("start_detached_run(", handler)
+        self.assertIn("await run.replay(websocket)", handler)
+
+    def test_the_ticket_s_real_actor_reaches_the_run(self):
+        """B13: the run recorded no real actor while an admin acted as the owner."""
+        src = self._handler_source()
+        handler = src[src.index('elif msg_type == "start_triage"'):
+                      src.index('elif msg_type == "stop"')]
+        self.assertIn('_claims.get("act")', handler)
+        self.assertIn("real_actor_user_id=", handler)
 
     def test_a_reconnecting_tab_is_replayed(self):
         src = self._handler_source()
@@ -183,6 +202,89 @@ class TestTheRunRecordsWhatAReconnectingTabMissed(unittest.TestCase):
 
     def test_a_run_with_no_task_is_not_active(self):
         self.assertFalse(self.run.is_active)
+
+
+
+class TestStartDetachedRun(unittest.IsolatedAsyncioTestCase):
+    """The one start path, for a tab and for an MCP agent."""
+
+    def setUp(self):
+        from cypherfix_triage import websocket_handler as wh
+        self.wh = wh
+        wh._RUNS.clear()
+        _TRIAGE_IN_FLIGHT.clear()
+        self.addCleanup(wh._RUNS.clear)
+        self.addCleanup(_TRIAGE_IN_FLIGHT.clear)
+        self.built = []
+        self.gate = None
+
+        test = self
+
+        class FakeOrchestrator:
+            def __init__(self, **kwargs):
+                test.built.append(kwargs)
+                self.callback = kwargs["callback"]
+
+            async def run(self, state):
+                await self.callback.on_authorized("run-1")
+                if test.gate is not None:
+                    await test.gate.wait()
+
+            async def cleanup(self):
+                pass
+
+        import unittest.mock as mock
+        patcher = mock.patch.object(wh, "TriageOrchestrator", FakeOrchestrator)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    async def test_a_start_builds_one_run_with_its_trigger_and_budget(self):
+        import asyncio
+        run, attached, refusal = self.wh.start_detached_run(
+            "u1", P1, real_actor_user_id="admin", trigger="mcp", token_id="tok1",
+            max_review_budget=1000)
+        self.assertIsNone(refusal)
+        self.assertFalse(attached)
+        await asyncio.wait_for(run.authorized.wait(), 2)
+        self.assertEqual(run.run_id, "run-1")
+        kwargs = self.built[0]
+        self.assertEqual((kwargs["trigger"], kwargs["token_id"], kwargs["max_review_budget"],
+                          kwargs["real_actor_user_id"]), ("mcp", "tok1", 1000, "admin"))
+        await run.task
+
+    async def test_a_second_start_attaches(self):
+        import asyncio
+        self.gate = asyncio.Event()
+        first, _, _ = self.wh.start_detached_run("u1", P1)
+        second, attached, refusal = self.wh.start_detached_run("u1", P1)
+        self.assertIs(second, first)
+        self.assertTrue(attached)
+        self.assertEqual(len(self.built), 1)
+        self.gate.set()
+        await first.task
+
+    async def test_the_slot_is_released_only_when_the_run_ends(self):
+        import asyncio
+        self.gate = asyncio.Event()
+        run, _, _ = self.wh.start_detached_run("u1", P1)
+        self.wh._RUNS.pop(P1)                     # what a Stop does
+        _, _, refusal = self.wh.start_detached_run("u1", P1)
+        self.assertEqual(refusal, self.wh.STILL_FINISHING)
+        self.gate.set()
+        await run.task
+        _, _, refusal = self.wh.start_detached_run("u1", P1)
+        self.assertIsNone(refusal)
+
+    async def test_a_stop_while_publishing_is_refused(self):
+        import asyncio
+        self.gate = asyncio.Event()
+        run, _, _ = self.wh.start_detached_run("u1", P1)
+        run.record("triage_phase", {"phase": "publishing", "progress": 92})
+        result = self.wh.stop_project_run(P1)
+        self.assertEqual(result["reason"], "publishing")
+        self.assertFalse(run.task.cancelled())
+        self.gate.set()
+        await run.task
 
 
 if __name__ == "__main__":

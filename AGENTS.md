@@ -15,8 +15,10 @@ When performing these actions, ALWAYS invoke the corresponding skill FIRST:
 | ------ | ----- |
 | Adding a node label, relationship, or property to the graph schema | `graph-db-writes` |
 | Adding or editing a test file in any section | `redamon-testing` |
+| Changing how a triage score, review or verdict is computed or written | `priority-board-triage` |
 | Changing test tiers, conftest.py, pytest.ini, or the runner in redamon.sh | `redamon-testing` |
 | Checking or ratcheting a coverage floor | `redamon-testing` |
+| Editing the Priority Board, the triage graph mixin, or the MCP triage tools | `priority-board-triage` |
 | Investigating a red, skipped or xfailed test | `redamon-testing` |
 | Writing to the Neo4j graph or editing a graph_db mixin | `graph-db-writes` |
 
@@ -153,3 +155,4 @@ Maintained by hand (not touched by `sync.sh`). One row per skill.
 | `add-community-skill` | Importable .md attack workflow: real tool names only, no rebuild, stay classifiable, per-user | [SKILL.md](skills/add-community-skill/SKILL.md) |
 | `add-partial-recon` | Partial-recon support: graph-sourced inputs, MERGE dedup, the input-node modal, mirror the right ref impl | [SKILL.md](skills/add-partial-recon/SKILL.md) |
 | `mcp-server-tools` | Inbound MCP server tools: regenerate the wiki API reference, spec-accurate destructiveHint, runnable example calls | [SKILL.md](skills/mcp-server-tools/SKILL.md) |
+| `priority-board-triage` | Priority Board layers: nobody writes a score (combine_layers only), one layer per writer, never updated_at, legacy-tolerant readers | [SKILL.md](skills/priority-board-triage/SKILL.md) |

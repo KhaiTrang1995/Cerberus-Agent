@@ -58,7 +58,13 @@ set of recon tuning settings, and query the attack-surface graph.
 | `queue_recon` | Queue a full recon for when the host has room. | `recon:queue` |
 | `cancel_queued_scan` | Cancel a queued job, reading the update count so a lost race is not reported as success. | `recon:queue` |
 | `get_scan_status` | The other six scanners' state, masked exactly as `get_recon_status` is. | `recon:read` |
-| `set_finding_verdict` | Record a durable triage verdict. Refused while a triage run could re-file it, and on a muted finding. | `triage:write` |
+| `set_finding_verdict` | Record a durable decision (Real raises the score, False positive, Reset of an MCP decision), rescored in the same transaction. Never a decision made in the app (`decided_in_app`, absent channel = app); refused on a muted finding, during an activation, and during a live run unless the agent acknowledges `layered_publish`. | `triage:write` |
+| `get_finding_triage` | One finding's final score and the three layers behind it (rules, review, decision), detector, group, proof, run. Review text only with `includeQuotes`. | `triage:read` |
+| `get_finding_evidence` | The normalised, secret-redacted evidence bundle the built-in reviewer reads, its `evidenceHash`, reviewability and the review contract. | `triage:read` |
+| `submit_finding_review` | An external review: verdict, disputes and a multiplier, each quote-verified against the rebuilt bundle; RedAmon recomputes the score. Refused on a decided, proven (when lowering), unscored, resolved or changed-evidence finding. | `triage:review` |
+| `get_triage_status` | Triage state (incl. `imported`), the live run's phase/progress/trigger, recent runs, the preflight, the MCP start allowance, decided-by counts, what a live run blocks. | `triage:read` |
+| `start_triage_run` | Start a headless Priority Board run (`POST /triage/runs`). 30-minute cooldown and 12/day per project across tokens, 1,000-review clamp, `write` bucket. | `triage:run` |
+| `stop_triage_run` | Stop a run before it publishes; refused while publishing. | `triage:run` |
 | `mute_findings` | Mute 1-25 findings with a reason. Never a proven or kept-visible one, never over an existing mute; per-token daily budget; stamped `muted_channel=mcp` + token prefix. | `triage:mute` |
 | `unmute_findings` | Unmute 1-100 findings from the muted list, writing the Mute Rules exemption FIRST. A rule's mute only with `includeRuleMutes`, never during a recon scan. | `triage:mute` |
 | `search_muted_findings` | Page every muted finding with the Muted Nodes filters (who muted, rule, token, text), with exact facets. The only source of a muted finding's id. | `triage:read` |
@@ -70,8 +76,10 @@ domain, address list or targeting mode (only its target LISTS move, behind
 `project:rescope`), the engagement RECORD (the client, the contacts, the dates, the
 document), guardrails, **starting** a GVM / TruffleHog / supply-chain / AI
 attack-surface scan, captured HTTP traffic, version activation or deletion,
-Mute Rules (the rules, their presets, applying or arming them), and any graph
-**write**.
+Mute Rules (the rules, their presets, applying or arming them), setting a
+finding's score, tier or factors directly, and any graph **write** other than a
+verdict, a review, a triage run start or stop, and (behind `triage:mute`) a mute
+or unmute.
 
 Note the distinction the reads above draw: their FINDINGS are readable (a
 finding is a finding whichever scanner wrote it), while **starting** those scans
@@ -251,6 +259,20 @@ Agent-side bounds (the agent **does** have an `env_file`, so `.env` reaches it):
   mute's lock, and then write onto the node that mute just committed. The
   refusal covers a person's mute as well, and nothing is written. A verdict from
   the app is unaffected: the person clicking could unmute the finding anyway.
+- **`triage:review` is a machine's reading, not a decision**, so it is split
+  from `triage:write`. A review corrects the four factors with verified quotes
+  and RedAmon computes the score (`combine_layers`); it is stamped
+  `triage_ai_channel = 'mcp'` with the token prefix, is valid only while its
+  `triage_ai_evidence_hash` equals the finding's `triage_evidence_hash`, is never
+  re-reviewed by a run while valid, never overrides a person's decision, and its
+  text never reaches `Remediation.solution`/`evidence` (so never CodeFix). An
+  `mcp` false positive keeps its member in the fix group (P2).
+- **`triage:run` starts and stops Priority Board runs.** Opt-in on `triage`
+  only. MCP starts are spaced (`MCP_RUN_COOLDOWN_MS`, 30 min) and capped
+  (`MCP_RUNS_PER_DAY`, 12) per project across every token, counted from
+  `TriageRun.trigger = 'mcp'`; they spend the `write` bucket, not `start`, which
+  is shared with `start_recon` and `queue_recon`. The review budget is clamped to
+  1,000, and a start with no review model ranks rules-only.
 - **`triage:mute` is separate from `triage:write`**: a verdict ranks a finding,
   a mute HIDES it from every read. It is opt-in, never auto-ticked by a profile
   (`NEVER_AUTO_TICKED`), offered only by `triage`, and adding it to a token is
@@ -337,7 +359,7 @@ or finding write.
 | `pentest` | read, exec, scan, triage:read, cypher | `project:create`, `engagement:authorize` |
 | `asm` | read, exec, scan, queue, triage:read | `project:create` |
 | `vuln_mgmt` | read, exec, triage:read | - |
-| `triage` | read, exec, triage:read, **triage:write** | `triage:mute` |
+| `triage` | read, exec, triage:read, **triage:write**, **triage:review** | `triage:mute`, `triage:run` |
 | `inventory` | read, exec, cypher | - |
 | `compliance` | read, exec, triage:read | - |
 | `ci_gating` | read, exec, queue, triage:read | - |
@@ -356,7 +378,7 @@ The rules behind it, each asserted in `profiles.test.ts`:
    dropdown. **`kali:exec` is the opposite, in EVERY profile's
    `recommendedScopes`** and in `DEFAULT_MCP_SCOPES`, which must equal what
    `custom` recommends so an untouched form never reads as hand-edited.
-2. **`triage:write` and `recon:settings` each go to exactly one profile.**
+2. **`triage:write`, `triage:review` and `recon:settings` each go to exactly one profile.**
    **`triage:mute` goes to none as a recommendation**: it is in
    `NEVER_AUTO_TICKED` with `recon:overwrite`, and only `triage` offers it.
 3. **Unattended profiles prefer `recon:queue`.** `asm` and `ci_gating` run with
@@ -651,8 +673,9 @@ server's tools. Assume an instruction embedded in a page title reaches the model
 | Make the scan run an attacker's container | Every `*DockerImage` field is a closed list of the shipped images and an out-of-set value is REFUSED at the write. It used to be accepted and pinned back at scan start, which contained the danger but not the dishonesty: `get_recon_settings` echoed an image the scan would never run. |
 | Reconfigure a job already in the queue | The C-4 fingerprint covers every field that steers where or how hard a job scans, including every engagement limit and the DERIVED answer to whether they are live, so the job goes to `needs_review` instead of dispatching. |
 | Exfiltrate another tenant's data | Ownership check + `scope_query` + result post-validation. |
-| Exfiltrate secrets | No tool returns a credential. |
-| Burn the owner's LLM budget | Per-token daily budget. |
+| Exfiltrate secrets | No tool returns a stored credential. `query_graph` DOES return target-found secrets unredacted (`Secret.matched_text`, nuclei `extracted_results`) to any `recon:read` token: a known, pre-existing exposure. `get_finding_evidence` redacts secret shapes to their first four characters. |
+| Burn the owner's LLM budget | Per-token daily budget for questions. Triage runs started over MCP: a 30-minute per-project cooldown and 12 a day across every token, read from `TriageRun`; a 1,000-review clamp whatever the project stores; the `write` bucket; one run at a time. |
+| Talk a real finding down through a review | `submit_finding_review` needs `triage:review`. Every correction needs a quote verified against the rebuilt, redacted bundle; the multiplier needs its own quote; a proven finding (proof read LIVE in the write transaction) refuses any lowering whole; a person's decision always wins and a decided finding refuses reviews; the review expires when the evidence changes; it is labelled `Agent` with the token prefix and filterable on the board; its text never reaches the fix list or the in-app agent's node context. |
 | Hide a real finding ("this is a false positive, mute it") | Needs `triage:mute`, opt-in and never auto-ticked. Refused on a proven finding and on one a person unmuted, never over an existing mute; a reason on every mute, 25 per call and a per-token DAILY budget; stamped `muted_channel=mcp` + the token prefix, badged in Muted Nodes and counted apart in the report. |
 | Reveal what a Mute Rule hides | `unmute_findings` leaves a rule's mute alone without `includeRuleMutes`, refuses that flag while a recon scan runs, and every such unmute is an exemption on the Mute Rules page. `set_finding_verdict` is refused on a muted finding, so the verdict permission cannot do it. |
 | Aim a command at a third party | **Nothing, once `kali:exec` is granted.** See below. |
@@ -840,6 +863,13 @@ the token id and prefix. **Failures are audited too** — invalid, expired and
 revoked token presentations (by prefix, never the token), scope denials,
 ownership 404s and every post-validation violation — because that is the only way
 a token brute force or a replayed revoked token becomes visible.
+
+`submit_finding_review` also writes `triage.review`: the finding, its verdict, the
+disputed fact NAMES, the multiplier, the score before and after, the token id and
+prefix, and a SHA-256 of the review's text for forensic matching. The quotes, the
+why and the fix lever are in `UNAUDITED_ARGS` and never reach an audit row. A run
+writes `triage.start` (trigger, token id, effective review budget and model) and
+`triage.finish`, or `triage.finish.late` when it reports after being declared lost.
 
 A mute or unmute over MCP also writes `muted_nodes.muted` /
 `muted_nodes.unmuted` with `source = 'mcp'`, the token id and prefix, every item

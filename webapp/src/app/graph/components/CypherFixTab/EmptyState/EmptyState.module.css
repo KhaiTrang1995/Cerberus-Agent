@@ -87,3 +87,9 @@
 .startButton:hover {
   opacity: 0.9;
 }
+
+.bannerSlot {
+  align-self: stretch;
+  margin-bottom: var(--space-4);
+  text-align: left;
+}

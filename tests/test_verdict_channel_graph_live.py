@@ -143,17 +143,38 @@ class LiveVerdictChannelCase(unittest.TestCase):
         self.assertEqual(p["triage_verdict_channel"], "app")
         self.assertEqual(p["triage_verdict_by"], self.uid)
 
-    def test_a_later_verdict_overwrites_the_channel(self):
-        # A finding judged in the app and then re-judged over MCP must not keep
-        # claiming it was judged in the app.
+    def test_mcp_cannot_reset_a_decision_made_in_the_app(self):
+        # A finding a person judged in the app is theirs: an agent holding
+        # their token may neither change nor reset it (plan 2.4, C7).
         self.client.set_human_verdict(self.uid, self.pid, f"v-{self.run_id}", "confirmed", "")
-        self.client.set_human_verdict(
+        out = self.client.set_human_verdict(
             self.uid, self.pid, f"v-{self.run_id}", "unreviewed", "", channel="mcp",
             verdict_by="bob")
+        self.assertEqual(out["reason"], "decided_in_app")
         p = self._props(f"v-{self.run_id}")
-        self.assertEqual(p["triage_verdict_channel"], "mcp")
-        self.assertEqual(p["triage_verdict_by"], "bob")
+        self.assertEqual(p["triage_verdict_channel"], "app")
+        self.assertEqual(p["triage_status"], "confirmed")
+
+    def test_mcp_may_change_and_reset_its_own_decision(self):
+        target = f"v-{self.run_id}"
+        self.client.set_human_verdict(self.uid, self.pid, target, "confirmed", "", channel="mcp",
+                                      token="rdmn_mcp_0a1b2c3d")
+        self.assertEqual(self._props(target)["triage_verdict_token"], "rdmn_mcp_0a1b2c3d")
+        out = self.client.set_human_verdict(self.uid, self.pid, target, "unreviewed", "",
+                                            channel="mcp")
+        self.assertTrue(out["updated"])
+        p = self._props(target)
         self.assertEqual(p["triage_status"], "unreviewed")
+        for key in ("triage_source", "triage_verdict_channel", "triage_verdict_token"):
+            self.assertNotIn(key, p)
+
+    def test_the_app_may_change_a_decision_made_over_mcp(self):
+        target = f"v-{self.run_id}"
+        self.client.set_human_verdict(self.uid, self.pid, target, "confirmed", "", channel="mcp")
+        self.client.set_human_verdict(self.uid, self.pid, target, "likely_noise", "no")
+        p = self._props(target)
+        self.assertEqual((p["triage_verdict_channel"], p["triage_status"]), ("app", "likely_noise"))
+        self.assertNotIn("triage_verdict_token", p)
 
     def test_a_verdict_cannot_reach_another_tenant(self):
         out = self.client.set_human_verdict(
@@ -192,7 +213,8 @@ class LiveVerdictChannelCase(unittest.TestCase):
         out = self.client.set_human_verdict(
             self.uid, self.pid, f"v-{self.run_id}", "confirmed", "", channel="mcp",
             refuse_muted=True)
-        self.assertEqual(out, {"updated": True, "label": "Vulnerability"})
+        self.assertTrue(out["updated"])
+        self.assertEqual(out["label"], "Vulnerability")
         self.assertEqual(self._props(f"v-{self.run_id}")["triage_source"], "human")
 
     def test_a_mute_committing_mid_verdict_is_seen_not_overwritten(self):
@@ -223,21 +245,22 @@ class LiveVerdictChannelCase(unittest.TestCase):
                                         "label": "Vulnerability"})
         p = self._props(target)
         self.assertNotIn("triage_source", p)
-        self.assertNotIn("_verdict_lock", p)
+        self.assertNotIn("_triage_lock", p)
 
     def test_the_lock_leaves_nothing_behind(self):
         self.client.set_human_verdict(self.uid, self.pid, f"v-{self.run_id}", "confirmed", "")
         self.client.set_human_verdict(self.uid, self.pid, f"m-{self.run_id}-2", "confirmed", "",
                                       channel="mcp", refuse_muted=True)
         with self.driver.session() as s:
-            left = s.run("MATCH (n) WHERE n.project_id = $pid AND n._verdict_lock IS NOT NULL "
+            left = s.run("MATCH (n) WHERE n.project_id = $pid AND "
+                         "(n._verdict_lock IS NOT NULL OR n._triage_lock IS NOT NULL) "
                          "RETURN count(n) AS c", pid=self.pid).single()["c"]
         self.assertEqual(left, 0)
 
     def test_refuse_muted_does_not_mask_a_missing_finding(self):
         out = self.client.set_human_verdict(
             self.uid, self.pid, "no-such-finding", "confirmed", "", refuse_muted=True)
-        self.assertEqual(out, {"updated": False, "label": None})
+        self.assertEqual(out, {"updated": False, "label": None, "reason": "not_found"})
 
     # --- ROW 6: the muted cap is opt-in ---------------------------------------
 

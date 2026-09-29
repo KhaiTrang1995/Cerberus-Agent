@@ -28,6 +28,7 @@ import {
 } from '@/lib/mcp/profiles'
 import ScopeChecklist from './ScopeChecklist'
 import styles from './McpTokensTab.module.css'
+import { MAX_REVIEW_BUDGET, MCP_RUNS_PER_DAY } from '@/lib/triage/limits'
 
 interface GeneratedFile {
   path: string
@@ -65,6 +66,15 @@ function shapeWarnings(scopes: McpScope[]): string[] {
   }
   if (has('triage:mute') && !has('triage:read')) {
     out.push('`triage:mute` without `triage:read` lets the agent mute findings but never find a muted one again, so it cannot check or undo its own mutes, and cannot unmute anything by id.')
+  }
+  if (has('triage:review') && !has('triage:read')) {
+    out.push('`triage:review` without `triage:read`: the agent can submit reviews but cannot read the evidence it must quote, so every review it sends will be refused.')
+  }
+  if (has('triage:run') && !has('triage:read')) {
+    out.push('`triage:run` without `triage:read`: the agent can start runs but cannot see their progress or results.')
+  }
+  if (has('triage:run') && has('recon:settings')) {
+    out.push(`\`triage:run\` with \`recon:settings\`: the agent can start triage runs and change the review budget and model they use. Runs it starts are capped at ${MAX_REVIEW_BUDGET} reviews and ${MCP_RUNS_PER_DAY} a day.`)
   }
   if (has('recon:queue')) {
     out.push('Queued work dispatches later and is NOT cancelled when you revoke the token. The pack tells the agent so.')

@@ -6,8 +6,9 @@
 
 .sectionHeader {
   display: flex;
-  justify-content: space-between;
-  align-items: center;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-1-5);
   margin-bottom: var(--space-2);
   padding-bottom: var(--space-1-5);
   border-bottom: 2px solid var(--drawer-section-info);
@@ -21,10 +22,10 @@
   color: var(--drawer-section-info);
 }
 
-/* 30% smaller than the shared Drawer title (em = the Drawer's h2 size), scoped
-   to this drawer so other drawers keep the standard title. */
+/* em = the Drawer's h2 size, scoped to this drawer so other drawers keep the
+   standard title. */
 .drawerTitleText {
-  font-size: 0.7em;
+  font-size: 0.91em;
 }
 
 /* Square icon buttons on the Basic Info row: copy context, ask agent, delete. */

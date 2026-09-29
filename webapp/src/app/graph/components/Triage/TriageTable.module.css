@@ -300,9 +300,15 @@
 
 /* `overflow-wrap: anywhere` with no floor let the host column collapse to a
    few characters and hyphenate a hostname mid-label ("app.example.te / st")
-   whenever the action buttons claimed the width. */
+   whenever the action buttons claimed the width. The Why column did the same
+   to a review's sentence, one word fragment per line; the wrapper scrolls
+   sideways instead. */
 .table td.where {
   min-width: 140px;
+}
+
+.table td.reason {
+  min-width: 200px;
 }
 
 /* Rank number: the headline of the ranked list. */
@@ -583,4 +589,123 @@
 .verdictButton:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* ── Layers: who decided, and how far it moved the rules' score ─────────── */
+
+/* A row opens the detail panel. The name is also a real button, so the panel
+   is reachable from the keyboard and not only by pointer. */
+.row {
+  cursor: pointer;
+}
+
+.table tbody tr.rowSelected {
+  background: var(--table-row-hover-bg);
+  box-shadow: inset 3px 0 0 var(--pb-info-bd);
+}
+
+.nameButton {
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.nameButton:hover {
+  text-decoration: underline;
+}
+
+.nameButton:focus-visible,
+.filterSelect:focus-visible,
+.rowErrorButton:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+/* "rules 62.5 · Act soon  +12.5": the score before a review or a decision
+   moved it. Muted, because the final score to its left is the one to act on. */
+.baseLine {
+  display: block;
+  margin-top: var(--space-1);
+  font-size: 11px;
+  color: var(--pb-muted-fg);
+  font-variant-numeric: tabular-nums;
+}
+
+.deltaUp {
+  color: var(--pb-danger-fg);
+  font-weight: var(--font-semibold);
+}
+
+.deltaDown {
+  color: var(--pb-ok-fg);
+  font-weight: var(--font-semibold);
+}
+
+/* A factor value a review or a decision changed. <mark> carries the meaning
+   for assistive tech; the browser's yellow is replaced by the board's tint. */
+.factorMoved {
+  padding: 0 3px;
+  border-radius: 3px;
+  background: var(--pb-info-bg);
+  color: var(--pb-info-fg);
+  font-weight: var(--font-semibold);
+}
+
+.chipStack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+/* A review whose evidence has changed no longer counts; the dashed edge says
+   "was" without hiding what it concluded. */
+.verdictStale {
+  border-style: dashed;
+  opacity: 0.8;
+}
+
+/* The "Decided by" menu. A native select: the counts sit in the option text,
+   and it wraps with the chips below 900px like everything else here. */
+.filterSelect {
+  padding: 2px 8px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-full);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  font-weight: var(--font-medium);
+  cursor: pointer;
+  max-width: 100%;
+}
+
+.filterSelectActive {
+  background: var(--pb-info-bg);
+  border-color: var(--pb-info-bd);
+  color: var(--pb-info-fg);
+}
+
+.rowError {
+  margin-top: var(--space-1);
+  max-width: 260px;
+  margin-left: auto;
+  white-space: normal;
+  text-align: left;
+  font-size: 11px;
+  color: var(--pb-danger-fg);
+}
+
+.rowErrorButton {
+  margin-left: var(--space-1);
+  padding: 0 6px;
+  border: 1px solid var(--pb-danger-bd);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  cursor: pointer;
 }

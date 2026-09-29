@@ -9,7 +9,9 @@ webapp mints a short-lived HS256 ticket bound to the operator's identity, and
 the agent verifies it here before registering the session.
 
 Ticket format: a standard compact HS256 JWS produced by the webapp via `jose`
-(`webapp/src/lib/auth.ts` -> createWsTicket), claims `{ sub, pid, sid, iat, exp }`.
+(`webapp/src/lib/auth.ts` -> createWsTicket), claims `{ sub, pid, sid, iat, exp }`,
+plus an optional `act`: the person actually signed in when an admin simulates
+`sub`, which a triage run records as its real actor.
 Verification is stdlib-only (hmac/hashlib/base64) so the agent image needs no
 new dependency.
 

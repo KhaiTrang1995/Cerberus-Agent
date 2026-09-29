@@ -85,7 +85,7 @@ const AGENT_FACING = [
  * Python settings keys and SQL columns, and a test that cries wolf is one
  * people switch off.
  */
-const TOOL_SHAPED = /\b((?:get|list|start|stop|update|create|query|run|set|cancel|queue|compare|describe|attach|preflight|tighten|kali|graph|mute|unmute|search)_[a-z][a-z0-9_]{2,})\b/g
+const TOOL_SHAPED = /\b((?:get|list|start|stop|update|create|query|run|set|cancel|queue|compare|describe|attach|preflight|tighten|kali|graph|mute|unmute|search|submit)_[a-z][a-z0-9_]{2,})\b/g
 
 /**
  * Comments are stripped, deliberately.
@@ -173,6 +173,12 @@ describe('P8: every tool named in an agent-facing string exists', () => {
       // Mute and unmute went from "cannot" to "can, with triage:mute".
       /nothing (on this surface|here) can (mute|unmute)/i,
       /no mute here/i,
+      // The verdict stopped being the only write when reviews arrived, and a
+      // live triage run stopped refusing verdicts once publishes were layered.
+      /one durable write/i,
+      /only durable write/i,
+      /one write on this surface/i,
+      /refused while a triage run is in progress/i,
       /cannot mute or unmute/i,
     ]
     const problems: string[] = []

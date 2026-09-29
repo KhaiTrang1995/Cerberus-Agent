@@ -5,9 +5,11 @@ import { generateReportHtml, type LLMNarratives } from '@/lib/report/reportTempl
 import { writeFileSync, mkdirSync, existsSync } from 'fs'
 import path from 'path'
 import { requireEffectiveUser, requireProjectAccess } from '@/lib/access'
+import { readFeatureModel, featureModelErrorResponse } from '@/lib/featureModels'
+import { callFeatureAgent } from '@/lib/featureAgentCall'
 
 const REPORT_OUTPUT_PATH = process.env.REPORT_OUTPUT_PATH || '/data/reports'
-const AGENT_API_URL = process.env.AGENT_API_URL || 'http://agent:8080'
+const NARRATIVES_TIMEOUT_MS = 300_000
 
 interface RouteParams {
   params: Promise<{ id: string }>
@@ -57,26 +59,32 @@ export async function POST(_request: NextRequest, { params }: RouteParams) {
     const access = await requireProjectAccess(eff, id)
     if (access instanceof NextResponse) return access
 
+    // The narratives run on the caller's own "Report narratives" model and keys.
+    // Checked before the (slow) data gathering so the model picker opens at once.
+    const model = await readFeatureModel(eff.userId, 'report_narratives')
+    if (!model) return featureModelErrorResponse('model_required', 'report_narratives')
+
     // 1. Gather all data from Neo4j + PostgreSQL
     const reportData = await gatherReportData(id)
 
-    // 2. Request LLM narratives from the agent service (with fallback)
+    // 2. Request LLM narratives from the agent. Only an agent that cannot be
+    // reached at all falls back to a report without narratives; a model, key or
+    // version problem is the person's to fix, so it is shown instead of hidden.
     let narratives: LLMNarratives | null = null
-    try {
-      const condensed = condenseForAgent(reportData)
-      const resp = await fetch(`${AGENT_API_URL}/api/report/summarize`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ data: condensed }),
-        signal: AbortSignal.timeout(300_000), // 5 min timeout
-      })
-      if (resp.ok) {
-        narratives = await resp.json() as LLMNarratives
-      } else {
-        console.warn(`Report narratives failed (${resp.status}): ${await resp.text()}`)
-      }
-    } catch (err) {
-      console.warn('Agent unavailable for report narratives, generating without:', err)
+    const agent = await callFeatureAgent({
+      featureId: 'report_narratives',
+      path: '/api/report/summarize',
+      model,
+      body: { data: condenseForAgent(reportData), model, user_id: eff.userId },
+      timeoutMs: NARRATIVES_TIMEOUT_MS,
+    })
+    if (agent.ok) {
+      const { model_used: _modelUsed, ...rest } = agent.body
+      narratives = rest as unknown as LLMNarratives
+    } else if (agent.code === 'agent_unreachable') {
+      console.warn('Agent unavailable for report narratives, generating without them')
+    } else {
+      return agent.response
     }
 
     // 3. Generate HTML

@@ -29,10 +29,16 @@ the finding whose own evidence carried it.
 
 from __future__ import annotations
 
-#: In the cache key. Bump whenever the wording below changes meaning, or a
-#: cached verdict from the old prompt will be reused as if it answered the new
-#: question.
-REVIEW_PROMPT_VERSION = "review-v1"
+import re
+
+#: Stored with every built-in review (`triage_ai_prompt_version`). Bump whenever
+#: the wording below changes meaning: the built-in AI then re-reads its own
+#: reviews on the next run, while an external agent's review is left alone.
+REVIEW_PROMPT_VERSION = "review-v2"
+
+#: The version every v3.1 review was written under. Only used to recognise one
+#: whose evidence has not changed, so the upgrade does not throw it away.
+LEGACY_REVIEW_PROMPT_VERSION = "review-v1"
 
 #: Free-text caps, enforced in code after parsing.
 MAX_WHY = 300
@@ -78,6 +84,7 @@ For each finding, return an object:
 {"id": "<the id exactly as given>",
  "verdict": "real" | "doubtful" | "false_positive" | "unclear",
  "impact_multiplier": 1.0,
+ "impact_quote": "<exact text from the evidence that justifies the multiplier>",
  "disputed_facts": [{"fact": "<name>", "quote": "<exact text from the evidence>"}],
  "evidence_quote": "<exact text from the evidence>",
  "why": "<one sentence>",
@@ -100,7 +107,8 @@ Rules you must follow:
 5. impact_multiplier adjusts how BAD it would be, not how likely. Raise it when
    the evidence shows something worse than the finding says (a password in the
    response, an admin interface); lower it when the affected thing is trivial (a
-   static page, a placeholder). Stay between 0.5 and 1.5.
+   static page, a placeholder). Stay between 0.5 and 1.5. A multiplier other
+   than 1.0 needs its own impact_quote; without one it is ignored.
 6. disputed_facts removes a fact the model relied on. Only these names are
    accepted: reachable, tool_confirmed, extracted_proof, dast_confirmed,
    exploitable_class, public_poc, sensitive_asset, credential_in_response.
@@ -159,6 +167,12 @@ def render_finding(row: dict, bundle: str) -> str:
     )
 
 
+def _single_line(value, cap: int) -> str:
+    """Free text an agent sent: control characters stripped, whitespace collapsed."""
+    text = re.sub(r"[\x00-\x1f\x7f]", " ", str(value or ""))
+    return re.sub(r"\s+", " ", text).strip()[:cap]
+
+
 def validate_review(item: dict, bundle: str, row: dict) -> dict | None:
     """Turn one model answer into an accepted correction, or None.
 
@@ -167,19 +181,27 @@ def validate_review(item: dict, bundle: str, row: dict) -> dict | None:
 
     - the quote must actually appear in the evidence we sent;
     - the verdict must be one of four words;
-    - the multiplier is clamped;
+    - the multiplier is clamped, and needs its own verified `impact_quote`;
     - only the eight named facts can be disputed, each with its own verified
       quote;
     - free text is capped.
 
+    What was refused is returned under `dropped`, as `{what, why}`, so an
+    external agent is told which part of its review did not count.
+
     A finding the rules already PROVED cannot be talked down: proof came from an
     exploit that ran, a validated credential or a malicious-package listing, and
-    a sentence in a response body does not outweigh that.
+    a sentence in a response body does not outweigh that. On one, a doubtful or
+    false-positive verdict, every dispute and a multiplier below 1 are dropped.
     """
     from ..evidence import normalise_for_quote_check
 
+    dropped: list = []
+    proven = bool(row.get("proven"))
+
     verdict = str(item.get("verdict") or "unclear").strip().lower()
     if verdict not in VALID_VERDICTS:
+        dropped.append({"what": "verdict", "why": f"unknown verdict {verdict[:30]!r}"})
         verdict = "unclear"
 
     haystack = normalise_for_quote_check(bundle)
@@ -195,13 +217,18 @@ def validate_review(item: dict, bundle: str, row: dict) -> dict | None:
         return text
 
     evidence_quote = verified(item.get("evidence_quote"))
+    if str(item.get("evidence_quote") or "").strip() and not evidence_quote:
+        dropped.append({"what": "evidence_quote",
+                        "why": "not found in the evidence (or under 8 characters)"})
 
     # A verdict that moves the finding needs evidence. Without a verified quote
     # it degrades to "unclear", which changes nothing.
     if verdict in ("real", "doubtful", "false_positive") and not evidence_quote:
+        dropped.append({"what": "verdict", "why": f"{verdict} needs a verified evidence_quote"})
         verdict = "unclear"
 
-    if row.get("proven") and verdict in ("false_positive", "doubtful"):
+    if proven and verdict in ("false_positive", "doubtful"):
+        dropped.append({"what": "verdict", "why": f"{verdict} cannot lower a proven finding"})
         verdict = "unclear"
 
     try:
@@ -211,8 +238,17 @@ def validate_review(item: dict, bundle: str, row: dict) -> dict | None:
     if multiplier != multiplier:                       # NaN
         multiplier = 1.0
     multiplier = min(MULTIPLIER_MAX, max(MULTIPLIER_MIN, multiplier))
-    if row.get("proven"):
-        multiplier = max(1.0, multiplier)
+    impact_quote = verified(item.get("impact_quote"))
+    if multiplier != 1.0 and not impact_quote:
+        dropped.append({"what": "impact_multiplier",
+                        "why": "a multiplier needs a verified impact_quote"})
+        multiplier = 1.0
+    if proven and multiplier < 1.0:
+        dropped.append({"what": "impact_multiplier",
+                        "why": "a multiplier below 1 cannot lower a proven finding"})
+        multiplier = 1.0
+    if multiplier == 1.0:
+        impact_quote = ""
 
     disputes = []
     for entry in (item.get("disputed_facts") or [])[:8]:
@@ -220,17 +256,55 @@ def validate_review(item: dict, bundle: str, row: dict) -> dict | None:
             continue
         fact = str(entry.get("fact") or "").strip().lower()
         if fact not in DISPUTABLE_FACTS:
+            dropped.append({"what": "disputed_fact", "why": f"{fact[:40]!r} is not a disputable fact"})
+            continue
+        if proven:
+            dropped.append({"what": "disputed_fact",
+                            "why": f"{fact} cannot be disputed on a proven finding"})
             continue
         quote = verified(entry.get("quote"))
         if not quote:
+            dropped.append({"what": "disputed_fact",
+                            "why": f"the quote for {fact} is not in the evidence"})
             continue
         disputes.append({"fact": fact, "quote": quote})
 
     return {
         "verdict": verdict,
         "impact_multiplier": multiplier,
+        "impact_quote": impact_quote,
         "disputed_facts": disputes,
         "evidence_quote": evidence_quote,
-        "why": str(item.get("why") or "").strip()[:MAX_WHY],
-        "fix_lever": str(item.get("fix_lever") or "").strip()[:MAX_FIX_LEVER],
+        "why": _single_line(item.get("why"), MAX_WHY),
+        "fix_lever": _single_line(item.get("fix_lever"), MAX_FIX_LEVER),
+        "dropped": dropped,
     }
+
+
+def validate_external_review(item: dict, bundle: str, row: dict,
+                             proven_now: bool = False) -> tuple[dict | None, str | None]:
+    """An external agent's review (MCP): `(accepted, refusal)`.
+
+    The same checks the built-in reviewer passes through, with one difference.
+    On a proven finding the built-in AI's lowering parts are quietly dropped;
+    an external review that tries to lower anything is REFUSED whole, so the
+    agent learns the finding is not up for that argument instead of seeing a
+    half-applied review. `proven_now` is the proof read live in the write
+    transaction, which may be newer than the last run.
+    """
+    verdict = str((item or {}).get("verdict") or "").strip().lower()
+    if verdict not in VALID_VERDICTS:
+        return None, "bad_verdict"
+    proven = bool(row.get("proven")) or bool(proven_now)
+    if proven:
+        try:
+            multiplier = float((item or {}).get("impact_multiplier", 1.0))
+        except (TypeError, ValueError):
+            multiplier = 1.0
+        lowers = (verdict in ("doubtful", "false_positive")
+                  or bool((item or {}).get("disputed_facts"))
+                  or multiplier < 1.0)
+        if lowers:
+            return None, "proven"
+    accepted = validate_review(item or {}, bundle, {**row, "proven": proven})
+    return accepted, None

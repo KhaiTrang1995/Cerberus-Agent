@@ -25,8 +25,8 @@ import { NextRequest } from 'next/server'
 const prismaMock = vi.hoisted(() => ({
   project: { findUnique: vi.fn() },
   triageRun: {
-    findMany: vi.fn(), findUnique: vi.fn(), create: vi.fn(),
-    update: vi.fn(), updateMany: vi.fn(),
+    findMany: vi.fn(), findUnique: vi.fn(), findFirst: vi.fn(), create: vi.fn(),
+    update: vi.fn(), updateMany: vi.fn(), deleteMany: vi.fn(),
   },
   auditLog: { create: vi.fn() },
 }))
@@ -69,6 +69,8 @@ beforeEach(() => {
   prismaMock.triageRun.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.triageRun.create.mockResolvedValue({ id: 'run1', startedAt: fresh() })
   prismaMock.triageRun.update.mockResolvedValue({})
+  prismaMock.triageRun.findFirst.mockResolvedValue(null)
+  prismaMock.triageRun.deleteMany.mockResolvedValue({ count: 0 })
   prismaMock.auditLog.create.mockResolvedValue({})
 })
 
@@ -143,6 +145,28 @@ describe('POST /api/internal/triage-runs', () => {
     expect((await createRun(post('/api/internal/triage-runs', {}))).status).toBe(400)
   })
 
+  test('an MCP start records its trigger and token, and the audit its budget', async () => {
+    await createRun(post('/api/internal/triage-runs',
+      { ...body, trigger: 'mcp', tokenId: 'tok1', reviewBudget: 1000 }))
+    expect(prismaMock.triageRun.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ trigger: 'mcp', tokenId: 'tok1' }),
+    }))
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        after: expect.objectContaining({ trigger: 'mcp', tokenId: 'tok1', reviewBudget: 1000,
+                                         model: 'claude-x' }),
+      }),
+    }))
+  })
+
+  test('anything but an MCP start is recorded as the app, and a bad token id is dropped', async () => {
+    await createRun(post('/api/internal/triage-runs',
+      { ...body, trigger: 'cron', tokenId: 'x'.repeat(200) }))
+    expect(prismaMock.triageRun.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ trigger: 'app', tokenId: null }),
+    }))
+  })
+
   test('the admin behind a simulated user is the audited actor', async () => {
     await createRun(post('/api/internal/triage-runs',
       { ...body, realActorUserId: 'admin1' }))
@@ -157,9 +181,31 @@ describe('POST .../heartbeat', () => {
   test('a running run is kept alive and told to continue', async () => {
     prismaMock.triageRun.findUnique.mockResolvedValue(
       { id: 'run1', projectId: PROJECT, status: 'running' })
-    const res = await heartbeat(post('/x', {}), runParams())
+    const res = await heartbeat(post('/x', { phase: 'reviewing', progress: 55 }), runParams())
     expect(await res.json()).toEqual({ status: 'running', abort: false })
-    expect(prismaMock.triageRun.update).toHaveBeenCalled()
+    expect(prismaMock.triageRun.updateMany).toHaveBeenCalledWith({
+      where: { id: 'run1', status: { in: ['running', 'publishing'] } },
+      data: expect.objectContaining({ phase: 'reviewing', progress: 55 }),
+    })
+  })
+
+  test('a publishing run is alive too, so a long publish keeps its hold (B12, B16)', async () => {
+    prismaMock.triageRun.findUnique.mockResolvedValue(
+      { id: 'run1', projectId: PROJECT, status: 'publishing' })
+    const res = await heartbeat(post('/x', { phase: 'publishing', progress: 92 }), runParams())
+    expect(await res.json()).toEqual({ status: 'publishing', abort: false })
+    expect(prismaMock.triageRun.updateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ heartbeatAt: expect.any(Date), phase: 'publishing' }),
+    }))
+  })
+
+  test('a progress outside 0-100 is clamped, and a long phase is cut', async () => {
+    prismaMock.triageRun.findUnique.mockResolvedValue(
+      { id: 'run1', projectId: PROJECT, status: 'running' })
+    await heartbeat(post('/x', { phase: 'x'.repeat(100), progress: 400 }), runParams())
+    const data = prismaMock.triageRun.updateMany.mock.calls[0][0].data
+    expect(data.progress).toBe(100)
+    expect(data.phase).toHaveLength(40)
   })
 
   test('a deleted project cascades the run away, and the agent is told to stop', async () => {
@@ -182,7 +228,7 @@ describe('POST .../heartbeat', () => {
     activationMock.mockResolvedValue(true)
     const res = await heartbeat(post('/x', {}), runParams())
     expect(await res.json()).toMatchObject({ abort: true })
-    expect(prismaMock.triageRun.update).not.toHaveBeenCalled()
+    expect(prismaMock.triageRun.updateMany).not.toHaveBeenCalled()
   })
 })
 
@@ -247,47 +293,56 @@ describe('POST .../finish', () => {
     })
   })
 
-  test('a completed run records its counts and is audited', async () => {
+  const finishData = () => prismaMock.triageRun.updateMany.mock.calls[0][0]
+
+  test('a completed run records its counts, only from a live status, and is audited', async () => {
     const res = await finish(
       post('/x', { status: 'completed', summary: { scored: 12, reviewed: 3 } }),
       runParams())
     expect(res.status).toBe(200)
-    expect(prismaMock.triageRun.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({
-          status: 'completed', summary: { scored: 12, reviewed: 3 },
-        }),
-      })
-    )
+    expect(finishData()).toMatchObject({
+      where: { id: 'run1', status: { in: ['running', 'publishing'] } },
+      data: expect.objectContaining({ status: 'completed', summary: { scored: 12, reviewed: 3 } }),
+    })
     expect(prismaMock.auditLog.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ action: 'triage.finish' }) })
     )
   })
 
+  test('a run already marked lost keeps that status and is audited as late (B16)', async () => {
+    prismaMock.triageRun.updateMany.mockResolvedValue({ count: 0 })
+    const res = await finish(
+      post('/x', { status: 'completed', summary: { scored: 4 } }), runParams())
+    expect(await res.json()).toEqual({ status: 'late', late: true })
+    expect(prismaMock.triageRun.update).toHaveBeenCalledWith({
+      where: { id: 'run1' }, data: { summary: { scored: 4, late: 1 } },
+    })
+    expect(prismaMock.auditLog.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ action: 'triage.finish.late' }),
+    }))
+  })
+
   test('an unknown status becomes failed rather than leaving the run live', async () => {
     await finish(post('/x', { status: 'wat' }), runParams())
-    expect(prismaMock.triageRun.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: 'failed' }) })
-    )
+    expect(finishData().data.status).toBe('failed')
   })
 
   test('a run cannot be finished back into running', async () => {
     await finish(post('/x', { status: 'running' }), runParams())
-    expect(prismaMock.triageRun.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: 'failed' }) })
-    )
+    expect(finishData().data.status).toBe('failed')
   })
 
   test('the summary keeps counts and drops anything else', async () => {
     await finish(post('/x', {
       status: 'completed',
-      summary: { scored: 5, findingTitle: 'admin.example.com is vulnerable', llm_calls: '7' },
+      summary: { scored: 5, findingTitle: 'admin.example.com is vulnerable', llm_calls: '7',
+                 reviews_kept: 3, external_reviews: 1, reviews_adopted: 2, review_budget: 1000,
+                 publish_failed: 0, llm_available: 1 },
     }), runParams())
-    expect(prismaMock.triageRun.update).toHaveBeenCalledWith(
-      expect.objectContaining({
-        data: expect.objectContaining({ summary: { scored: 5, llm_calls: 7 } }),
-      })
-    )
+    expect(finishData().data.summary).toEqual({
+      scored: 5, llm_calls: 7, reviews_kept: 3, external_reviews: 1, reviews_adopted: 2,
+      review_budget: 1000, publish_failed: 0, llm_available: 1,
+    })
   })
 
   test('a malformed body still records a terminal state', async () => {
@@ -297,13 +352,30 @@ describe('POST .../finish', () => {
       body: 'not json',
     })
     expect((await finish(bad, runParams())).status).toBe(200)
-    expect(prismaMock.triageRun.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: 'failed' }) })
-    )
+    expect(finishData().data.status).toBe('failed')
   })
 
   test('an unknown run is a 404', async () => {
     prismaMock.triageRun.findUnique.mockResolvedValue(null)
     expect((await finish(post('/x', { status: 'completed' }), runParams())).status).toBe(404)
+  })
+
+  test('old finished runs are trimmed, never a live one, the newest completed, or the newest 50 (C11)', async () => {
+    prismaMock.triageRun.findMany.mockResolvedValue(
+      Array.from({ length: 50 }, (_, i) => ({ id: `r${i}` })))
+    prismaMock.triageRun.findFirst.mockResolvedValue({ id: 'latest-completed' })
+    await finish(post('/x', { status: 'completed' }), runParams())
+    await new Promise((r) => setTimeout(r, 0))
+    const where = prismaMock.triageRun.deleteMany.mock.calls[0][0].where
+    expect(where.projectId).toBe(PROJECT)
+    expect(where.status).toEqual({ notIn: ['running', 'publishing'] })
+    expect(where.id.notIn).toContain('latest-completed')
+    expect(where.id.notIn).toContain('r49')
+    expect(where.startedAt.lt.getTime()).toBeLessThanOrEqual(Date.now() - 24 * 60 * 60 * 1000 + 1000)
+  })
+
+  test('a failed trim never fails the finish', async () => {
+    prismaMock.triageRun.deleteMany.mockRejectedValue(new Error('db down'))
+    expect((await finish(post('/x', { status: 'completed' }), runParams())).status).toBe(200)
   })
 })

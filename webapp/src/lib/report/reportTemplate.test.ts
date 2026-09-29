@@ -526,10 +526,12 @@ describe('Dynamic TOC Numbering', () => {
 describe('Suppressed findings: people and rules are reported apart', () => {
   function withSuppressed(
     people: number, rules: number, ruleNames: { name: string; count: number }[] = [], agents = 0,
+    multi = 0,
   ) {
     const data = makeReportData()
     ;(data.graphOverview as any).suppressedCount = people + rules + agents
     ;(data.graphOverview as any).suppressedByPeople = people
+    ;(data.graphOverview as any).suppressedByMultiMute = multi
     ;(data.graphOverview as any).suppressedByAgents = agents
     ;(data.graphOverview as any).suppressedByRules = rules
     ;(data.graphOverview as any).suppressedRules = ruleNames
@@ -540,6 +542,22 @@ describe('Suppressed findings: people and rules are reported apart', () => {
     const html = withSuppressed(2, 0, [], 7)
     expect(html).toContain('<tr><td>Suppressed as noise</td><td>2 finding(s) reviewed and excluded from this report</td></tr>')
     expect(html).toContain('<tr><td>Suppressed by agents</td><td>7 finding(s) hidden by an automated agent through the MCP server, not reviewed by a person</td></tr>')
+  })
+
+  test('Multi mutes are inside the people\'s count but get their own row, never called reviewed', () => {
+    const html = withSuppressed(5, 0, [], 0, 3)
+    expect(html).toContain('<tr><td>Suppressed as noise</td><td>2 finding(s) reviewed and excluded from this report</td></tr>')
+    expect(html).toContain('<tr><td>Suppressed in bulk</td><td>3 finding(s) excluded by a person in bulk from AI-suggested groups (Multi mute), not reviewed one by one</td></tr>')
+  })
+
+  test('only Multi mutes: no "reviewed" row at all', () => {
+    const html = withSuppressed(4, 0, [], 0, 4)
+    expect(html).not.toContain('Suppressed as noise')
+    expect(html).toContain('4 finding(s) excluded by a person in bulk')
+  })
+
+  test('no Multi mutes, no bulk row', () => {
+    expect(withSuppressed(3, 0)).not.toContain('Suppressed in bulk')
   })
 
   test('no agent mutes, no agent row', () => {

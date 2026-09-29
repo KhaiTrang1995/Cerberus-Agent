@@ -58,11 +58,18 @@ function getWsTicketSecret(): Uint8Array | null {
 export async function createWsTicket(
   userId: string,
   projectId: string,
-  sessionId: string
+  sessionId: string,
+  // The person actually signed in, when an admin is simulating `userId`. The
+  // agent records it on the runs it starts, so an audit row names who really
+  // pressed the button. Omitted when it is `userId` itself.
+  realActorUserId?: string
 ): Promise<string | null> {
   const key = getWsTicketSecret()
   if (!key) return null
-  return new SignJWT({ sub: userId, pid: projectId, sid: sessionId })
+  return new SignJWT({
+    sub: userId, pid: projectId, sid: sessionId,
+    ...(realActorUserId && realActorUserId !== userId ? { act: realActorUserId } : {}),
+  })
     .setProtectedHeader({ alg: 'HS256' })
     .setIssuedAt()
     .setExpirationTime(WS_TICKET_EXPIRY)

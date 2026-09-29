@@ -4,6 +4,8 @@ import { useCallback, useMemo } from 'react'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import { ActivityLog } from './ActivityLog'
 import { useCypherFixCodeFixWS } from '@/hooks/useCypherFixCodeFixWS'
+import { useFeatureModelGate } from '@/components/shared/FeatureModelGate'
+import { featureModelMessage } from '@/lib/llmFeatures'
 import type { Remediation } from '@/lib/cypherfix-types'
 import styles from './DiffViewer.module.css'
 
@@ -30,9 +32,21 @@ export function DiffViewer({
     },
   })
 
-  const handleStart = useCallback(() => {
+  const { ensureFeatureModel } = useFeatureModelGate()
+
+  // CodeFix runs on the user's own CodeFix model; without one the agent
+  // refuses the run, so it is asked for before the socket is opened.
+  const handleStart = useCallback(async () => {
+    if (!(await ensureFeatureModel('codefix'))) return
     codefix.startFix(remediation.id)
-  }, [codefix, remediation.id])
+  }, [codefix, remediation.id, ensureFeatureModel])
+
+  // The agent can still answer model_required (the model was cleared in
+  // another tab after the check above): pick one and start again.
+  const handleChooseModel = useCallback(async () => {
+    if (!(await ensureFeatureModel('codefix', { force: true }))) return
+    codefix.startFix(remediation.id)
+  }, [codefix, remediation.id, ensureFeatureModel])
 
   const handleAccept = useCallback((blockId: string) => {
     codefix.sendBlockDecision(blockId, 'accept')
@@ -100,7 +114,7 @@ export function DiffViewer({
         {isIdle && codefix.activityLog.length === 0 && (
           <div className={styles.idleState}>
             <p>Ready to start the CodeFix agent for this remediation.</p>
-            <button className={styles.startBtn} onClick={handleStart}>
+            <button className={styles.startBtn} onClick={() => void handleStart()}>
               Start CodeFix
             </button>
           </div>
@@ -116,10 +130,19 @@ export function DiffViewer({
           />
         )}
 
+        {codefix.status === 'error' && codefix.errorCode === 'model_required' && (
+          <div className={styles.idleState}>
+            <p>{featureModelMessage('model_required')}: CodeFix has no model to run on.</p>
+            <button className={styles.startBtn} onClick={() => void handleChooseModel()}>
+              Choose a model and start
+            </button>
+          </div>
+        )}
+
         {/* Restart / Go to Remediations - shown when idle after a previous run */}
         {isIdle && codefix.activityLog.length > 0 && (
           <div className={styles.idleState}>
-            <button className={styles.startBtn} onClick={handleStart}>
+            <button className={styles.startBtn} onClick={() => void handleStart()}>
               Restart CodeFix
             </button>
             <button className={styles.secondaryBtn} onClick={onBack}>

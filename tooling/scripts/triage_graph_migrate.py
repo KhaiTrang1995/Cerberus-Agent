@@ -56,16 +56,31 @@ GUARDED_SERVICES = [
      os.environ.get("RECON_ORCHESTRATOR_URL", "http://localhost:8010") + "/health"),
 ]
 
-#: Triage state that must survive a merge. A person's decision is the whole
-#: reason this migration is careful rather than a DELETE.
-CARRIED_PROPS = (
-    "triage_status", "triage_reason", "triage_source", "triage_confidence",
-    "triage_priority_score", "triage_signals", "triage_tier", "triage_factors",
-    "triage_state", "triage_group_key", "triage_run_id", "triage_ai_verdict",
-    "triage_ai_quote", "triage_ai_model", "triage_evidence_hash",
-    "triage_proof", "triaged_at", "muted_at", "muted_by", "muted_reason",
-    "muted_channel", "muted_token",
-)
+def _triage_props() -> tuple:
+    """TRIAGE_PROPS, read from the mixin's own file.
+
+    Loaded by path rather than imported: importing `graph_db` pulls in the
+    Neo4j driver, and this script must still run `--help` and its dry-run
+    planning where only the driver it opens in `main` is needed.
+    """
+    import importlib.util
+    path = REPO_ROOT / "graph_db" / "mixins" / "recon" / "triage_mixin.py"
+    spec = importlib.util.spec_from_file_location("_triage_mixin_props", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return tuple(module.TRIAGE_PROPS)
+
+
+TRIAGE_PROPS = _triage_props()
+
+#: The mute a merge must not lose, carried on its own.
+MUTE_PROPS = ("muted_at", "muted_by", "muted_reason", "muted_channel", "muted_token")
+
+#: Triage and mute state that must survive a merge. A person's decision is the
+#: whole reason this migration is careful rather than a DELETE. Every triage
+#: property the layered model stores, from the mixin's own list, so a new one
+#: can never be left behind.
+CARRIED_PROPS = tuple(TRIAGE_PROPS) + MUTE_PROPS
 
 #: An MCP mute's provenance. Carried only with the mute itself: grafted onto a
 #: survivor that was already muted by a person, it would re-attribute that
@@ -161,12 +176,26 @@ def migrate_nuclei(session, apply: bool) -> dict:
                                          _negate(n["updated_at"] or "")))
         surplus = [n for n in nodes if n["id"] != keep["id"]]
 
-        # Anything the kept node is missing but a surplus node has, it inherits.
+        # The triage layers move as ONE block from ONE node: the kept node's,
+        # or, when it has none, the best-ranked surplus node's. Mixing them
+        # across duplicates would pair one node's review with another's
+        # evidence hash, or a decision with a base it was never made on.
         carried = {}
+        keep_props = keep["props"] or {}
+        if not any(keep_props.get(p) is not None for p in TRIAGE_PROPS):
+            for node in sorted(surplus, key=lambda n: (rank(n)[0],
+                                                       _negate(n["updated_at"] or ""))):
+                block = {p: (node["props"] or {}).get(p) for p in TRIAGE_PROPS}
+                block = {p: v for p, v in block.items() if v is not None}
+                if block:
+                    carried.update(block)
+                    break
+        # A mute is carried property by property, as before: the kept node has
+        # no mute of its own when it inherits one.
         for node in surplus:
-            for prop in CARRIED_PROPS:
+            for prop in MUTE_PROPS:
                 value = (node["props"] or {}).get(prop)
-                if value is not None and (keep["props"] or {}).get(prop) is None \
+                if value is not None and keep_props.get(prop) is None \
                         and prop not in carried:
                     carried[prop] = value
         inherits_mute = any(n["muted"] for n in surplus) and not keep["muted"]

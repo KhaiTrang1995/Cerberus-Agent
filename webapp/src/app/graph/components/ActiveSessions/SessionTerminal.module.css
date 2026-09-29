@@ -154,8 +154,9 @@
 /* Command Whisperer — NLP input bar */
 .nlpArea {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  gap: 8px;
+  gap: 2px 8px;
   padding: 6px 14px;
   background: #161b22;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
@@ -255,4 +256,14 @@
 .emptyTerminal p {
   font-size: 12px;
   margin: 0;
+}
+
+/* The terminal is dark in both themes, so the shared model line's theme
+   tokens are pinned to the terminal palette here. */
+.nlpModel {
+  flex-basis: 100%;
+  padding-left: 21px;
+  --text-tertiary: #8b949e;
+  --text-secondary: #c9d1d9;
+  --status-info-text: #a78bfa;
 }

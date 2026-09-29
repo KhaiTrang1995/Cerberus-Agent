@@ -5,7 +5,24 @@
 
 import { formatNodeId } from '../RedZoneTables/nodeId'
 
-export type MutedVia = 'all' | 'person' | 'mcp' | 'rule' | 'deleted_rule'
+/**
+ * Who muted a finding, as the table, the filter and the export tell it apart.
+ * `multi` is a person's Multi mute: confirmed by them, but chosen in bulk from
+ * AI suggestions, so never presented as a one-by-one judgement.
+ */
+export const MUTED_VIA_VALUES = ['person', 'multi', 'mcp', 'rule'] as const
+export type RowMutedVia = (typeof MUTED_VIA_VALUES)[number]
+
+export type MutedVia = 'all' | RowMutedVia | 'deleted_rule'
+
+/** What another view opens Muted Nodes on: one token or batch, or one kind of muter. */
+export interface MutedNodesFocus {
+  token?: string
+  mutedVia?: MutedVia
+}
+
+/** A Multi mute batch id, as the agent issues it; also what `muted_token` holds for one. */
+export const MULTI_BATCH_PATTERN = /^mm-[0-9a-f]{8}$/
 
 export interface MutedRow {
   id: string
@@ -19,12 +36,14 @@ export interface MutedRow {
   host: string
   muted_at: string | null
   muted_by: string
-  /** `mcp`: an external agent on a person's token. `muted_by` is then that
-   *  person, so this, not `muted_by`, is what says it was not their call. */
-  muted_via: 'person' | 'mcp' | 'rule'
-  /** `mcp` for an agent's mute, empty otherwise. Absent from an older agent. */
+  /** `mcp`: an external agent on a person's token; `multi`: a person's Multi
+   *  mute. `muted_by` is a person's id for both, so this, not `muted_by`, is
+   *  what says the mute was not a one-by-one call. */
+  muted_via: RowMutedVia
+  /** `mcp` or `multi`, empty otherwise. Absent from an older agent. */
   muted_channel?: string
-  /** The prefix of the token that made an agent mute. Never the token. */
+  /** The prefix of the token that made an agent mute (never the token), or a
+   *  Multi mute's batch id. */
   muted_token?: string
   muted_reason: string
   stale_since: string | null
@@ -45,18 +64,30 @@ export interface MutedFacets {
   rules: { muted_by: string; count: number; reason: string; rule_name: string | null; rule_deleted: boolean }[]
   /** Agent mutes per token prefix, most first. */
   tokens?: { token: string; count: number }[]
+  /** Absent from an agent older than Multi mute. */
+  by_multi?: number
+  /** Multi mutes per batch, most first. */
+  batches?: { batch: string; count: number }[]
 }
 
 export interface MutedFilters {
   label: string
   mutedVia: MutedVia
   rule: string
-  /** One token's mutes, by prefix. */
+  /** One token's mutes, by prefix, or one Multi mute batch's. */
   token: string
   search: string
 }
 
 export const EMPTY_FILTERS: MutedFilters = { label: '', mutedVia: 'all', rule: '', token: '', search: '' }
+
+/** The filters a focus opens on; a batch id alone implies the Multi mute filter. */
+export function focusFilters(focus: MutedNodesFocus | null | undefined): MutedFilters {
+  if (!focus) return EMPTY_FILTERS
+  const token = focus.token ?? ''
+  const mutedVia = focus.mutedVia ?? (MULTI_BATCH_PATTERN.test(token) ? 'multi' : 'all')
+  return { ...EMPTY_FILTERS, mutedVia, token }
+}
 
 export const PAGE_SIZE = 50
 
@@ -96,6 +127,7 @@ export function kindLabel(row: Pick<MutedRow, 'label' | 'source'>): string {
  *
  * An agent's mute is checked BEFORE "you": it carries your user id in
  * `muted_by`, and reading it as "you" would present an agent's call as yours.
+ * A Multi mute is yours, but always says it was one, with its batch.
  */
 export function mutedByText(row: MutedRow, me: string | null | undefined): string {
   if (row.muted_via === 'rule') {
@@ -104,6 +136,10 @@ export function mutedByText(row: MutedRow, me: string | null | undefined): strin
   }
   if (row.muted_via === 'mcp') {
     return row.muted_token ? `Agent (MCP) · ${row.muted_token}` : 'Agent (MCP)'
+  }
+  const who = me && row.muted_by === me ? 'you' : row.muted_by || '-'
+  if (row.muted_via === 'multi') {
+    return row.muted_token ? `${who} · Multi mute ${row.muted_token}` : `${who} · Multi mute`
   }
   if (me && row.muted_by === me) return 'you'
   return row.muted_by || '-'
@@ -130,7 +166,7 @@ export function exportRows(rows: MutedRow[], me: string | null | undefined): Rec
     muted_by: mutedByText(row, me),
     muted_via: row.muted_via,
     rule: row.muted_via === 'rule' ? row.muted_by : '',
-    token: row.muted_via === 'mcp' ? row.muted_token ?? '' : '',
+    token: row.muted_via === 'mcp' || row.muted_via === 'multi' ? row.muted_token ?? '' : '',
     muted_reason: row.muted_reason,
     muted_at: row.muted_at ?? '',
     state: stateText(row),

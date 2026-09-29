@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { Loader2, Eye, EyeOff, Search } from 'lucide-react'
 import { Modal } from '@/components/ui/Modal/Modal'
 import { ModelPicker } from '@/components/shared/ModelPicker'
+import { useFeatureModelGate } from '@/components/shared/FeatureModelGate'
 import { useDirtyState } from '@/hooks/useDirtyState'
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard'
 import styles from './Settings.module.css'
@@ -203,6 +204,14 @@ const QUICK_ADD_PRESETS: QuickAdd[] = [...QUICK_ADD_PRESETS_RAW].sort(
   (a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase())
 )
 
+const SECTION_PICKER_PROMPT =
+  'Optional. This model picks which page of a long resource the agent reads; without one, '
+  + 'pages are picked by text match. Cancel saves the resource either way.'
+
+// Asked at most once per page load: the section picker is optional, and a
+// person who declined it should not be asked again on every save.
+let sectionPickerDeclined = false
+
 export function TradecraftResourceForm({
   userId,
   resource,
@@ -228,6 +237,7 @@ export function TradecraftResourceForm({
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [presetSearch, setPresetSearch] = useState('')
+  const { ensureFeatureModel } = useFeatureModelGate()
 
   // Dirty tracking over the editable fields. Baseline captured from `resource`
   // in the reset effect below (empty for add, resource values for edit).
@@ -284,6 +294,12 @@ export function TradecraftResourceForm({
     if (!llmModel.trim()) {
       setError('Pick an LLM model. The resource only becomes usable once a model is selected.')
       return
+    }
+    // The section picker is the user's own model, separate from this
+    // resource's. Its answer does not gate the save.
+    if (!sectionPickerDeclined) {
+      const picked = await ensureFeatureModel('tradecraft_section_picker', { message: SECTION_PICKER_PROMPT })
+      if (!picked) sectionPickerDeclined = true
     }
     setSubmitting(true)
     setError('')

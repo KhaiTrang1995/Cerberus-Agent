@@ -7,8 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [6.23.0] - 2026-09-29
 
+### Added
+
+- **Priority Board detail panel.** Click a finding to open a panel with its **Result**, the **Rules** behind the score (each factor with its evidence, the tier inputs and the detector's track record), the **Review**, your **Decision**, the **Evidence** the reviewer saw, and its **Group**. You can mark the finding Real or False positive, or Reset it, with an optional reason, and the row updates in place without reloading the board.
+- **The board shows where a score came from.** When a review or a decision moved a score, the score cell adds a muted `rules 62.5 · Act soon` line with the signed change, and the factors a review changed are highlighted. A **Decided by** chip says who ranked each finding: you, you over MCP, the built-in AI, an external agent (with its token prefix) or the rules alone. A review whose evidence has changed since is marked **out of date**. A new **Decided by** filter narrows the board by decider and counts every finding, not only the page loaded.
+- **Reset.** A decided finding can be taken back to undecided. The confirm dialog names what that releases: a reset finding can be pruned and rule-muted like any other.
+- **External agents can review findings over MCP, with a separate permission.** **Review findings** (`triage:review`) adds `submit_finding_review`: an agent reads a finding with `get_finding_triage` and `get_finding_evidence` (both `triage:read`), then submits a verdict, disputes and an impact multiplier, each backed by a quote the server finds in the evidence. The finding is re-scored at once. RedAmon validates the review exactly as it validates its own AI's, and the review stays valid until the evidence changes. The Triage assistance profile ticks it.
+- **External agents can start and stop triage runs, with a separate permission.** **Run triage** (`triage:run`) adds `start_triage_run` and `stop_triage_run`; `get_triage_status` (`triage:read`) reports the preflight, the live run, its phase and progress. The permission is never ticked for you; the Triage assistance profile offers it as an opt-in. A run an agent started shows **Started over MCP · <prefix>** on the board and on the CypherFix page.
+- **`list_findings` filters by layer.** It accepts `decidedBy`, `reviewedVia` and `reviewCurrent`, and returns each finding's review and decision with who made them.
+- **Operators: re-download the onboarding pack** for any token you grant **Review findings** or **Run triage**. An older pack tells the agent it cannot review findings or start a run.
+- **Models by feature.** Triage review, CodeFix, Multi mute, Report narratives, RoE parsing, the Recon preset generator, the Command whisperer and the Tradecraft section picker each run on their own model, chosen once for your account in **Global Settings → LLM Providers → Models by feature**. A feature with no model asks for one the first time you use it; none borrows the project's agent model or a hidden default.
+- **Multi mute.** A **Multi** button next to every **Mute** asks your Multi mute model which other findings you would mute for the same reason, in groups: three exact ones built by RedAmon and up to four marked **AI suggestion**, with an **Undo** per action. RedAmon, not the model, decides what is pre-ticked, and every guard is re-checked as the mute is written. A Multi mute is a person's mute, listed under **Multi mute** in Muted Nodes and counted on its own line in the report.
+
+### Changed
+
+- **A triage score is now built from three layers, and nothing is lost between runs.** The rules compute a base score; a review (the built-in AI or an external agent) may correct it; your decision overrides both. Each layer is stored separately, and a run re-reads the reviews and decisions already on the graph instead of starting over. A review still valid is kept, not paid for again, so the first run after this upgrade reviews only findings with none, and the preflight says how many reviews will be kept.
+- **A run that reviews never replaces an external agent's still-valid review**, and it re-reviews its own only after you change the Triage review model or the review prompt changes.
+- **An AI false positive is no longer permanent.** It lasts while its evidence is unchanged; a finding whose evidence changes is ranked again.
+- **The run dialog shows your real review budget.** It said 150 whatever the project's **Priority Board: findings the AI reviews** was. The budget is now capped at 1,000 on the server as well as in the form.
+- **A verdict over MCP is accepted while a run is working.** The run's publish reads it and keeps it, instead of the verdict being refused. A verdict you set in the app still cannot be changed or reset over MCP.
+- **MCP verdicts no longer teach a detector's track record.** Only your own decisions in the app count.
+- **Triage changes no longer show up in the Recon Delta.**
+- **The CypherFix page follows a run started elsewhere**, from the board, another tab or an agent, instead of refusing to start and never connecting.
+- **The per-project CypherFix model is replaced by your account's Triage review and CodeFix models.** CodeFix no longer falls back to `gpt-4o`, triage with **findings the AI reviews** at 0 needs no model, and switching the Triage review model re-reviews once. A report whose model cannot be used now says so instead of dropping its narratives.
+
 ### Fixed
 
+- **A review was wiped at the next run.** Every run that did not re-review a finding (no model, a budget of 0, a failed batch, or a reused review) reset its verdict and corrections, so a finding the AI had marked doubtful jumped back up the board.
+- **A multiplier applied without a quote.** It now counts only with an impact quote found in the evidence.
+- **An AI false positive kept its tier** (showing "0.0 Act now") until the next run, and review corrections recorded the wrong "before" values.
+- **Groups were scored before the review**, so a run's new false positives still counted in their group's rank.
+- **A proven finding could be lowered by a review.** Disputes on a confirmed or chain-proven finding are dropped.
+- **The review never saw the request.** A nuclei finding's evidence held only the response, so the payload that triggered it was invisible to the reviewer. The request is now included, redacted.
+- **A short run never showed its phase.** A run reported where it was only every 30 seconds, so one that finished sooner showed no phase at all; each phase change is now reported at once.
+- **Reset looked like "You: False positive"** and still protected the finding from the prune.
+- **A verdict moved the board's "latest run"**, so every row looked stale after one click.
+- **The AI's reason was blanked by a verdict** from the board, which sent none.
+- **Stop was recorded as failed**; it is now `stopped`, and a Stop pressed while the run is publishing is refused so the board and the fix list never disagree.
+- **A long publish was declared lost** after 10 minutes, which let a version activation start while batches were still writing, and the late finish overwrote the status. The heartbeat now keeps a publishing run alive and reports its phase and progress; a late finish is recorded, not applied.
+- **A publish batch that deadlocked was dropped silently.** It is retried, and a batch that still fails is counted, and the run ends partially completed rather than completed.
+- **The board and the CypherFix page were frozen while a verdict waited** on a run's publish. Board reads and writes no longer block the agent.
+- **Summaries dropped whether a model was available**, and run history grew for ever. Each finished run now trims the project's older runs, keeping the newest 50, anything from the last day and the latest completed run.
+- **The run progress showed raw phase names**, counted untriaged findings under Track, and said "highest-severity" where it meant "highest-ranked".
 - **An MCP mute or unmute answered with a server error was reported as not done**, even when it had been written: the unmute removed its exemptions and the mute refunded its budget. It is now `mute_outcome_unknown` / `unmute_outcome_unknown`.
 - **An agent's mute could re-hide a finding you unmuted while its call was running.** The finding is unmuted again and reported as `kept_visible`.
 - **The error codes the MCP mute tools document never reached the agent** (`busy`, `budget_exhausted`, `*_outcome_unknown`); they are now in the message. A mute budget refund no longer lands in the next day's budget.
@@ -17,6 +57,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Adding hosts to a batch over MCP pauses the project's scheduled scans** until you resume them in the **Scans** tab, so no unattended scan reaches a new host first.
 - **A scheduled scan paused while it was starting no longer comes back on.**
 - **A project no longer stays locked by an agent session that has ended.** A session marked as running is checked with the agent; if the agent cannot be reached, the project still counts as busy.
+- **Triage and CodeFix no longer ask for a model you already have** when your settings could not be read; they say the settings could not be loaded.
+
+### Security
+
+- **A verdict or mute during a version switch is refused**, instead of reporting success and then being lost when the activation restored the graph.
+- **"Ask agent about this node" fences the node's properties as untrusted.** Scanner text and text written by an external agent reached the in-app agent as plain user text; it is now wrapped the way tool output is, and the triage text an agent can write is left out of the brief entirely.
+- **Evidence is redacted before any model or agent sees it.** Keys, tokens, JWTs, private keys, authorization values and cookie values in scanner output are masked, and volatile headers are normalised, before the evidence is reviewed, hashed or returned over MCP.
+- **The person who acted is recorded**, not only the account they acted as: verdicts and runs started from the app carry the real actor, and every MCP review is audited with its token, the score before and after, and a hash of its text rather than the text itself.
+- **What bounds an agent that reviews.** It can review only open, unproven findings no person has decided; it cannot lower a proven finding, decide, mute or undo your decision. Every quote must be found in the evidence, a review is refused if the evidence changed since it was read, and reviews share the 10-per-minute write limit.
+- **What bounds an agent that runs triage.** One run per project at a time, 30 minutes between agent-started runs, at most 12 a day per project, and at most 1,000 reviews per run. It cannot stop a run that is publishing. `MCP_DISABLED_TOOLS=start_triage_run,stop_triage_run` withdraws both tools.
+- **Each AI feature spends only the keys of the user it runs for**, and a deleted custom provider is never swapped for another. The RoE parse, report narratives and command whisperer agent endpoints require the master internal key: **rebuild the agent and the webapp together**.
+- **Provider error text never reaches the browser**, and Multi mute redacts evidence before the model sees it. A model's quote counts as proof only when it is in the finding's own evidence, never in the HTTP headers every response shares.
 
 ## [6.22.0] - 2026-09-29
 

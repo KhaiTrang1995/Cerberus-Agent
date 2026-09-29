@@ -3,12 +3,14 @@
  *
  * Shared by the Muted Nodes route and the two MCP muted-findings tools, so the
  * table a person reads and the list an agent reads name the same rule, flag the
- * same deleted rule, and split who muted the same three ways.
+ * same deleted rule, and split who muted the same four ways.
  *
  * `muted_by` alone is two-valued (a user id, or `rule:...`). An agent's (MCP)
- * mute keeps its owner's user id there and is marked by `muted_channel`, so
- * anything that shows who muted a finding reads `mutedViaOf`, never
- * `isRuleMute` alone, or an agent's mute is presented as a person's.
+ * mute keeps its owner's user id there and is marked by `muted_channel`, and
+ * so is a person's Multi mute (`multi`: confirmed by them, but chosen in bulk
+ * from AI suggestions). Anything that shows who muted a finding reads
+ * `mutedViaOf`, never `isRuleMute` alone, or both read as a person's one-by-one
+ * judgement.
  */
 import prisma from '@/lib/prisma'
 import {
@@ -19,7 +21,7 @@ import {
   type NodeFilterDoc,
 } from '@/lib/nodeFilters/model'
 
-export type MutedVia = 'person' | 'mcp' | 'rule'
+export type MutedVia = 'person' | 'multi' | 'mcp' | 'rule'
 
 /** The display prefix a token's mutes are stamped with; never the token. */
 export const MUTED_TOKEN_PATTERN = /^rdmn_mcp_[0-9a-f]{8}$/
@@ -41,10 +43,11 @@ export async function loadMutedRuleDoc(projectId: string): Promise<NodeFilterDoc
   }
 }
 
-/** Who muted a row, three-valued. Falls back to the raw fields for an older agent. */
+/** Who muted a row, four-valued. Falls back to the raw fields for an older agent. */
 export function mutedViaOf(row: { muted_via?: unknown; muted_by?: unknown; muted_channel?: unknown }): MutedVia {
   if (row.muted_via === 'rule' || isRuleMute(String(row.muted_by ?? ''))) return 'rule'
   if (row.muted_via === 'mcp' || row.muted_channel === 'mcp') return 'mcp'
+  if (row.muted_via === 'multi' || row.muted_channel === 'multi') return 'multi'
   return 'person'
 }
 

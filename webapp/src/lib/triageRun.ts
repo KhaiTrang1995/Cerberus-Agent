@@ -22,6 +22,7 @@
  */
 import prisma from '@/lib/prisma'
 import { isActivationInProgress } from '@/lib/activationLock'
+import { MCP_RUN_COOLDOWN_MS, MCP_RUNS_PER_DAY } from '@/lib/triage/limits'
 
 /** Statuses in which a run still intends to write. */
 export const LIVE_TRIAGE_STATUSES = ['running', 'publishing'] as const
@@ -54,6 +55,11 @@ export interface LiveRun {
   startedAt: Date
   actorUserId: string
   model: string
+  /** `app` or `mcp`. Absent from a row created before the column existed. */
+  trigger?: string
+  tokenId?: string | null
+  phase?: string
+  progress?: number
 }
 
 /**
@@ -70,7 +76,8 @@ export async function findLiveTriageRun(projectId: string): Promise<LiveRun | nu
     orderBy: { startedAt: 'desc' },
     select: {
       id: true, status: true, startedAt: true, heartbeatAt: true,
-      actorUserId: true, model: true,
+      actorUserId: true, model: true, trigger: true, tokenId: true,
+      phase: true, progress: true,
     },
   })
 
@@ -94,6 +101,145 @@ export async function findLiveTriageRun(projectId: string): Promise<LiveRun | nu
   return {
     id: run.id, status: run.status, startedAt: run.startedAt,
     actorUserId: run.actorUserId, model: run.model,
+    trigger: run.trigger, tokenId: run.tokenId, phase: run.phase, progress: run.progress,
+  }
+}
+
+/** The runs a status view lists, newest first. Counts and codes only. */
+export async function latestTriageRuns(projectId: string, take = 5) {
+  return prisma.triageRun.findMany({
+    where: { projectId },
+    orderBy: { startedAt: 'desc' },
+    take,
+    select: {
+      id: true, status: true, startedAt: true, finishedAt: true, model: true,
+      summary: true, errorClass: true, trigger: true,
+    },
+  })
+}
+
+/**
+ * The newest run whose results the board shows: the latest completed one.
+ * An imported project has no runs, and its findings still carry the run id
+ * that ranked them, so the caller falls back to that (`latestRunIdFrom`).
+ */
+export async function latestPublishedRunId(projectId: string): Promise<string | null> {
+  const run = await prisma.triageRun.findFirst({
+    where: { projectId, status: { in: ['completed', 'completed_partial'] } },
+    orderBy: { startedAt: 'desc' },
+    select: { id: true },
+  })
+  return run?.id ?? null
+}
+
+/** The run id of the most recently triaged finding: an imported project's "latest run". */
+export function latestRunIdFrom(
+  findings: Array<{ triage_run_id?: unknown; triaged_at?: unknown }>,
+): string | null {
+  let best: { id: string; at: string } | null = null
+  for (const f of findings) {
+    const id = typeof f.triage_run_id === 'string' ? f.triage_run_id : ''
+    const at = typeof f.triaged_at === 'string' ? f.triaged_at : ''
+    if (!id || !at) continue
+    if (!best || at > best.at) best = { id, at }
+  }
+  return best?.id ?? null
+}
+
+export { MCP_RUN_COOLDOWN_MS, MCP_RUNS_PER_DAY }
+
+export interface McpRunBudget {
+  runsToday: number
+  /** When the next MCP start is allowed, or null when it is allowed now. */
+  nextAllowedAt: Date | null
+  reason: 'cooldown' | 'daily_cap' | null
+}
+
+/**
+ * Where a project stands against the MCP cooldown and daily cap, counted from
+ * its `TriageRun` rows with `trigger = 'mcp'`, across every token.
+ *
+ * The cooldown runs from the previous MCP-started run's `finishedAt`, or its
+ * last heartbeat when it never finished. Throws on a read error: the caller
+ * refuses the start (fail closed).
+ */
+export async function mcpRunBudget(projectId: string, now = Date.now()): Promise<McpRunBudget> {
+  const dayAgo = new Date(now - 24 * 60 * 60 * 1000)
+  const [today, last] = await Promise.all([
+    prisma.triageRun.findMany({
+      where: { projectId, trigger: 'mcp', startedAt: { gte: dayAgo } },
+      orderBy: { startedAt: 'asc' },
+      select: { startedAt: true },
+    }),
+    prisma.triageRun.findFirst({
+      where: { projectId, trigger: 'mcp' },
+      orderBy: { startedAt: 'desc' },
+      select: { finishedAt: true, heartbeatAt: true, startedAt: true },
+    }),
+  ])
+
+  let nextAllowedAt: Date | null = null
+  let reason: McpRunBudget['reason'] = null
+  if (last) {
+    const ended = (last.finishedAt ?? last.heartbeatAt ?? last.startedAt).getTime()
+    if (now < ended + MCP_RUN_COOLDOWN_MS) {
+      nextAllowedAt = new Date(ended + MCP_RUN_COOLDOWN_MS)
+      reason = 'cooldown'
+    }
+  }
+  if (today.length >= MCP_RUNS_PER_DAY) {
+    // The window reopens when the oldest run in it is a day old.
+    const reopens = new Date(today[today.length - MCP_RUNS_PER_DAY].startedAt.getTime()
+                             + 24 * 60 * 60 * 1000)
+    if (!nextAllowedAt || reopens > nextAllowedAt) nextAllowedAt = reopens
+    reason = 'daily_cap'
+  }
+  return { runsToday: today.length, nextAllowedAt, reason }
+}
+
+/** How many finished rows a project keeps at least, whatever their age. */
+export const TRIAGE_RUN_KEEP_NEWEST = 50
+/** Finished rows younger than this are never trimmed. */
+export const TRIAGE_RUN_KEEP_MS = 24 * 60 * 60 * 1000
+
+/**
+ * Trim a project's finished runs, never anything still in use (C11).
+ *
+ * A row is deleted only when ALL hold: it started more than a day ago, it is
+ * not among the newest 50, it is not the newest completed run (the board's
+ * "latest run" and the remediations read it), and it is not live. The MCP
+ * cooldown and daily cap read the last day only, so trimming older rows
+ * cannot reopen them. Best-effort: never throws.
+ */
+export async function trimTriageRuns(projectId: string, now = Date.now()): Promise<number> {
+  try {
+    const [newest, newestCompleted] = await Promise.all([
+      prisma.triageRun.findMany({
+        where: { projectId },
+        orderBy: { startedAt: 'desc' },
+        take: TRIAGE_RUN_KEEP_NEWEST,
+        select: { id: true },
+      }),
+      prisma.triageRun.findFirst({
+        where: { projectId, status: 'completed' },
+        orderBy: { startedAt: 'desc' },
+        select: { id: true },
+      }),
+    ])
+    const keep = new Set(newest.map((r) => r.id))
+    if (newestCompleted) keep.add(newestCompleted.id)
+    const deleted = await prisma.triageRun.deleteMany({
+      where: {
+        projectId,
+        startedAt: { lt: new Date(now - TRIAGE_RUN_KEEP_MS) },
+        status: { notIn: [...LIVE_TRIAGE_STATUSES] },
+        id: { notIn: [...keep] },
+      },
+    })
+    return deleted.count
+  } catch (e) {
+    console.error('[triageRun] could not trim finished runs:', e)
+    return 0
   }
 }
 

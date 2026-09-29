@@ -234,6 +234,53 @@ describe('MutedNodesTable', () => {
     expect(fetchMock.mock.calls.some(c => c[1]?.method === 'POST')).toBe(false)
   })
 
+  test('a Multi mute is badged with its batch, and the filter counts them', async () => {
+    fetchMock.mockReturnValue(reply({
+      total: 1,
+      findings: [row({
+        muted_by: 'u1', muted_via: 'multi', muted_channel: 'multi', muted_token: 'mm-3f9a2c1d',
+        muted_reason: 'Multi mute mm-3f9a2c1d · Same detector · like "nginx"',
+        rule_kind: null, rule_id: null, rule_name: null,
+      })],
+      facets: {
+        total: 1, by_person: 0, by_mcp: 0, by_multi: 1, labels: { Vulnerability: 1 }, rules: [],
+        tokens: [], batches: [{ batch: 'mm-3f9a2c1d', count: 1 }],
+      },
+    }))
+    render(<MutedNodesTable projectId="p1" />)
+    const badge = await screen.findByText('you · Multi mute mm-3f9a2c1d')
+    expect(badge.getAttribute('title')).toMatch(/not judged one by one/)
+    expect(screen.queryByText('you')).not.toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'Multi mute (1)' })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: 'mm-3f9a2c1d (1)' })).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Muted by'), { target: { value: 'multi' } })
+    await waitFor(() => expect(String(fetchMock.mock.calls.at(-1)![0])).toContain('mutedVia=multi'))
+  })
+
+  test('opened on one batch, the first request already asks for it alone', async () => {
+    fetchMock.mockReturnValue(reply({ total: 0, findings: [] }))
+    render(<MutedNodesTable projectId="p1" focus={{ token: 'mm-3f9a2c1d' }} />)
+    await screen.findByText('No muted nodes match these filters.')
+    const first = new URL(`http://x${String(fetchMock.mock.calls[0][0])}`)
+    expect(first.searchParams.get('token')).toBe('mm-3f9a2c1d')
+    expect(first.searchParams.get('mutedVia')).toBe('multi')
+    // A batch unmuted since is missing from the facets but stays selected.
+    expect((screen.getByLabelText('Token') as HTMLSelectElement).value).toBe('mm-3f9a2c1d')
+  })
+
+  test('a new focus re-applies it; leaving it unset keeps what the person chose', async () => {
+    fetchMock.mockReturnValue(reply({ total: 0, findings: [] }))
+    const { rerender } = render(<MutedNodesTable projectId="p1" />)
+    await screen.findByText('Nothing is muted in this project.')
+    rerender(<MutedNodesTable projectId="p1" focus={{ token: 'mm-00000001' }} />)
+    await waitFor(() => expect(String(fetchMock.mock.calls.at(-1)![0])).toContain('token=mm-00000001'))
+    const calls = fetchMock.mock.calls.length
+    rerender(<MutedNodesTable projectId="p1" focus={null} />)
+    await new Promise(r => setTimeout(r, 20))
+    expect(fetchMock.mock.calls.length).toBe(calls)
+  })
+
   test('pages forward', async () => {
     fetchMock.mockReturnValue(reply({ total: 120, findings: [row()] }))
     render(<MutedNodesTable projectId="p1" />)

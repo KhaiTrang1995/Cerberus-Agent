@@ -34,7 +34,6 @@ interface ReconPresetDrawerProps {
   onLoadUserPreset: (preset: { id: string; name: string }) => Promise<void>
   currentPresetId?: string
   userId: string | null | undefined
-  model: string
 }
 
 const TARGET_FILTERS: Array<{ id: TargetFilter; label: string; hint: string }> = [
@@ -135,7 +134,6 @@ export function ReconPresetModal({
   onLoadUserPreset,
   currentPresetId,
   userId,
-  model,
 }: ReconPresetDrawerProps) {
   const toast = useToast()
   const { dangerConfirm } = useAlertModal()
@@ -483,7 +481,6 @@ export function ReconPresetModal({
         onClose={() => setIsGenerateModalOpen(false)}
         onSaved={handlePresetSaved}
         userId={userId}
-        model={model}
       />
     </>
   )

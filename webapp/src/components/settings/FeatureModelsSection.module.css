@@ -1,0 +1,214 @@
+.section {
+  margin-top: var(--space-6);
+  padding-top: var(--space-5);
+  border-top: 1px solid var(--border-default);
+}
+
+.title {
+  margin: 0 0 var(--space-1);
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  color: var(--text-primary);
+}
+
+.intro {
+  margin: 0 0 var(--space-4);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+  line-height: 1.5;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--space-3);
+}
+
+@media (max-width: 900px) {
+  .grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* No overflow clip here: the model dropdown hangs below the tile. */
+.tile {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: var(--space-3);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-default);
+  transition: border-color 0.15s ease;
+}
+
+.tile:hover {
+  border-color: var(--border-strong);
+}
+
+.tileHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.tileLabel {
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+  color: var(--text-primary);
+  line-height: 1.3;
+}
+
+.tileDesc {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: 1.45;
+  flex: 1;
+}
+
+.pickerRow {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+.picker {
+  flex: 1;
+  min-width: 0;
+}
+
+.clear {
+  flex-shrink: 0;
+}
+
+.readOnly {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-1-5) var(--space-2);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-default);
+}
+
+.readOnlyValue {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.tileHint {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.4;
+}
+
+.tileAlso {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-style: italic;
+}
+
+/* The -bg/-text status pairs are defined per theme (900/400 on dark,
+   100/700 on light), so these read in both without a light override. */
+.chip {
+  flex-shrink: 0;
+  padding: 1px var(--space-2);
+  font-size: 10px;
+  font-weight: var(--font-semibold);
+  border-radius: var(--radius-full);
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+
+.chip_set {
+  color: var(--status-success-text);
+  background: var(--status-success-bg);
+}
+
+.chip_unset {
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border-color: var(--border-default);
+}
+
+.chip_removed {
+  color: var(--status-warning-text);
+  background: var(--status-warning-bg);
+}
+
+.empty {
+  padding: var(--space-5) var(--space-4);
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--text-tertiary);
+  background: var(--bg-primary);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-default);
+}
+
+.notice {
+  margin-bottom: var(--space-3);
+  padding: var(--space-2) var(--space-2-5);
+  font-size: var(--text-xs);
+  color: var(--status-warning-text);
+  background: var(--status-warning-bg);
+  border-radius: var(--radius-default);
+}
+
+.tileSkeleton {
+  min-height: 150px;
+}
+
+.skel {
+  display: block;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.skelTitle {
+  width: 55%;
+  height: 14px;
+}
+
+.skelLine {
+  width: 90%;
+  height: 10px;
+}
+
+.skelPicker {
+  width: 100%;
+  height: 28px;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.5;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skel {
+    animation: none;
+  }
+}

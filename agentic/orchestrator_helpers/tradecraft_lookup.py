@@ -47,6 +47,14 @@ _tc_resources_ctx: contextvars.ContextVar = contextvars.ContextVar(
     "tc_resources", default=None)
 _tc_by_slug_ctx: contextvars.ContextVar = contextvars.ContextVar(
     "tc_by_slug", default=None)
+# The section-picker LLM is built from ONE user's "Tradecraft section picker"
+# model and keys, so unlike the catalog it has no cross-task baseline: a task
+# that never set one gets the constructor's value (None in production), which
+# makes the picker use the text match. A shared attribute here ran one user's
+# lookups on whichever user's keys loaded last.
+_TC_PICKER_UNSET = object()
+_tc_section_picker_ctx: contextvars.ContextVar = contextvars.ContextVar(
+    "tc_section_picker", default=_TC_PICKER_UNSET)
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -1475,7 +1483,7 @@ class TradecraftLookupManager:
         self.llm = llm
         self.mcp_manager = mcp_manager
         self.cache = TradecraftCache(cache_root)
-        self.section_picker_llm = section_picker_llm or llm
+        self._section_picker_base = section_picker_llm
         self.tier2_threshold_bytes = tier2_threshold_bytes
         self.fetch_timeout = fetch_timeout
         self.default_ttl = default_ttl
@@ -1497,6 +1505,15 @@ class TradecraftLookupManager:
     def _resources(self, value):
         self.__dict__["_resources_base"] = value
         _tc_resources_ctx.set(value)
+
+    @property
+    def section_picker_llm(self):
+        v = _tc_section_picker_ctx.get()
+        return self._section_picker_base if v is _TC_PICKER_UNSET else v
+
+    @section_picker_llm.setter
+    def section_picker_llm(self, value):
+        _tc_section_picker_ctx.set(value)
 
     @property
     def _by_slug(self):

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { getEffectiveUser } from '@/lib/session'
+import { getEffectiveUser, getSession } from '@/lib/session'
 import { requireProjectAccess } from '@/lib/access'
 import { createWsTicket } from '@/lib/auth'
 import { assertGraphNotActivating } from '@/lib/activationLock'
@@ -40,6 +40,18 @@ export async function POST(request: NextRequest) {
   if (activating) return activating
 
   // Null when AGENT_WS_TICKET_SECRET is unset (dev) - the agent fails open.
-  const ticket = await createWsTicket(eff.userId, projectId, sessionId)
+  const actor = await realActorOf()
+  const ticket = actor && actor !== eff.userId
+    ? await createWsTicket(eff.userId, projectId, sessionId, actor)
+    : await createWsTicket(eff.userId, projectId, sessionId)
   return NextResponse.json({ ticket })
+}
+
+/** The signed-in person, which differs from the effective user while an admin simulates. */
+async function realActorOf(): Promise<string | undefined> {
+  try {
+    return (await getSession())?.userId
+  } catch {
+    return undefined
+  }
 }

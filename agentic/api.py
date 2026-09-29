@@ -295,12 +295,13 @@ async def check_target_guardrail(body: GuardrailRequest):
 class RoeParseRequest(BaseModel):
     """Request model for RoE document parsing."""
     text: str
-    model: str | None = None  # Optional: override the LLM model for parsing
+    # The caller's saved "RoE parsing" model, read by the webapp from the
+    # user's settings. Required: there is no default to fall back to.
+    model: str | None = None
     # Whose LLM providers to use. The parse is project-INDEPENDENT, so there is
     # no project whose settings could supply a key: the document is uploaded
     # while a project is being created, and on a freshly started agent no
-    # project is loaded at all. Without this the endpoint resolved no provider
-    # and answered 503 for every model.
+    # project is loaded at all.
     user_id: str | None = None
 
 
@@ -323,14 +324,13 @@ from recon_settings.roe_parse_prompt import (
 from recon_settings.roe_prompt import prompt_skew as _prompt_skew
 
 
-@app.post("/roe/parse", tags=["RoE"], dependencies=[Depends(require_internal_auth)])
+@app.post("/roe/parse", tags=["RoE"],
+          dependencies=[Depends(require_master_internal_auth), Depends(require_internal_auth)])
 async def parse_roe_document(body: RoeParseRequest):
     """Parse a Rules of Engagement document using the LLM and extract structured settings."""
     import json as json_mod
-    from project_settings import DEFAULT_AGENT_SETTINGS
 
-    if not orchestrator or not orchestrator._initialized:
-        return JSONResponse(content={"error": "Agent not initialized"}, status_code=503)
+    requested_model = (body.model or "").strip()
 
     # FAIL CLOSED on registry skew. This image can hold a prompt generated from
     # last week's registry while the mounted one is today's, and the failure that
@@ -351,30 +351,31 @@ async def parse_roe_document(body: RoeParseRequest):
                 ),
                 "promptRegistryDigest": built_from,
                 "loadedRegistryDigest": live,
+                "model_used": requested_model,
             },
             status_code=503,
         )
 
-    # Use the requested model, or fall back to orchestrator's current LLM
-    from orchestrator_helpers.llm_setup import setup_llm
+    missing = _feature_request_error(requested_model, body.user_id)
+    if missing:
+        return missing
+    llm, failure = await _build_feature_llm("RoE parse", requested_model, body.user_id)
+    if failure:
+        return failure
 
-    requested_model = body.model or DEFAULT_AGENT_SETTINGS['OPENAI_MODEL']
-    try:
-        llm = _setup_llm_for_endpoint(requested_model, body.user_id)
-    except Exception as e:
-        logger.error(f"RoE parse: failed to set up LLM ({requested_model}): {e}")
-        return JSONResponse(content={"error": f"LLM not available for model {requested_model}"}, status_code=503)
+    # System message has instructions only; user document goes in HumanMessage
+    # to reduce prompt injection risk from adversarial document content
+    system_prompt = ROE_PARSE_PROMPT.strip()
+    doc_text = body.text[:50000]
+    logger.info(f"RoE parse: using model {requested_model}")
+    response, failure = await _invoke_feature_llm("RoE parse", requested_model, llm, [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=f"RoE Document:\n---\n{doc_text}\n---\n\nParse the RoE document above and return the JSON."),
+    ])
+    if failure:
+        return failure
 
     try:
-        # System message has instructions only; user document goes in HumanMessage
-        # to reduce prompt injection risk from adversarial document content
-        system_prompt = ROE_PARSE_PROMPT.strip()
-        doc_text = body.text[:50000]
-        logger.info(f"RoE parse: using model {requested_model}")
-        response = await llm.ainvoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=f"RoE Document:\n---\n{doc_text}\n---\n\nParse the RoE document above and return the JSON."),
-        ])
         content = normalize_content(response.content).strip()
 
         # Strip markdown code fences if present (handle ```json, ```JSON, ``` json, etc.)
@@ -395,7 +396,8 @@ async def parse_roe_document(body: RoeParseRequest):
         parsed = json_mod.loads(content)
         if not isinstance(parsed, dict):
             return JSONResponse(
-                content={"error": "LLM returned JSON that is not an object"},
+                content={"error": "LLM returned JSON that is not an object",
+                         "model_used": requested_model},
                 status_code=422,
             )
         # A key the prompt never named is a key the model invented, and the
@@ -406,19 +408,95 @@ async def parse_roe_document(body: RoeParseRequest):
             "fields": {k: v for k, v in parsed.items() if k in known and v is not None},
             "unknownKeys": sorted(k for k in parsed if k not in known),
             "registryDigest": ROE_PARSE_REGISTRY_DIGEST,
+            "model_used": requested_model,
         }
 
     except json_mod.JSONDecodeError as e:
         logger.error(f"RoE parse: invalid JSON from LLM: {e}")
         return JSONResponse(
-            content={"error": f"LLM returned invalid JSON: {str(e)}"},
+            content={"error": f"LLM returned invalid JSON: {str(e)}",
+                     "model_used": requested_model},
             status_code=422,
         )
     except Exception as e:
         logger.error(f"RoE parse error: {e}")
         return JSONResponse(
-            content={"error": f"Failed to parse RoE document: {str(e)}"},
+            content={"error": "Failed to parse the RoE document. The details are in the agent log.",
+                     "model_used": requested_model},
             status_code=500,
+        )
+
+
+# =============================================================================
+# MODELS BY FEATURE — shared plumbing for the endpoints that run one user's
+# chosen model on that user's own keys (RoE parse, report narratives, command
+# whisperer, Multi mute). Every answer the handler itself writes carries
+# `model_used`: the webapp reads its absence as "this agent predates the
+# feature" (502 agent_outdated) rather than as a model failure.
+# =============================================================================
+
+from llm_builder import (  # noqa: E402
+    MODEL_UNAVAILABLE_MESSAGE,
+    ProvidersUnreachable,
+    build_llm_from_providers,
+    fetch_user_providers,
+    is_model_unavailable_error,
+    log_provider_error,
+)
+
+
+def _feature_error(code: str, model: str, status: int, error: str) -> JSONResponse:
+    return JSONResponse(
+        content={"error": error, "code": code, "model_used": model},
+        status_code=status,
+    )
+
+
+def _feature_request_error(model: str, user_id: Optional[str]) -> Optional[JSONResponse]:
+    """400 for a request with no model or no user: there is nothing to fall back to."""
+    if not model:
+        return JSONResponse(content={"error": "model is required", "model_used": ""},
+                            status_code=400)
+    if not user_id:
+        return JSONResponse(content={"error": "user_id is required", "model_used": model},
+                            status_code=400)
+    return None
+
+
+async def _build_feature_llm(feature: str, model: str, user_id: str):
+    """(llm, None), or (None, the coded JSONResponse to return)."""
+    try:
+        providers = await asyncio.to_thread(fetch_user_providers, user_id)
+    except ProvidersUnreachable as exc:
+        logger.warning(f"{feature}: could not load the user's LLM providers ({exc})")
+        return None, _feature_error("providers_unreachable", model, 503,
+                                    "Couldn't load your LLM providers, try again")
+    try:
+        llm = await asyncio.to_thread(build_llm_from_providers, model, providers)
+    except Exception as exc:                                      # noqa: BLE001
+        log_provider_error(feature, model, exc)
+        return None, _feature_error("model_unavailable", model, 503,
+                                    MODEL_UNAVAILABLE_MESSAGE.format(model=model))
+    return llm, None
+
+
+async def _invoke_feature_llm(feature: str, model: str, llm, messages):
+    """(response, None), or (None, the JSONResponse to return).
+
+    A key or model the provider refuses is `model_unavailable`, which opens the
+    model picker. Anything else is transient and keeps the model.
+    """
+    try:
+        return await llm.ainvoke(messages), None
+    except Exception as exc:                                      # noqa: BLE001
+        log_provider_error(feature, model, exc)
+        if is_model_unavailable_error(exc):
+            return None, _feature_error("model_unavailable", model, 503,
+                                        MODEL_UNAVAILABLE_MESSAGE.format(model=model))
+        return None, JSONResponse(
+            content={"error": "The model call failed. Try again in a moment.",
+                     "model_used": model},
+            status_code=502,
         )
 
 
@@ -430,34 +508,38 @@ class ReportSummarizeRequest(BaseModel):
     """Request model for report narrative generation."""
     data: dict
     model: str | None = None
+    user_id: str | None = None
 
 
-@app.post("/api/report/summarize", tags=["Report"])
+@app.post("/api/report/summarize", tags=["Report"],
+          dependencies=[Depends(require_master_internal_auth), Depends(require_internal_auth)])
 async def summarize_report(body: ReportSummarizeRequest):
     """Generate LLM narrative summaries for pentest report sections."""
     from orchestrator_helpers.report_summarizer import generate_report_narratives
-    from project_settings import DEFAULT_AGENT_SETTINGS
-    from orchestrator_helpers.llm_setup import setup_llm
 
-    if not orchestrator or not orchestrator._initialized:
-        return JSONResponse(content={"error": "Agent not initialized"}, status_code=503)
-
-    requested_model = body.model or DEFAULT_AGENT_SETTINGS['OPENAI_MODEL']
-    try:
-        llm = _setup_llm_for_endpoint(requested_model)
-    except Exception as e:
-        logger.error(f"Report summarizer: failed to set up LLM ({requested_model}): {e}")
-        return JSONResponse(content={"error": f"LLM not available for model {requested_model}"}, status_code=503)
+    requested_model = (body.model or "").strip()
+    missing = _feature_request_error(requested_model, body.user_id)
+    if missing:
+        return missing
+    llm, failure = await _build_feature_llm("Report summarizer", requested_model, body.user_id)
+    if failure:
+        return failure
 
     try:
         narratives = await generate_report_narratives(llm, body.data)
-        return narratives
-    except Exception as e:
-        logger.error(f"Report summarizer error: {e}")
+    except Exception as exc:                                      # noqa: BLE001
+        log_provider_error("Report summarizer", requested_model, exc)
+        if is_model_unavailable_error(exc):
+            return _feature_error("model_unavailable", requested_model, 503,
+                                  MODEL_UNAVAILABLE_MESSAGE.format(model=requested_model))
         return JSONResponse(
-            content={"error": f"Failed to generate report narratives: {str(e)}"},
+            content={"error": "Failed to generate report narratives. The details are in the agent log.",
+                     "model_used": requested_model},
             status_code=500,
         )
+    if isinstance(narratives, dict):
+        return {**narratives, "model_used": requested_model}
+    return {"narratives": narratives, "model_used": requested_model}
 
 
 class FfufExtensionsRequest(BaseModel):
@@ -1181,82 +1263,6 @@ async def get_host_ip():
     shows no suggestion. Read-only, no parameters, no secrets.
     """
     return {"detectedHostIp": os.getenv("HOST_LAN_IP", "").strip()}
-
-
-def _fetch_user_llm_providers(user_id: str) -> list:
-    """This user's LLM providers, with keys, straight from the webapp.
-
-    The project-settings load does this as one step of many, which is fine for
-    an agent run and wrong for an endpoint that has no project: a RoE document
-    is parsed while a project is being CREATED. Fetched per request rather than
-    cached, because a key added a minute ago must work without restarting the
-    agent.
-
-    Never raises: a provider list that cannot be fetched falls back to whatever
-    the loaded settings hold, and the caller reports 503 if that is nothing.
-    """
-    import requests
-    from project_settings import INTERNAL_HEADERS
-
-    webapp_url = os.environ.get('WEBAPP_API_URL', 'http://webapp:3000').rstrip('/')
-    try:
-        resp = requests.get(
-            f"{webapp_url}/api/users/{user_id}/llm-providers?internal=true",
-            headers=INTERNAL_HEADERS,
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return resp.json() or []
-    except Exception as exc:
-        logger.warning(f"Could not fetch LLM providers for user {user_id}: {exc}")
-        return []
-
-
-def _setup_llm_for_endpoint(model_name: str, user_id: str | None = None) -> "BaseChatModel":
-    """Set up an LLM for non-agent endpoints (RoE parse, report summarizer).
-
-    Prefers the CALLER's providers when a user id is given, and falls back to
-    the orchestrator's loaded project settings otherwise.
-    """
-    from orchestrator_helpers.llm_setup import setup_llm, _resolve_provider_key
-    from project_settings import get_settings
-
-    settings = get_settings()
-    user_providers = settings.get('USER_LLM_PROVIDERS', [])
-    if user_id and not user_providers:
-        user_providers = _fetch_user_llm_providers(user_id)
-    custom_config = settings.get('CUSTOM_LLM_CONFIG')
-
-    openai_p = _resolve_provider_key(user_providers, "openai")
-    anthropic_p = _resolve_provider_key(user_providers, "anthropic")
-    openrouter_p = _resolve_provider_key(user_providers, "openrouter")
-    bedrock_p = _resolve_provider_key(user_providers, "bedrock")
-    deepseek_p = _resolve_provider_key(user_providers, "deepseek")
-    gemini_p = _resolve_provider_key(user_providers, "gemini")
-    glm_p = _resolve_provider_key(user_providers, "glm")
-    kimi_p = _resolve_provider_key(user_providers, "kimi")
-    qwen_p = _resolve_provider_key(user_providers, "qwen")
-    xai_p = _resolve_provider_key(user_providers, "xai")
-    mistral_p = _resolve_provider_key(user_providers, "mistral")
-
-    return setup_llm(
-        model_name,
-        openai_api_key=(openai_p or {}).get("apiKey"),
-        anthropic_api_key=(anthropic_p or {}).get("apiKey"),
-        openrouter_api_key=(openrouter_p or {}).get("apiKey"),
-        deepseek_api_key=(deepseek_p or {}).get("apiKey"),
-        gemini_api_key=(gemini_p or {}).get("apiKey"),
-        glm_api_key=(glm_p or {}).get("apiKey"),
-        kimi_api_key=(kimi_p or {}).get("apiKey"),
-        qwen_api_key=(qwen_p or {}).get("apiKey"),
-        xai_api_key=(xai_p or {}).get("apiKey"),
-        mistral_api_key=(mistral_p or {}).get("apiKey"),
-        aws_access_key_id=(bedrock_p or {}).get("awsAccessKeyId"),
-        aws_secret_access_key=(bedrock_p or {}).get("awsSecretKey"),
-        aws_bearer_token=(bedrock_p or {}).get("awsBearerToken"),
-        aws_region=(bedrock_p or {}).get("awsRegion") or "us-east-1",
-        custom_llm_config=custom_config,
-    )
 
 
 # =============================================================================
@@ -2497,53 +2503,42 @@ class CommandWhispererRequest(BaseModel):
     prompt: str
     session_type: str
     project_id: str
+    # Set by the webapp from the caller's saved "Command whisperer" model and
+    # effective user. The agent's own LLM belongs to whichever project loaded
+    # last, so it is never used here.
+    user_id: str | None = None
+    model: str | None = None
 
 
-@app.post("/command-whisperer", tags=["Sessions"])
+@app.post("/command-whisperer", tags=["Sessions"],
+          dependencies=[Depends(require_master_internal_auth), Depends(require_internal_auth)])
 async def command_whisperer(body: CommandWhispererRequest):
-    """Translate a natural language request into a shell command using the project's LLM."""
-    if not orchestrator or not orchestrator._initialized:
-        return JSONResponse(content={"error": "Agent not initialized"}, status_code=503)
+    """Translate a natural language request into a shell command with the caller's model."""
+    requested_model = (body.model or "").strip()
+    missing = _feature_request_error(requested_model, body.user_id)
+    if missing:
+        return missing
+    llm, failure = await _build_feature_llm("Command whisperer", requested_model, body.user_id)
+    if failure:
+        return failure
 
-    # Ensure LLM is set up for this project
-    if not orchestrator.llm:
-        try:
-            orchestrator._apply_project_settings(body.project_id)
-        except Exception as e:
-            logger.error(f"Command whisperer LLM setup error: {e}")
-            return JSONResponse(
-                content={"error": "LLM not configured. Open the AI assistant first or check API keys."},
-                status_code=503,
-            )
+    system_prompt = _COMMAND_WHISPERER_SYSTEM_PROMPT.format(session_type=body.session_type)
+    response, failure = await _invoke_feature_llm("Command whisperer", requested_model, llm, [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=body.prompt),
+    ])
+    if failure:
+        return failure
 
-    if not orchestrator.llm:
-        return JSONResponse(content={"error": "LLM not available"}, status_code=503)
+    command = normalize_content(response.content).strip()
 
-    try:
-        system_prompt = _COMMAND_WHISPERER_SYSTEM_PROMPT.format(
-            session_type=body.session_type,
-        )
-        response = await orchestrator.llm.ainvoke([
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=body.prompt),
-        ])
+    # Strip markdown code fences if the LLM wraps the answer
+    if command.startswith("```") and command.endswith("```"):
+        command = command[3:-3].strip()
+    if command.startswith(("bash\n", "sh\n", "shell\n")):
+        command = command.split("\n", 1)[1].strip()
 
-        command = normalize_content(response.content).strip()
-
-        # Strip markdown code fences if the LLM wraps the answer
-        if command.startswith("```") and command.endswith("```"):
-            command = command[3:-3].strip()
-        if command.startswith(("bash\n", "sh\n", "shell\n")):
-            command = command.split("\n", 1)[1].strip()
-
-        return {"command": command}
-
-    except Exception as e:
-        logger.error(f"Command whisperer error: {e}")
-        return JSONResponse(
-            content={"error": f"Failed to generate command: {str(e)}"},
-            status_code=500,
-        )
+    return {"command": command, "model_used": requested_model}
 
 
 # =============================================================================
@@ -3251,8 +3246,29 @@ def _triage_graph_client():
 _TRIAGE_OPS = frozenset({
     "mute", "unmute", "unmute_many", "list_muted", "muted_facets",
     "list_findings", "human_verdict", "preflight", "stop_run",
-    "mute_many", "resolve_muted",
+    "mute_many", "resolve_muted", "mute_batch",
+    "finding_detail", "finding_evidence", "submit_review", "triage_facets",
 })
+
+#: Ops that address ONE finding by its stored id (`node_id`).
+_FINDING_OPS = ("human_verdict", "finding_detail", "finding_evidence", "submit_review")
+
+#: A finding id as the board and MCP send it: the stored `id` / `finding_id`.
+_FINDING_ID_RE = re.compile(r"[A-Za-z0-9_.:-]{1,200}")
+
+#: A review's evidence hash: `evidence.bundle_hash`, 40 hex characters.
+_EVIDENCE_HASH_RE = re.compile(r"[0-9a-f]{40}")
+
+#: The finding labels a single-finding op may be narrowed to.
+_FINDING_LABELS = ("Vulnerability", "JsReconFinding", "Secret", "MultiscannerFinding",
+                   "GithubSecret", "GithubSensitiveFile", "MalPackageFinding", "ExploitGvm")
+
+#: The board's pushed-down filters, enum-checked before any graph work.
+_TRIAGE_FILTERS = {
+    "decided_by": ("person", "review", "rules"),
+    "reviewed_via": ("builtin", "mcp", "none"),
+    "review_current": ("current", "stale", "none"),
+}
 
 #: What an MCP mute is stamped with: the display prefix of the access token,
 #: never the token. The webapp's `MCP_TOKEN_PREFIX` plus 8 hex characters.
@@ -3267,6 +3283,22 @@ _MCP_MUTE_MAX = 25
 _MCP_UNMUTE_MAX = 100
 _UI_UNMUTE_MAX = 500
 _MUTE_REASON_MAX = 500
+
+#: A Multi mute batch id, as `multi_mute.batches` issues it.
+_MULTI_BATCH_RE = re.compile(r"mm-[0-9a-f]{8}")
+_MULTI_MUTE_MAX = 500
+#: What a Multi mute write says it muted, in the reason line. The five
+#: grouping concepts of the modal, plus the footer's whole selection and the
+#: seed on its own.
+_MULTI_MUTE_CONCEPT_LABELS = {
+    "same_problem": "Same issue elsewhere",
+    "same_detector": "Same detector",
+    "same_host": "Same host",
+    "same_fp_pattern": "Same false-positive pattern",
+    "same_low_risk": "Same low-risk weakness",
+    "selected": "Selected findings",
+    "seed": "This finding",
+}
 
 
 def _triage_request_error(body) -> Optional[str]:
@@ -3284,8 +3316,29 @@ def _triage_request_error(body) -> Optional[str]:
       a real token prefix and a reason.
     """
     muted_by = body.muted_by or ""
-    if body.op in ("mute", "mute_many") and muted_by.startswith("rule:"):
+    if body.op in ("mute", "mute_many", "mute_batch") and muted_by.startswith("rule:"):
         return "muted_by may not name a rule: only the Mute Rules sweep writes rule mutes"
+    if body.op == "mute_batch":
+        # A person's mute, confirmed in the modal: never an agent's.
+        if body.source == "mcp":
+            return "mute_batch is a person's Multi mute and is never taken over MCP"
+        if not _MULTI_BATCH_RE.fullmatch(body.batch_id or ""):
+            return "batch_id must be a Multi mute batch id"
+        if not body.keys:
+            return "mute_batch needs keys"
+        if len(body.keys) > _MULTI_MUTE_MAX:
+            return f"at most {_MULTI_MUTE_MAX} findings per Multi mute call"
+        if body.concept not in _MULTI_MUTE_CONCEPT_LABELS:
+            return "concept is not a Multi mute grouping"
+        pairs = body.exempt_pairs
+        if pairs is None or any(not isinstance(p, list) or len(p) != 2
+                                or not all(isinstance(x, str) for x in p) for p in pairs):
+            return "exempt_pairs is required: a list of [label, key] pairs"
+    if body.only_batch is not None:
+        if body.op != "unmute_many" or body.source == "mcp":
+            return "only_batch is the Multi mute Undo and belongs to unmute_many"
+        if not _MULTI_BATCH_RE.fullmatch(body.only_batch):
+            return "only_batch must be a Multi mute batch id"
     if body.op == "mute" and len(body.reason or "") > _MUTE_REASON_MAX:
         return f"reason is longer than {_MUTE_REASON_MAX} characters"
     graph_ids = body.graph_ids or []
@@ -3315,8 +3368,33 @@ def _triage_request_error(body) -> Optional[str]:
         ceiling = _MCP_UNMUTE_MAX if body.source == "mcp" else _UI_UNMUTE_MAX
         if len(keys) + len(graph_ids) > ceiling:
             return f"at most {ceiling} findings per unmute"
-    if body.token is not None and not _MCP_TOKEN_PREFIX_RE.fullmatch(body.token):
-        return "token must be an MCP token prefix"
+    if body.token is not None and not (_MCP_TOKEN_PREFIX_RE.fullmatch(body.token)
+                                       or _MULTI_BATCH_RE.fullmatch(body.token)):
+        return "token must be an MCP token prefix or a Multi mute batch id"
+    if body.op in _FINDING_OPS:
+        if not _FINDING_ID_RE.fullmatch(body.node_id or ""):
+            return "node_id must be a finding id"
+        if body.label is not None and body.label not in _FINDING_LABELS:
+            return "label must be a finding label"
+    if body.op == "human_verdict" and body.source == "mcp" and body.token_prefix \
+            and not _MCP_TOKEN_PREFIX_RE.fullmatch(body.token_prefix):
+        return "token_prefix must be an MCP token prefix"
+    if body.op == "submit_review":
+        # An external agent's review, and nothing else: the built-in AI writes
+        # its reviews through a run's publish, never through here.
+        if body.source != "mcp":
+            return "submit_review is the MCP review and needs source=mcp"
+        if not _MCP_TOKEN_PREFIX_RE.fullmatch(body.token_prefix or ""):
+            return "token_prefix must be an MCP token prefix"
+        if not isinstance(body.review, dict):
+            return "review is required"
+        if not _EVIDENCE_HASH_RE.fullmatch(body.evidence_hash or ""):
+            return "evidence_hash must be 40 hex characters"
+    if body.op in ("list_findings",):
+        for name, allowed in _TRIAGE_FILTERS.items():
+            value = getattr(body, name, None)
+            if value is not None and value not in allowed:
+                return f"{name} must be one of {', '.join(allowed)}"
     return None
 
 #: The mixin's own ceiling on `list_triage_findings`. A caller-supplied limit is
@@ -3334,7 +3412,7 @@ class GraphTriageRequest(BaseModel):
     """
     op: str  # mute | unmute | unmute_many | list_muted | muted_facets
              # | list_findings | human_verdict | preflight | stop_run
-             # | mute_many | resolve_muted
+             # | mute_many | resolve_muted | mute_batch
     user_id: str
     project_id: str
     node_id: Optional[str] = None
@@ -3344,12 +3422,10 @@ class GraphTriageRequest(BaseModel):
     #: "mcp" opts the call into the MCP concurrency ceiling, exactly as the same
     #: field does on /graph/exec. It is set by the CALLER, so it can only ever
     #: narrow what that caller gets; the browser paths leave it unset and keep
-    #: their current behaviour.
+    #: their current behaviour. A write's channel is derived from it, for the
+    #: verdict (`triage_verdict_channel`), the review (`triage_ai_channel`) and
+    #: the MCP mute (`muted_channel`) alike.
     source: Optional[str] = None
-    #: Unread, and no caller sends it: kept so an older webapp that does is not
-    #: refused. A write's channel is derived from `source`, for the verdict
-    #: (`triage_verdict_channel`) and the MCP mute (`muted_channel`) alike.
-    channel: Optional[str] = None
     #: Who the verdict is attributed to, mirroring `muted_by`.
     verdict_by: Optional[str] = None
     #: Cap on rows for `list_findings`. The mixin's own default is 2000 and the
@@ -3378,8 +3454,63 @@ class GraphTriageRequest(BaseModel):
     #: `mute_many`: the project's Mute Rules exemptions, as [label, key] pairs.
     #: Required: an absent list would silently re-hide what a person unmuted.
     exempt_pairs: Optional[List[List[str]]] = None
-    #: `list_muted`: only the mutes one access token made.
+    #: `list_muted`: only the mutes one access token (or one Multi mute batch) made.
     token: Optional[str] = None
+    #: `mute_batch`: the suggestion batch the keys must come from, which
+    #: grouping the person muted, and whether the batch's seed is included.
+    batch_id: Optional[str] = None
+    concept: Optional[str] = None
+    include_seed: Optional[bool] = None
+    #: `unmute_many`: a Multi mute Undo, limited to what that batch muted.
+    only_batch: Optional[str] = None
+    #: `submit_review`: the external agent's review, as MCP received it
+    #: (verdict, evidence_quote, disputed_facts, impact_multiplier,
+    #: impact_quote, why, fix_lever), and the evidence hash it read.
+    review: Optional[dict] = None
+    evidence_hash: Optional[str] = None
+    #: `list_findings`: the board's pushed-down filters.
+    decided_by: Optional[str] = None      # person | review | rules
+    reviewed_via: Optional[str] = None    # builtin | mcp | none
+    review_current: Optional[str] = None  # current | stale | none
+
+
+def _multi_mute_batch_write(body):
+    """The `mute_findings_batch` arguments for a Multi mute, or the 409 to send.
+
+    Only keys from the suggestion the agent stored may be muted, so a tampered
+    client cannot turn a suggestion into an arbitrary bulk mute: the batch must
+    exist for this user and project, and every key must be one of its members,
+    or its seed when the seed is included. The label, the seed's ceiling and
+    the reason come from the batch too, never from the request.
+    """
+    from multi_mute.batches import STORE
+
+    batch = STORE.get(body.user_id, body.project_id, body.batch_id)
+    if batch is None:
+        return JSONResponse(status_code=409, content={
+            "error": "This suggestion expired; run Multi mute again.",
+            "code": "batch_expired", "multi_mute": 1})
+    keys = {str(k) for k in body.keys or []}
+    allowed = set(batch.members) | ({batch.seed_key} if body.include_seed else set())
+    if not keys <= allowed:
+        return JSONResponse(status_code=409, content={
+            "error": "Some findings are not part of this suggestion.",
+            "code": "batch_mismatch", "multi_mute": 1})
+    seed_name = " ".join(str(batch.seed_name or "").split())[:120]
+    reason = (f"Multi mute {batch.batch_id} · {_MULTI_MUTE_CONCEPT_LABELS[body.concept]}"
+              f' · like "{seed_name}"')[:_MUTE_REASON_MAX]
+    return {
+        "label": batch.label,
+        "keys": sorted(keys),
+        "seed_key": batch.seed_key if body.include_seed else "",
+        "ceiling": batch.ceiling,
+        "exempt_pairs": body.exempt_pairs,
+        "muted_by": body.muted_by or body.user_id,
+        "reason": reason,
+        "batch_id": batch.batch_id,
+        # Echoed to the webapp for its audit row; popped before the write.
+        "_meta": {"model": batch.model, "prompt_version": batch.prompt_version},
+    }
 
 
 @app.post("/graph/triage", tags=["Graph"], dependencies=[Depends(require_master_internal_auth)])
@@ -3412,7 +3543,7 @@ async def graph_triage(body: GraphTriageRequest):
     if not body.user_id or not body.project_id:
         return JSONResponse(status_code=400, content={"error": "missing tenant identity"})
 
-    needs_node = ("mute", "unmute", "human_verdict")
+    needs_node = ("mute", "unmute", *_FINDING_OPS)
     if body.op in needs_node and not body.node_id:
         return JSONResponse(status_code=400, content={"error": f"op {body.op} needs node_id"})
 
@@ -3424,6 +3555,14 @@ async def graph_triage(body: GraphTriageRequest):
     if refused:
         return JSONResponse(status_code=400, content={"error": refused})
 
+    batch_write = None
+    batch_meta = None
+    if body.op == "mute_batch":
+        batch_write = _multi_mute_batch_write(body)
+        if isinstance(batch_write, JSONResponse):
+            return batch_write
+        batch_meta = batch_write.pop("_meta")
+
     def run_op():
         """The blocking body, in one place.
 
@@ -3431,6 +3570,8 @@ async def graph_triage(body: GraphTriageRequest):
         only in how they are scheduled.
         """
         client = _triage_graph_client()
+        if body.op == "mute_batch":
+            return client.mute_findings_batch(body.user_id, body.project_id, **batch_write)
         if body.op == "mute":
             return client.mute_finding(
                 body.user_id, body.project_id, body.node_id,
@@ -3474,31 +3615,59 @@ async def graph_triage(body: GraphTriageRequest):
             # unmuting whatever it is given.
             return client.unmute_findings(
                 body.user_id, body.project_id, body.keys or [],
-                skip_rule_mutes=body.source == "mcp" and not body.include_rule_mutes)
+                skip_rule_mutes=body.source == "mcp" and not body.include_rule_mutes,
+                **({"only_batch": body.only_batch} if body.only_batch else {}))
         if body.op == "list_findings":
             # `total` is what stops the table lying: the query is capped, so
             # without it the operator reads a truncated list as complete. It
-            # comes from the UNCAPPED count, so it stays true whatever `limit`
-            # the caller asked for.
+            # comes from the count with the SAME filters and no cap, so it
+            # stays exact whatever `limit` the caller asked for.
             kwargs = {}
             if body.limit is not None:
                 kwargs["limit"] = max(1, min(int(body.limit), _TRIAGE_LIST_MAX))
+            filters = {name: getattr(body, name) for name in _TRIAGE_FILTERS
+                       if getattr(body, name) is not None}
             return {
                 "findings": client.list_triage_findings(
-                    body.user_id, body.project_id, **kwargs),
-                "total": client.count_triage_findings(body.user_id, body.project_id),
+                    body.user_id, body.project_id, **kwargs, **filters),
+                "total": client.count_triage_findings(
+                    body.user_id, body.project_id, **filters),
             }
+        if body.op == "triage_facets":
+            return client.triage_facets(body.user_id, body.project_id)
         if body.op == "human_verdict":
             # Keyed on the channel, not a flag, so no MCP caller can forget it:
             # on a rule-muted finding a verdict releases the mute, and a token
             # releases one only through unmute_many, with its own permission
-            # and an explicit include_rule_mutes.
+            # and an explicit include_rule_mutes. The same transaction rescores
+            # the finding from its layers.
+            from cypherfix_triage.layers import combine_props
             return client.set_human_verdict(
                 body.user_id, body.project_id, body.node_id,
                 body.status or "", body.reason or "",
                 channel=body.source or "app",
                 verdict_by=body.verdict_by or body.user_id,
-                refuse_muted=body.source == "mcp")
+                refuse_muted=body.source == "mcp",
+                combine=combine_props,
+                token=(body.token_prefix or "") if body.source == "mcp" else "",
+                label=body.label)
+        if body.op == "finding_detail":
+            from cypherfix_triage.evidence import review_survives_rescan
+            detail = client.get_triage_detail(
+                body.user_id, body.project_id, body.node_id, body.label)
+            if detail.get("found"):
+                detail["review_survives_rescan"] = review_survives_rescan(
+                    detail["row"].get("label"), detail["row"].get("source"))
+            return detail
+        if body.op == "finding_evidence":
+            from cypherfix_triage.finding_ops import finding_evidence
+            return finding_evidence(client, body.user_id, body.project_id,
+                                    body.node_id, body.label)
+        if body.op == "submit_review":
+            from cypherfix_triage.finding_ops import submit_review
+            return submit_review(client, body.user_id, body.project_id, body.node_id,
+                                 body.label, body.review or {}, body.evidence_hash or "",
+                                 body.token_prefix or "")
         if body.op == "preflight":
             return client.triage_preflight(body.user_id, body.project_id)
         # stop_run. Project delete calls this before deleting (X12). A run that
@@ -3507,24 +3676,41 @@ async def graph_triage(body: GraphTriageRequest):
         from cypherfix_triage.websocket_handler import stop_project_run
         return stop_project_run(body.project_id)
 
+    from graph_db.mixins.recon.triage_mixin import TriageWriteBusy
+
     try:
-        if body.source == "mcp":
+        if body.op == "stop_run":
+            # Touches the in-process run registry, which lives on the loop.
+            result = run_op()
+        elif body.source == "mcp":
             # An external agent behind a personal access token is the least
             # trusted caller this endpoint has, and unlike /graph/exec it took
             # NO concurrency ceiling at all. The published guarantee is "at most
             # 2 at a time across all tokens", and the contention lands on the
             # operator's own Priority Board, which reads this same data through
             # this same endpoint.
-            #
-            # Off the event loop as well: these are synchronous Neo4j calls, so
-            # running them inline stalls every other request in the agent for
-            # the duration - including the UI's graph reads.
             async with _graph_exec_mcp_semaphore():
                 result = await asyncio.to_thread(run_op)
         else:
-            result = run_op()
+            # Every op off the event loop (B18). These are synchronous Neo4j
+            # calls, and a write can wait on a run's publish lock: inline, that
+            # wait stalled every coroutine in the agent, runs included.
+            result = await asyncio.to_thread(run_op)
+    except TriageWriteBusy:
+        return JSONResponse(status_code=503, content={
+            "error": "The finding is locked by another write (usually a triage run "
+                     "publishing); nothing was changed. Try again in a moment.",
+            "code": "busy", "layered_publish": True})
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"error": str(e)})
     except Exception as e:
         logger.error(f"graph/triage {body.op} failed: {e}")
+        if type(e).__name__ == "TransientError" or getattr(e, "is_retryable", lambda: False)():
+            # execute_write already retried; a deadlock that outlasted it is
+            # still not the caller's fault, and trying again later will work.
+            return JSONResponse(status_code=503, content={
+                "error": "The graph was busy; nothing was changed. Try again.",
+                "code": "retry"})
         return JSONResponse(status_code=500, content={"error": str(e)})
 
     # An acknowledgement the CALLER can check. The agent's Python is baked into
@@ -3537,6 +3723,17 @@ async def graph_triage(body: GraphTriageRequest):
     # all. Only added for MCP callers, so the browser paths are untouched.
     if body.source == "mcp" and isinstance(result, dict):
         result = {**result, "mcp_gated": True}
+    # The capability the webapp checks before it lets an MCP verdict through
+    # while a run is live: this agent's publish re-reads decisions and reviews
+    # under the node lock, so a write made during a run is honoured. An older
+    # agent does not say so, and the webapp then keeps refusing.
+    if isinstance(result, dict):
+        result = {**result, "layered_publish": True}
+    # The same kind of marker for Multi mute: an agent that predates it answers
+    # "unknown op" for mute_batch, and ignores `only_batch` on an unmute, which
+    # would turn an Undo into an unmute of whatever the keys name.
+    if (body.op == "mute_batch" or body.only_batch) and isinstance(result, dict):
+        result = {**result, "multi_mute": 1, **(batch_meta or {})}
 
     # Who suppressed what, and when. The node itself carries muted_by/muted_at;
     # this is the time-ordered half. log_event never raises, so auditability
@@ -3548,6 +3745,15 @@ async def graph_triage(body: GraphTriageRequest):
                       project_id=body.project_id, node_id=item.get("key"),
                       label=item.get("label"), muted_by=item.get("muted_by"),
                       channel=body.source or "app")
+    if body.op == "mute_batch" and isinstance(result, dict):
+        from session_log import log_event
+        for item in result.get("items") or []:
+            if item.get("outcome") != "muted":
+                continue
+            log_event("finding_muted", user_id=body.user_id,
+                      project_id=body.project_id, node_id=item.get("key"),
+                      label=item.get("label"), channel="multi",
+                      batch_id=body.batch_id, concept=body.concept)
     if body.op == "mute_many" and isinstance(result, dict):
         from session_log import log_event
         for item in result.get("items") or []:
@@ -3557,6 +3763,22 @@ async def graph_triage(body: GraphTriageRequest):
                       project_id=body.project_id, node_id=item.get("key"),
                       label=item.get("label"), reason=(body.reason or "").strip(),
                       channel=body.source or "app", token_prefix=body.token_prefix)
+    if body.op == "submit_review" and isinstance(result, dict):
+        from session_log import log_event
+        if result.get("written"):
+            # Never the review's text: the why, quotes and fix lever are
+            # target-derived and agent-written. The webapp's audit row carries
+            # a hash of them for forensic matching.
+            log_event("finding_review_submitted", user_id=body.user_id,
+                      project_id=body.project_id, node_id=body.node_id,
+                      label=result.get("label"), channel="mcp",
+                      token_prefix=body.token_prefix,
+                      verdict=(result.get("accepted") or {}).get("verdict"),
+                      score_before=(result.get("before") or {}).get("score"),
+                      score_after=(result.get("after") or {}).get("score"))
+        else:
+            logger.info("graph/triage submit_review refused (%s): node_id=%s project=%s",
+                        result.get("reason"), body.node_id, body.project_id)
     # An already-muted finding was left exactly as it was, so there is no
     # mute to log, and it did match.
     if body.op in ("mute", "unmute", "human_verdict") and not result.get("already"):
@@ -3565,20 +3787,32 @@ async def graph_triage(body: GraphTriageRequest):
         # `muted`/`unmuted`; a verdict reports `updated`.
         applied = result.get("updated") if body.op == "human_verdict" \
             else result.get(f"{body.op}d")
-        if applied:
+        if applied and body.op == "human_verdict":
+            # No reason text: over MCP it is agent-written.
             log_event(
-                "finding_verdict_set" if body.op == "human_verdict" else f"finding_{body.op}d",
+                "finding_verdict_set",
+                user_id=body.user_id,
+                project_id=body.project_id,
+                node_id=body.node_id,
+                label=result.get("label"),
+                channel=body.source or "app",
+                status=body.status or "",
+                score_before=(result.get("before") or {}).get("score"),
+                score_after=(result.get("after") or {}).get("score"),
+            )
+        elif applied:
+            log_event(
+                f"finding_{body.op}d",
                 user_id=body.user_id,
                 project_id=body.project_id,
                 node_id=body.node_id,
                 label=result.get("label"),
                 reason=body.reason or "",
                 channel=body.source or "app",
-                **({"status": body.status or ""} if body.op == "human_verdict" else {}),
             )
-        elif result.get("reason") == "muted":
-            logger.info("graph/triage human_verdict refused on a muted finding: "
-                        "node_id=%s project=%s", body.node_id, body.project_id)
+        elif result.get("reason") in ("muted", "decided_in_app", "ambiguous"):
+            logger.info("graph/triage human_verdict refused (%s): node_id=%s project=%s",
+                        result.get("reason"), body.node_id, body.project_id)
         else:
             # Matched nothing: a stale node id (version-activate recreates
             # nodes), an asset id, or another tenant's. The caller gets a
@@ -3589,6 +3823,88 @@ async def graph_triage(body: GraphTriageRequest):
                 body.op, body.node_id, body.user_id, body.project_id)
 
     return JSONResponse(content=result)
+
+
+class TriageRunStartRequest(BaseModel):
+    """Webapp -> agent: start a triage run with no browser attached.
+
+    The webapp resolved the tenant and checked ownership, the graph writers and
+    (for an MCP start) the cooldown BEFORE calling: `stop_project_run` and this
+    start are keyed on the project alone.
+    """
+    user_id: str
+    project_id: str
+    real_actor_user_id: Optional[str] = None
+    trigger: str = "app"             # app | mcp
+    token_id: Optional[str] = None   # the MCP token's id, never the token
+    max_review_budget: Optional[int] = None
+
+
+class TriageRunStopRequest(BaseModel):
+    project_id: str
+
+
+_RUN_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+
+
+@app.post("/triage/runs", tags=["Triage"], dependencies=[Depends(require_master_internal_auth)])
+async def triage_run_start(body: TriageRunStartRequest):
+    """Start (or attach to) a project's triage run, and answer 202 with its id.
+
+    The same `start_detached_run` the websocket uses, so a run started here is
+    the same run a tab later attaches to, with the same one-run-per-project
+    slot. Runs on the event loop: it only creates a task and waits for the
+    webapp to authorise it, which is where the run id comes from.
+    """
+    if master_key_is_weak():
+        return JSONResponse(status_code=503, content={
+            "error": "INTERNAL_API_KEY is not configured; triage runs are disabled."})
+    for value in (body.user_id, body.project_id):
+        if not _RUN_ID_RE.fullmatch(value or ""):
+            return JSONResponse(status_code=400, content={"error": "invalid tenant identity"})
+    if body.trigger not in ("app", "mcp"):
+        return JSONResponse(status_code=400, content={"error": "trigger must be app or mcp"})
+    if body.token_id is not None and not _RUN_ID_RE.fullmatch(body.token_id):
+        return JSONResponse(status_code=400, content={"error": "invalid token id"})
+    if body.real_actor_user_id is not None and not _RUN_ID_RE.fullmatch(body.real_actor_user_id):
+        return JSONResponse(status_code=400, content={"error": "invalid actor id"})
+
+    from cypherfix_triage.websocket_handler import start_detached_run
+    run, attached, refusal = start_detached_run(
+        body.user_id, body.project_id,
+        real_actor_user_id=body.real_actor_user_id,
+        trigger=body.trigger, token_id=body.token_id,
+        max_review_budget=body.max_review_budget)
+    if refusal:
+        return JSONResponse(status_code=409, content={"error": refusal, "code": "busy"})
+
+    if not attached:
+        try:
+            await asyncio.wait_for(run.authorized.wait(), timeout=20)
+        except asyncio.TimeoutError:
+            pass
+        if run.start_error or (not run.run_id and run.task is not None and run.task.done()):
+            return JSONResponse(status_code=409, content={
+                "error": run.start_error or "the run could not be authorised",
+                "code": "busy"})
+    return JSONResponse(status_code=202, content={
+        "runId": run.run_id or None, "attached": bool(attached),
+        "trigger": run.trigger, "layered_publish": True})
+
+
+@app.post("/triage/runs/stop", tags=["Triage"], dependencies=[Depends(require_master_internal_auth)])
+async def triage_run_stop(body: TriageRunStopRequest):
+    """Stop a project's run. Refused while it publishes (`reason: publishing`).
+
+    Keyed on the project alone, so the webapp checks the caller owns it first.
+    """
+    if master_key_is_weak():
+        return JSONResponse(status_code=503, content={
+            "error": "INTERNAL_API_KEY is not configured; triage runs are disabled."})
+    if not _RUN_ID_RE.fullmatch(body.project_id or ""):
+        return JSONResponse(status_code=400, content={"error": "invalid project id"})
+    from cypherfix_triage.websocket_handler import stop_project_run
+    return JSONResponse(content={**stop_project_run(body.project_id), "layered_publish": True})
 
 
 class NodeFilterPreviewRequest(BaseModel):
@@ -3604,6 +3920,72 @@ class NodeFilterPreviewRequest(BaseModel):
     #: [label, key] pairs from Postgres: nodes an operator unmuted.
     exemptions: Optional[List[List[str]]] = None
     kinds: Optional[List[str]] = None
+
+
+# =============================================================================
+# MULTI MUTE — suggest the other findings a person would mute for the same
+# reason as one they are muting. Read-only: the suggestion is stored as a batch
+# and the later /graph/triage `mute_batch` write accepts only its keys.
+# =============================================================================
+
+class MultiMuteSuggestRequest(BaseModel):
+    user_id: str
+    project_id: str
+    seed_key: str
+    #: The caller's saved "Multi mute" model, read by the webapp from the
+    #: owner's settings. Required: there is no default to fall back to.
+    model: Optional[str] = None
+    #: The project's Mute Rules exemptions as [label, key] pairs: findings a
+    #: person brought back are never proposed.
+    exempt_pairs: List[List[str]] = []
+
+
+@app.post("/graph/multi-mute/suggest", tags=["Graph"],
+          dependencies=[Depends(require_master_internal_auth), Depends(require_internal_auth)])
+async def multi_mute_suggest(body: MultiMuteSuggestRequest):
+    """Suggest findings like the seed, grouped, for a person to confirm."""
+    from multi_mute import service as multi_mute_service
+
+    model = (body.model or "").strip()
+    # Stricter than the master-key dependency, which fails open on a dev install
+    # with no key: this spends a user's LLM keys and reads their whole findings
+    # pool, so it refuses for itself.
+    if master_key_is_weak():
+        return JSONResponse(status_code=503, content={
+            "error": "INTERNAL_API_KEY is not configured; Multi mute is disabled. "
+                     "Generate the secret via redamon.sh.",
+            "multi_mute": 1, "model_used": model})
+    if not model:
+        return JSONResponse(status_code=400, content={
+            "error": "model is required", "multi_mute": 1, "model_used": ""})
+    if not body.user_id or not body.project_id or not body.seed_key:
+        return JSONResponse(status_code=400, content={
+            "error": "missing tenant identity or seed", "multi_mute": 1, "model_used": model})
+    pairs = [p for p in body.exempt_pairs or [] if isinstance(p, list) and len(p) == 2]
+
+    def build_llm(model_name):
+        return build_llm_from_providers(model_name, fetch_user_providers(body.user_id))
+
+    try:
+        payload = await multi_mute_service.suggest(
+            user_id=body.user_id, project_id=body.project_id, seed_key=body.seed_key,
+            model=model, exempt_pairs=pairs, driver=_triage_graph_client().driver,
+            build_llm=build_llm)
+    except multi_mute_service.Superseded:
+        return JSONResponse(status_code=409, content={
+            "error": "A newer Multi mute search replaced this one.",
+            "code": "superseded", "multi_mute": 1, "model_used": model})
+    except multi_mute_service.SuggestError as exc:
+        return JSONResponse(status_code=exc.status, content={
+            "error": exc.message, "code": exc.code, "multi_mute": 1, "model_used": model})
+    except Exception as exc:                                      # noqa: BLE001
+        logger.error(f"multi-mute suggest failed: {exc.__class__.__name__}: {exc}")
+        return JSONResponse(status_code=500, content={
+            "error": "Multi mute failed. The details are in the agent log.",
+            "multi_mute": 1, "model_used": model})
+    # An unreadable answer still carries the exact groups, all unchecked.
+    status_code = 502 if payload.get("status") == "model_unreadable" else 200
+    return JSONResponse(status_code=status_code, content=payload)
 
 
 @app.post("/graph/node-filters/preview", tags=["Graph"],

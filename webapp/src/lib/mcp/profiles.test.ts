@@ -192,7 +192,7 @@ describe('the registry', () => {
     // kali:exec is not counted: every profile carries it by design (see above).
     const WRITES: McpScope[] = [
       'recon:scan', 'recon:queue', 'recon:overwrite', 'recon:settings', 'triage:write', 'triage:mute',
-      'preset:write', 'preset:apply', 'project:rescope',
+      'triage:review', 'triage:run', 'preset:write', 'preset:apply', 'project:rescope',
     ]
     for (const id of ['vuln_mgmt', 'inventory', 'compliance', 'reporting', 'threat_intel', 'soc', 'custom'] as const) {
       const granted = PROFILES[id].recommendedScopes.filter(s => WRITES.includes(s))

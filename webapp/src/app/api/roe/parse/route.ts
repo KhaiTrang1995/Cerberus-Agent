@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { internalKeyHeaders } from '@/lib/agentAuth'
-import { getEffectiveUser } from '@/lib/session'
+import { requireEffectiveUser } from '@/lib/access'
+import { readFeatureModel, featureModelErrorResponse } from '@/lib/featureModels'
+import { callFeatureAgent } from '@/lib/featureAgentCall'
 import { buildParseProposal, proposalIsImplausible, MAX_PROPOSED_CHANGES } from '@/lib/reconSettings/roeParse'
 
-const AGENT_API_URL = process.env.AGENT_API_URL || process.env.NEXT_PUBLIC_AGENT_API_URL || 'http://localhost:8080'
 const MAX_FILE_SIZE = 20 * 1024 * 1024 // 20 MB
 const MAX_PDF_PAGES = 200
 const AGENT_TIMEOUT_MS = 120_000 // 2 minutes for LLM parsing
@@ -28,6 +28,13 @@ function readCurrentValues(formData: FormData): Record<string, unknown> {
 // POST /api/roe/parse - Upload RoE document, extract text, forward to agent for LLM parsing
 export async function POST(request: NextRequest) {
   try {
+    // The caller's own "RoE parsing" model on their own keys. Checked before the
+    // upload is read: without a user there is nobody whose keys may be spent.
+    const eff = await requireEffectiveUser()
+    if (eff instanceof NextResponse) return eff
+    const model = await readFeatureModel(eff.userId, 'roe_parse')
+    if (!model) return featureModelErrorResponse('model_required', 'roe_parse')
+
     const formData = await request.formData()
     const file = formData.get('file') as File | null
 
@@ -98,45 +105,18 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: 'Could not extract text from document' }, { status: 422 })
     }
 
-    // Forward extracted text to agent for LLM parsing (with timeout)
-    const model = formData.get('model') as string | null
-    const userId = (await getEffectiveUser())?.userId ?? null
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), AGENT_TIMEOUT_MS)
+    // The model is the one saved in the user's settings, never a form field: a
+    // client cannot pick a model the user never chose.
+    const agent = await callFeatureAgent({
+      featureId: 'roe_parse',
+      path: '/roe/parse',
+      model,
+      body: { text, model, user_id: eff.userId },
+      timeoutMs: AGENT_TIMEOUT_MS,
+    })
+    if (!agent.ok) return agent.response
 
-    let agentResponse: Response
-    try {
-      agentResponse = await fetch(`${AGENT_API_URL}/roe/parse`, {
-        method: 'POST',
-        headers: internalKeyHeaders({ 'Content-Type': 'application/json' }),
-        // The caller's id travels with the request so the agent can resolve THIS
-        // user's LLM providers. Without it the agent falls back to whatever
-        // project settings happen to be cached in its orchestrator, and on a
-        // freshly started agent - or when the document is uploaded while
-        // CREATING a project, which is the only place this feature is offered -
-        // there is no project loaded and no provider key, so every parse failed
-        // with "LLM not available" whatever model was asked for.
-        body: JSON.stringify({ text, ...(model && { model }), ...(userId && { user_id: userId }) }),
-        signal: controller.signal,
-      })
-    } catch (fetchError) {
-      if (fetchError instanceof DOMException && fetchError.name === 'AbortError') {
-        return NextResponse.json({ error: 'RoE parsing timed out. Try a shorter document or different model.' }, { status: 504 })
-      }
-      throw fetchError
-    } finally {
-      clearTimeout(timeout)
-    }
-
-    if (!agentResponse.ok) {
-      const errorData = await agentResponse.json().catch(() => ({}))
-      return NextResponse.json(
-        { error: errorData.error || 'Agent parsing failed' },
-        { status: agentResponse.status }
-      )
-    }
-
-    const parsed = await agentResponse.json()
+    const parsed = agent.body as { fields?: unknown; unknownKeys?: unknown; registryDigest?: unknown }
 
     // The agent returns what the MODEL said. This turns it into a PROPOSAL: every
     // value re-validated against the same registry bounds an MCP write goes
@@ -175,6 +155,7 @@ export async function POST(request: NextRequest) {
       // Kept separate from the proposal: it is the document, not a setting a
       // person reviews, and the form stores it alongside whatever it confirms.
       roeRawText: text,
+      modelUsed: model,
       unknownKeys: parsed?.unknownKeys ?? [],
       registryDigest: parsed?.registryDigest ?? null,
     })

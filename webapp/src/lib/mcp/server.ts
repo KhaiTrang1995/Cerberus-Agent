@@ -86,6 +86,11 @@ import { cancelQueuedScan, queueRecon } from '@/lib/mcp/queueTools'
 import { SCANNER_NAMES, getScanStatus } from '@/lib/mcp/scannerTools'
 import { VERDICT_STATUSES, setFindingVerdict } from '@/lib/mcp/verdictTools'
 import {
+  getFindingEvidence, getFindingTriage, getTriageStatus, startTriageRun, stopTriageRun,
+  submitFindingReview,
+} from '@/lib/mcp/triageTools'
+import { MCP_RUN_COOLDOWN_MS, MCP_RUNS_PER_DAY } from '@/lib/triageRun'
+import {
   MUTED_ORDERS,
   MUTED_VIA_FILTERS,
   MUTE_MAX_REFS,
@@ -164,7 +169,12 @@ const READ_ONLY: ToolAnnotations = { readOnlyHint: true, openWorldHint: false }
  * audit row. `settings` and `reason` are already recorded, better, by the tools
  * that own them - `update_recon_settings` writes a real before/after diff.
  */
-const UNAUDITED_ARGS = new Set(['projectId', 'question', 'cypher', 'command', 'settings', 'reason'])
+// Free text a caller wrote (and a review's quotes, which are target text) is
+// never copied into an audit row, which also prints as a console line.
+const UNAUDITED_ARGS = new Set([
+  'projectId', 'question', 'cypher', 'command', 'settings', 'reason',
+  'evidenceQuote', 'impactQuote', 'why', 'fixLever',
+])
 
 /**
  * What a call actually read, so an exposure can be scoped after the fact.
@@ -473,6 +483,12 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
         'Each finding carries two ids. `id` is the finding\'s key: set_finding_verdict takes it. ' +
         '`nodeId` is the graph Node ID the RedAmon Priority Board shows in its leftmost column, ' +
         'and the one query_graph looks up with `id(n)`.\n\n' +
+        'The score has layers. `triage_priority_score` is FINAL; `triage_math_score` is the ' +
+        'rules-only score; `triage_decided_by` says which layer set the final one (rules, ' +
+        'review, or person); `reviewedBy` and `reviewCurrent` say who reviewed it and whether ' +
+        'that review still describes the evidence. get_finding_triage says why a finding ranks ' +
+        'where it does. `decidedBy`, `reviewedVia` and `reviewCurrent` filter in the graph, so ' +
+        'their `total` is exact.\n\n' +
         'With the separate mute permission, hide noise you have independent evidence for with ' +
         'mute_findings (it takes either id).\n\n' +
         `${UNTRUSTED_DATA_NOTE}`,
@@ -485,6 +501,12 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
         severity: z.string().optional().describe('critical | high | medium | low | info.'),
         section: z.enum(FINDING_SECTIONS as [string, ...string[]]).optional()
           .describe('Narrow to one board section.'),
+        decidedBy: z.enum(['person', 'review', 'rules']).optional()
+          .describe('Only findings whose final score this layer set.'),
+        reviewedVia: z.enum(['builtin', 'mcp', 'none']).optional()
+          .describe('Only findings reviewed by the built-in AI, by an external agent, or by nobody.'),
+        reviewCurrent: z.enum(['current', 'stale', 'none']).optional()
+          .describe('Only findings whose review still describes the evidence (current) or no longer does (stale).'),
         includeQuotes: z.boolean().optional()
           .describe('Include the AI verdict\'s quoted target output. Untrusted text; off by default.'),
       },
@@ -495,6 +517,7 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
       a => listFindings(ctx, a.projectId, {
         limit: a.limit, offset: a.offset, severity: a.severity,
         section: a.section, includeQuotes: a.includeQuotes,
+        decidedBy: a.decidedBy, reviewedVia: a.reviewedVia, reviewCurrent: a.reviewCurrent,
       }),
       a => a.projectId
     )
@@ -1030,28 +1053,31 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
   server.registerTool(
     'set_finding_verdict',
     {
-      title: 'Record a verdict on a finding',
+      title: 'Record a decision on a finding',
       description:
-        'Mark a finding "confirmed", "likely_noise", or back to "unreviewed", with a one-line ' +
-        'reason. This is how an external triage assistant\'s judgement persists instead of being ' +
-        'recomputed from scratch by the next nightly run.\n\n' +
-        'It is DURABLE and it has consequences: the verdict survives re-scans, and later AI ' +
-        'triage runs will not overrule it. It is recorded as the operator\'s own verdict, ' +
-        'because the token carries their authority, with the node separately noting that it ' +
-        'arrived from an external agent.\n\n' +
+        'Record the operator\'s decision on a finding: "confirmed" (Real), "likely_noise" (False ' +
+        'positive), or "unreviewed" (Reset), with a one-line reason. RedAmon rescores the finding ' +
+        'at once and answers with the score before and after.\n\n' +
+        '- confirmed raises the score: the finding\'s `real` factor becomes 100%.\n' +
+        '- likely_noise moves it to the false-positive section at once.\n' +
+        '- unreviewed clears a decision made over MCP and releases its Mute Rules and prune ' +
+        'protection: the finding is ranked from its rules and any review again.\n' +
+        '- a decision a person made in the app cannot be changed or reset from here ' +
+        '(`Refused (decided_in_app)`).\n\n' +
+        'A decision is DURABLE: it survives re-scans and outranks every review, the built-in ' +
+        'AI\'s and yours. It is recorded as the operator\'s own decision, because the token ' +
+        'carries their authority, with the node separately noting that it arrived over MCP.\n\n' +
         'Get ids from list_findings, and re-read them before writing: a finding id is only valid ' +
-        'until the next scan of that source. If the finding no longer exists this says so rather ' +
-        'than reporting success.\n\n' +
-        'Refused while a triage run is in progress, because a run publishing afterwards would ' +
-        'silently re-file the finding under a section that contradicts the verdict.\n\n' +
-        'A verdict ranks a finding and never hides it; hiding one is mute_findings, a separate ' +
-        'permission. It is refused on a MUTED finding: on one a Mute Rule muted, a verdict would ' +
+        'until the next scan of that source. An id shared by two kinds of finding is refused as ' +
+        'ambiguous; pass `label` to pick one.\n\n' +
+        'A decision ranks a finding and never hides it; hiding one is mute_findings, a separate ' +
+        'permission. It is refused on a MUTED finding: on one a Mute Rule muted, a decision would ' +
         'release the mute, an unmute by another name. If a person wants a muted finding judged, ' +
-        'unmute it first with unmute_findings (needs triage:mute), then record the verdict.',
+        'unmute it first with unmute_findings (needs triage:mute), then record the decision.',
       annotations: {
         readOnlyHint: false,
-        // It replaces any previous verdict rather than only adding, and it
-        // cannot be undone from here except by another verdict.
+        // It replaces any previous decision rather than only adding, and a
+        // Reset removes one.
         destructiveHint: true,
         idempotentHint: true,
         openWorldHint: false,
@@ -1067,16 +1093,232 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
           'Node ID, a different value, and a verdict sent to it is not recorded.'
         ),
         status: z.enum(VERDICT_STATUSES as unknown as [string, ...string[]])
-          .describe('confirmed | likely_noise | unreviewed'),
+          .describe('confirmed (Real) | likely_noise (False positive) | unreviewed (Reset)'),
         reason: z.string().max(500).optional().describe('One line, why. Recorded with the verdict.'),
+        label: z.enum(MUTEABLE_FINDING_LABELS as unknown as [string, ...string[]]).optional()
+          .describe('The finding\'s kind, only when its id is ambiguous.'),
       },
     },
     handler(
       ctx,
       'set_finding_verdict',
-      a => setFindingVerdict(ctx, a.projectId, a.nodeId, a.status, a.reason),
+      a => setFindingVerdict(ctx, a.projectId, a.nodeId, a.status, a.reason, a.label),
       a => a.projectId
     )
+  )
+
+  const findingIdSchema = z.string().min(1).max(200).regex(
+    /^[A-Za-z0-9_.:-]+$/, 'findingId must be alphanumeric (with - _ . or :)'
+  ).describe('The finding\'s `id` from list_findings (not its graph `nodeId`).')
+  const findingLabelSchema = z.enum(MUTEABLE_FINDING_LABELS as unknown as [string, ...string[]])
+    .optional().describe('The finding\'s kind, only when its id is ambiguous.')
+
+  server.registerTool(
+    'get_finding_triage',
+    {
+      title: 'Why a finding ranks where it does',
+      description:
+        'Everything behind one finding\'s place on the Priority Board, layer by layer: the ' +
+        'FINAL score, tier and factors; the RULES that scored it (the four factors C, L, I and R ' +
+        'with the evidence each came from, the signals and the tier inputs); the REVIEW that ' +
+        'corrected it (the built-in AI or an external agent, and whether it still describes the ' +
+        'evidence); a person\'s DECISION, which always wins; its detector, its fix group, its ' +
+        'proof and the run that ranked it.\n\n' +
+        'Read this before submit_finding_review, so a correction targets the factor that is ' +
+        'actually wrong. The review\'s quotes and why are returned only with `includeQuotes`.\n\n' +
+        'A wrong id, another project\'s id and a muted finding are all `Refused (not_found)`.\n\n' +
+        `${UNTRUSTED_DATA_NOTE}`,
+      annotations: READ_ONLY,
+      _meta: scopesMeta({ required: ['triage:read'] }),
+      inputSchema: {
+        projectId: projectIdSchema,
+        findingId: findingIdSchema,
+        label: findingLabelSchema,
+        includeQuotes: z.boolean().optional()
+          .describe('Include the review\'s why and quotes. Untrusted text; off by default.'),
+      },
+    },
+    handler(
+      ctx,
+      'get_finding_triage',
+      a => getFindingTriage(ctx, a.projectId, a.findingId,
+                            { label: a.label, includeQuotes: a.includeQuotes }),
+      a => a.projectId
+    )
+  )
+
+  server.registerTool(
+    'get_finding_evidence',
+    {
+      title: 'Read the evidence behind a finding',
+      description:
+        'The evidence a reviewer reads for one finding, exactly as RedAmon\'s own review model ' +
+        'is shown it: the scanner\'s request and response excerpt, the matched text, the path ' +
+        'or validation result, capped at 2,500 characters. Secret-shaped values are redacted and ' +
+        'volatile headers dropped.\n\n' +
+        'It also returns `evidenceHash` (send it back unchanged with submit_finding_review), ' +
+        'whether the finding is `reviewable` and if not why (`proven`, `decided_by_person`, ' +
+        '`source_not_reviewed`, `not_open`, `no_evidence`, `not_scored`, `out_of_triage_scope`), ' +
+        'the review it carries now, whether a review of it survives the next scan, and the ' +
+        '`contract`: the four verdicts, the eight facts that may be disputed and what each means, ' +
+        'the multiplier range and the minimum quote length.\n\n' +
+        `${UNTRUSTED_DATA_NOTE}`,
+      annotations: READ_ONLY,
+      _meta: scopesMeta({ required: ['triage:read'] }),
+      inputSchema: {
+        projectId: projectIdSchema,
+        findingId: findingIdSchema,
+        label: findingLabelSchema,
+      },
+    },
+    handler(
+      ctx,
+      'get_finding_evidence',
+      a => getFindingEvidence(ctx, a.projectId, a.findingId, { label: a.label }),
+      a => a.projectId
+    )
+  )
+
+  server.registerTool(
+    'submit_finding_review',
+    {
+      title: 'Submit an evidence review of a finding',
+      description:
+        'Act as a second reviewer: read a finding\'s evidence with get_finding_evidence, then ' +
+        'correct the factors behind its score where the evidence contradicts them. You never ' +
+        'set a score. RedAmon checks every quote against the evidence, applies what holds, and ' +
+        'recomputes the score with the same rules as everything else.\n\n' +
+        '- `verdict`: real | doubtful | false_positive | unclear. Anything but unclear needs an ' +
+        '`evidenceQuote` copied EXACTLY from the evidence (at least 8 characters).\n' +
+        '- `disputedFacts`: up to 8 of the named facts, each with its own quote.\n' +
+        '- `impactMultiplier` (0.5-1.5) counts only with an `impactQuote`.\n' +
+        '- A quote not found in the evidence is `dropped`, and its correction with it; nothing ' +
+        'else about the call fails.\n\n' +
+        'Refused (and nothing written) when a person decided the finding, when it is proven and ' +
+        'the review would lower anything, when the evidence changed since you read it ' +
+        '(`evidence_changed`: read it again), when it was never scored, is resolved, or comes ' +
+        'from a source that is not reviewed, or when its id is ambiguous (pass `label`).\n\n' +
+        'Your review is labelled as an agent\'s on the Priority Board. A newer review replaces ' +
+        'it, it expires when the evidence changes, and a person\'s decision always overrides it. ' +
+        'Its text never reaches the CypherFix fix list.',
+      annotations: {
+        readOnlyHint: false,
+        // It replaces the finding's previous review and moves its score.
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      _meta: scopesMeta({ required: ['triage:review'] }),
+      inputSchema: {
+        projectId: projectIdSchema,
+        findingId: findingIdSchema,
+        label: findingLabelSchema,
+        evidenceHash: z.string().regex(/^[0-9a-f]{40}$/, 'evidenceHash is 40 lowercase hex characters')
+          .describe('The `evidenceHash` get_finding_evidence returned, unchanged.'),
+        verdict: z.enum(['real', 'doubtful', 'false_positive', 'unclear'])
+          .describe('real | doubtful | false_positive | unclear'),
+        evidenceQuote: z.string().max(1000).optional()
+          .describe('Exact text from the evidence that shows the verdict.'),
+        disputedFacts: z.array(z.object({
+          fact: z.enum(['reachable', 'tool_confirmed', 'extracted_proof', 'dast_confirmed',
+                        'exploitable_class', 'public_poc', 'sensitive_asset',
+                        'credential_in_response']),
+          quote: z.string().max(1000),
+        })).max(8).optional().describe('Facts the rules relied on that the evidence contradicts.'),
+        impactMultiplier: z.number().min(0.5).max(1.5).optional()
+          .describe('Scale impact 0.5-1.5. Needs impactQuote.'),
+        impactQuote: z.string().max(1000).optional()
+          .describe('Exact text from the evidence that justifies the multiplier.'),
+        why: z.string().max(300).optional().describe('One sentence.'),
+        fixLever: z.string().max(120).optional().describe('What would actually fix it, as a short phrase.'),
+      },
+    },
+    handler(
+      ctx,
+      'submit_finding_review',
+      a => submitFindingReview(ctx, a.projectId, a.findingId, {
+        label: a.label, evidenceHash: a.evidenceHash, verdict: a.verdict,
+        evidenceQuote: a.evidenceQuote, disputedFacts: a.disputedFacts,
+        impactMultiplier: a.impactMultiplier, impactQuote: a.impactQuote,
+        why: a.why, fixLever: a.fixLever,
+      }),
+      a => a.projectId
+    )
+  )
+
+  server.registerTool(
+    'get_triage_status',
+    {
+      title: 'Priority Board run status',
+      description:
+        'Where the project\'s Priority Board ranking stands: `triageState` (never_run, partial, ' +
+        'current, or imported), the live run if any (its phase, progress, who started it), the ' +
+        'last five runs with their outcome, what a new run would do (findings in scope, reviews ' +
+        'it would keep, the review budget, whether a model is configured, anything blocking a ' +
+        'start), when the next start over MCP is allowed and how many were started today, and ' +
+        'how many findings each layer decided.\n\n' +
+        'Poll this while a run you started works, instead of starting another. `blocking` lists ' +
+        'what a live run holds up: version activation, Recon Delta on the current graph, Mute ' +
+        'Rules apply, start_recon, and comparisons against the current graph.',
+      annotations: READ_ONLY,
+      _meta: scopesMeta({ required: ['triage:read'] }),
+      inputSchema: { projectId: projectIdSchema },
+    },
+    handler(ctx, 'get_triage_status', a => getTriageStatus(ctx, a.projectId), a => a.projectId)
+  )
+
+  server.registerTool(
+    'start_triage_run',
+    {
+      title: 'Start a Priority Board run',
+      description:
+        'Re-rank the project: score every finding from the facts, review the evidence of those ' +
+        'with no still-valid review (on the owner\'s configured model, at most 1,000 per run), ' +
+        'rebuild the fix groups and the CypherFix fix list, and publish. Reviews that still ' +
+        'describe their evidence are kept, yours included. With no model configured the run ' +
+        'ranks on the rules alone.\n\n' +
+        'It runs in the background: poll get_triage_status. Nothing on the board changes until ' +
+        'it publishes, and while it runs version switching, Recon Delta and Mute Rules wait for ' +
+        'it.\n\n' +
+        `Runs started over MCP are spaced ${MCP_RUN_COOLDOWN_MS / 60000} minutes apart per project ` +
+        `and capped at ${MCP_RUNS_PER_DAY} a day, across every token: a refusal says when the next ` +
+        'is allowed (`Refused (cooldown)`); wait until then, never loop. Also refused while a run ' +
+        'or another graph writer is live (`Refused (busy)`). Start one only when the ranking is ' +
+        'stale: after a scan, or after many reviews.',
+      annotations: {
+        readOnlyHint: false,
+        // It rewrites every finding's ranking and the fix list.
+        destructiveHint: true,
+        idempotentHint: false,
+        // It spends the owner's model budget on a provider outside RedAmon.
+        openWorldHint: true,
+      },
+      _meta: scopesMeta({ required: ['triage:run'] }),
+      inputSchema: { projectId: projectIdSchema },
+    },
+    handler(ctx, 'start_triage_run', a => startTriageRun(ctx, a.projectId), a => a.projectId)
+  )
+
+  server.registerTool(
+    'stop_triage_run',
+    {
+      title: 'Stop a Priority Board run',
+      description:
+        'Stop the project\'s triage run before it publishes: the board and the fix list stay as ' +
+        'they were. It can stop a run a person started, and the stop is audited. Once the run is ' +
+        'publishing the stop is refused (`reason: publishing`): it finishes in moments, and a ' +
+        'stop then would half-write the board. With no run in progress it says so.',
+      annotations: {
+        readOnlyHint: false,
+        // It aborts work in progress.
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      _meta: scopesMeta({ required: ['triage:run'] }),
+      inputSchema: { projectId: projectIdSchema },
+    },
+    handler(ctx, 'stop_triage_run', a => stopTriageRun(ctx, a.projectId), a => a.projectId)
   )
 
   const findingIdsSchema = (max: number) =>

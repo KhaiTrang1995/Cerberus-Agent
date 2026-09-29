@@ -82,7 +82,7 @@ class TriageRun:
     container. A multi-replica agent would need this in Postgres or Redis.
     """
 
-    def __init__(self, project_id: str):
+    def __init__(self, project_id: str, trigger: str = "app", token_id: str | None = None):
         self.project_id = project_id
         self.task: asyncio.Task | None = None
         self.orchestrator: TriageOrchestrator | None = None
@@ -92,10 +92,22 @@ class TriageRun:
         self.last_phase: dict | None = None
         self.findings: list = []
         self.terminal: tuple[str, dict] | None = None  # (msg_type, payload)
+        #: Who started it, for the banner and the audit: `app` or `mcp`.
+        self.trigger = trigger
+        self.token_id = token_id
+        #: Set once the webapp has authorised the run (or refused it), so a
+        #: headless start can answer with the run id.
+        self.authorized = asyncio.Event()
+        self.run_id: str = ""
+        self.start_error: str = ""
 
     @property
     def is_active(self) -> bool:
         return self.task is not None and not self.task.done()
+
+    @property
+    def is_publishing(self) -> bool:
+        return bool(self.last_phase) and self.last_phase.get("phase") == "publishing"
 
     def attach(self, websocket: WebSocket) -> None:
         self.socket = websocket
@@ -155,6 +167,14 @@ class TriageRunCallback:
 
     def __init__(self, run: TriageRun):
         self.run = run
+
+    async def on_authorized(self, run_id: str):
+        self.run.run_id = run_id
+        self.run.authorized.set()
+
+    async def on_start_refused(self, reason: str):
+        self.run.start_error = str(reason or "")[:300]
+        self.run.authorized.set()
 
     async def on_phase(self, phase: str, description: str, progress: int = 0):
         await self._send("triage_phase", {
@@ -234,24 +254,122 @@ def _release_triage_slot(project_id: str) -> None:
     _TRIAGE_IN_FLIGHT.discard(project_id)
 
 
+#: What a Stop answers while the run is writing its results.
+PUBLISHING_REFUSAL = "the run is publishing and will finish in moments"
+
+#: What a start answers while the previous run is still recording its outcome.
+STILL_FINISHING = ("the previous triage run is still finishing; "
+                   "retry in a minute")
+
+
 def stop_project_run(project_id: str) -> dict:
     """Cancel the in-flight run for a project, from outside the socket.
 
-    Called by `/graph/triage` op `stop_run` when the webapp is about to delete
-    the project (X12). Without it the run would keep working against a project
-    that is being deleted, and only notice at its next heartbeat.
+    Called by `POST /triage/runs/stop` (an MCP stop) and by `/graph/triage` op
+    `stop_run` when the webapp is about to delete the project (X12). Without it
+    the run would keep working against a project that is being deleted, and
+    only notice at its next heartbeat.
 
-    Cancelling is enough: the run's own `finally` releases the slot and reports
-    the outcome, and its publish and heartbeat calls fail closed once the
-    project row is gone.
+    REFUSED once the run is publishing: a cancel then would leave half the
+    batches on the board and no fix list (B17). The publish takes moments.
+
+    Cancelling is enough otherwise: the run's own `finally` releases the slot
+    and reports the outcome, and its publish and heartbeat calls fail closed
+    once the project row is gone.
     """
     run = _RUNS.get(project_id)
     if run is None or not run.is_active:
         return {"stopped": False, "reason": "no run in progress"}
+    if run.is_publishing:
+        return {"stopped": False, "reason": "publishing", "runId": run.run_id}
     run.status = "stopped"
     if run.task is not None:
         run.task.cancel()
-    return {"stopped": True}
+    return {"stopped": True, "runId": run.run_id}
+
+
+def _new_state(user_id: str, project_id: str, session_id: str = "") -> TriageState:
+    return {
+        "user_id": user_id,
+        "project_id": project_id,
+        "session_id": session_id,
+        "settings": {},
+        "raw_data": {},
+        "analysis_result": None,
+        "status": "initializing",
+        "current_phase": "",
+        "error": None,
+    }
+
+
+def start_detached_run(user_id: str, project_id: str,
+                       real_actor_user_id: str | None = None,
+                       trigger: str = "app", token_id: str | None = None,
+                       max_review_budget: int | None = None,
+                       socket: WebSocket | None = None,
+                       session_id: str = "") -> tuple:
+    """Start a run whose lifetime is its own, or attach to the one going.
+
+    The one start path, for the websocket (a person) and for
+    `POST /triage/runs` (an MCP agent). Returns `(run, attached, refusal)`:
+    `attached` when a run was already working for this project, `refusal` a
+    reason and no run when the slot is still held by a run that is finishing.
+
+    The slot is held until the old run has recorded its outcome, so a start
+    right after a Stop gets a clear "still finishing" rather than the webapp's
+    "a run is already in progress" (C19).
+    """
+    running = _active_run(project_id)
+    if running is not None:
+        if socket is not None:
+            running.attach(socket)
+        return running, True, None
+
+    if not _claim_triage_slot(project_id):
+        return None, False, STILL_FINISHING
+
+    run = TriageRun(project_id, trigger=trigger, token_id=token_id)
+    if socket is not None:
+        run.attach(socket)
+    _RUNS[project_id] = run
+
+    orchestrator = TriageOrchestrator(
+        user_id=user_id, project_id=project_id,
+        callback=TriageRunCallback(run),
+        real_actor_user_id=real_actor_user_id,
+        trigger=trigger, token_id=token_id,
+        max_review_budget=max_review_budget,
+    )
+    run.orchestrator = orchestrator
+    state = _new_state(user_id, project_id, session_id)
+
+    async def run_triage():
+        try:
+            await orchestrator.run(state)
+        except asyncio.CancelledError:
+            run.status = "stopped"
+            raise
+        except Exception:
+            logger.exception("Triage failed")
+            run.status = "error"
+            await TriageRunCallback(run).on_error(
+                safe_error("internal_error"),
+                recoverable=False,
+                code="internal_error",
+            )
+        finally:
+            # The run owns its own teardown now that it outlives the socket:
+            # nothing else is guaranteed to still be around when it ends. The
+            # slot is released only here, after `finish` has been recorded.
+            run.authorized.set()
+            _release_triage_slot(run.project_id)
+            try:
+                await orchestrator.cleanup()
+            except Exception:
+                logger.debug("Triage orchestrator cleanup failed", exc_info=True)
+
+    run.task = asyncio.create_task(run_triage())
+    return run, False, None
 
 
 async def handle_triage_websocket(websocket: WebSocket):
@@ -299,17 +417,8 @@ async def handle_triage_websocket(websocket: WebSocket):
             elif msg_type == "init":
                 # Identity is bound from the VERIFIED ticket claims (S4), not the
                 # self-asserted init frame.
-                state: TriageState = {
-                    "user_id": str(_claims["sub"]),
-                    "project_id": str(_claims["pid"]),
-                    "session_id": str(_claims["sid"]),
-                    "settings": {},
-                    "raw_data": {},
-                    "analysis_result": None,
-                    "status": "initializing",
-                    "current_phase": "",
-                    "error": None,
-                }
+                state: TriageState = _new_state(
+                    str(_claims["sub"]), str(_claims["pid"]), str(_claims["sid"]))
                 await websocket.send_json({
                     "type": "connected", "session_id": state["session_id"],
                 })
@@ -336,63 +445,26 @@ async def handle_triage_websocket(websocket: WebSocket):
                 # that is still changing, race each other writing verdicts back,
                 # and bill the operator for both.
                 #
-                # A second start now ATTACHES to the run already going rather
-                # than erroring: the caller wants the answer that run is already
+                # A second start ATTACHES to the run already going rather than
+                # erroring: the caller wants the answer that run is already
                 # computing, and after a reload the tab cannot know one exists.
-                running = _active_run(state["project_id"])
-                if running is not None:
-                    running.attach(websocket)
-                    attached_run = running
-                    await running.replay(websocket)
+                run, attached, refusal = start_detached_run(
+                    state["user_id"], state["project_id"],
+                    # The person actually signed in, when an admin acts as
+                    # the owner (B13). Absent from a ticket minted before
+                    # the claim existed.
+                    real_actor_user_id=(str(_claims["act"]) if _claims.get("act") else None),
+                    trigger="app", socket=websocket, session_id=state["session_id"])
+                if refusal:
+                    await callback.on_error(refusal[:1].upper() + refusal[1:] + ".",
+                                            recoverable=True)
                     continue
-
-                if not _claim_triage_slot(state["project_id"]):
-                    await callback.on_error(
-                        "A triage run is already in progress for this project. "
-                        "Wait for it to finish, or stop it first.",
-                        recoverable=True,
-                    )
-                    continue
-                triage_project_id = state["project_id"]
-
-                run = TriageRun(state["project_id"])
-                run.attach(websocket)
                 attached_run = run
-                _RUNS[state["project_id"]] = run
-
-                orchestrator = TriageOrchestrator(
-                    user_id=state["user_id"],
-                    project_id=state["project_id"],
-                    callback=TriageRunCallback(run),
-                )
-                run.orchestrator = orchestrator
-
-                async def run_triage(run=run, orchestrator=orchestrator, state=state):
-                    try:
-                        await orchestrator.run(state)
-                    except asyncio.CancelledError:
-                        run.status = "stopped"
-                        raise
-                    except Exception as e:
-                        logger.exception("Triage failed")
-                        run.status = "error"
-                        await TriageRunCallback(run).on_error(
-                            safe_error("internal_error"),
-                            recoverable=False,
-                            code="internal_error",
-                        )
-                    finally:
-                        # The run owns its own teardown now that it outlives the
-                        # socket: nothing else is guaranteed to still be around
-                        # when it ends.
-                        _release_triage_slot(run.project_id)
-                        try:
-                            await orchestrator.cleanup()
-                        except Exception:
-                            logger.debug("Triage orchestrator cleanup failed", exc_info=True)
-
-                run.task = asyncio.create_task(run_triage())
+                triage_project_id = state["project_id"]
+                orchestrator = run.orchestrator
                 triage_task = run.task
+                if attached:
+                    await run.replay(websocket)
 
             elif msg_type == "stop":
                 # Explicit operator intent is the ONLY thing that cancels a run.
@@ -400,10 +472,18 @@ async def handle_triage_websocket(websocket: WebSocket):
                 # run it did not itself start.
                 stopping = attached_run or _active_run(state["project_id"] if state else "")
                 if stopping is not None and stopping.is_active:
+                    if stopping.is_publishing:
+                        # A cancel now would half-write the board (B17).
+                        await callback.on_error(
+                            PUBLISHING_REFUSAL[:1].upper() + PUBLISHING_REFUSAL[1:] + ".",
+                            recoverable=True, code="publishing")
+                        continue
                     stopping.status = "stopped"
                     stopping.task.cancel()
+                    # The slot stays held until the run's own `finally` has
+                    # recorded the outcome; releasing it here let a new start
+                    # race the old run's finish.
                     _RUNS.pop(stopping.project_id, None)
-                    _release_triage_slot(stopping.project_id)
                     await websocket.send_json({"type": "stopped"})
 
     except WebSocketDisconnect:

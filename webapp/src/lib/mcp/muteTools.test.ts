@@ -72,7 +72,7 @@ import {
   reserveMuteBudget,
 } from '@/lib/mcpAuth'
 import { McpToolError } from './errors'
-import { muteFindings, searchMutedFindings, unmuteFindings } from './muteTools'
+import { MUTED_VIA_FILTERS, muteFindings, searchMutedFindings, unmuteFindings } from './muteTools'
 import { buildMcpServer } from './server'
 import type { McpContext } from './tools'
 
@@ -821,5 +821,15 @@ describe('the advertised schema is enforced', () => {
     vi.stubEnv('MCP_MUTE_DAILY_BUDGET', '1')
     r = await call('mute_findings', { projectId: 'p1', findingIds: ['v1'], reason: 'noise, per owner' })
     expect(r.text).toMatch(/^Refused \(budget_exhausted\)/)
+  })
+})
+
+// Review finding, proposed (adjacent gap, not built): MCP reports a Multi mute
+// as `muted_via: multi` but cannot filter to one, and its `person` filter
+// leaves Multi mutes out. Adding it changes the MCP tool schema, which needs
+// the MCP API reference regenerated, so it is proposed rather than written.
+describe('the muted_via filter', () => {
+  test.fails('reaches Multi mutes', () => {
+    expect(MUTED_VIA_FILTERS).toContain('multi')
   })
 })

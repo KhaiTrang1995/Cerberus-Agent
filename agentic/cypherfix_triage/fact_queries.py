@@ -228,12 +228,23 @@ RETURN collect(DISTINCT coalesce(n.name, n.address)) AS hosts
         # `triage_detector` is written by the publish step, so a finding only
         # gets a vote after a run has ranked it. That is exactly right: the
         # click happened on the board, which means a run produced it.
+        #
+        # Two more filters, both about WHOSE judgement this is:
+        # - `triage_verdict_by` must be this user. An imported project keeps
+        #   its previous owner's decisions, and those must not teach the
+        #   importer's detectors. A decision older than the field counts as
+        #   the node's owner's.
+        # - only decisions made in the app. An unattended agent's verdicts
+        #   over MCP would otherwise retune this user's detectors across every
+        #   project (product decision P1).
         "query": """
 MATCH (n:Vulnerability|JsReconFinding|Secret|MultiscannerFinding|GithubSecret
        |GithubSensitiveFile|MalPackageFinding|ExploitGvm {user_id: $userId})
 WHERE n.triage_source = 'human'
   AND n.triage_status IN ['confirmed', 'likely_noise']
   AND n.triage_detector IS NOT NULL
+  AND coalesce(n.triage_verdict_by, n.user_id) = $userId
+  AND coalesce(n.triage_verdict_channel, 'app') = 'app'
 RETURN n.triage_detector AS detector,
        count(CASE WHEN n.triage_status = 'confirmed' THEN 1 END) AS real,
        count(CASE WHEN n.triage_status = 'likely_noise' THEN 1 END) AS fp
@@ -256,6 +267,7 @@ RETURN n.triage_detector AS detector,
 FINDING_QUERIES = [
     {
         "name": "vulnerabilities",
+        "id_expr": "v.id",
         "label": "Vulnerability",
         "query": """
 MATCH (v:Vulnerability {user_id: $userId, project_id: $projectId})
@@ -283,7 +295,7 @@ RETURN v.id AS id, 'Vulnerability' AS label,
        v.confidence_score AS confidence_score, v.confidence AS confidence,
        v.ai_asr AS ai_asr, v.ai_oracle_kind AS ai_oracle_kind,
        v.introspection_enabled AS introspection_enabled,
-       v.raw_response AS raw_response, v.evidence AS evidence,
+       v.raw_request AS raw_request, v.raw_response AS raw_response, v.evidence AS evidence,
        v.package_version AS package_version, v.package_name AS package_name,
        v.purl AS package_purl, v.fixed_version AS fixed_version,
        v.triage_status AS triage_status, v.triage_source AS triage_source,
@@ -323,6 +335,7 @@ RETURN v.id AS id, 'Vulnerability' AS label,
     },
     {
         "name": "exploits",
+        "id_expr": "ex.id",
         "label": "ExploitGvm",
         "query": """
 MATCH (ex:ExploitGvm {user_id: $userId, project_id: $projectId})
@@ -342,6 +355,7 @@ RETURN ex.id AS id, 'ExploitGvm' AS label, 'gvm' AS source,
     },
     {
         "name": "secrets",
+        "id_expr": "s.id",
         "label": "Secret",
         "query": """
 MATCH (s:Secret {user_id: $userId, project_id: $projectId})
@@ -361,6 +375,7 @@ RETURN s.id AS id, 'Secret' AS label, coalesce(s.source, 'js_recon') AS source,
     },
     {
         "name": "js_recon",
+        "id_expr": "j.id",
         "label": "JsReconFinding",
         "query": """
 MATCH (j:JsReconFinding {user_id: $userId, project_id: $projectId})
@@ -381,6 +396,7 @@ RETURN j.id AS id, 'JsReconFinding' AS label, 'js_recon' AS source,
     },
     {
         "name": "multiscanner",
+        "id_expr": "tf.id",
         "label": "MultiscannerFinding",
         "query": """
 MATCH (tf:MultiscannerFinding {user_id: $userId, project_id: $projectId})
@@ -399,6 +415,7 @@ RETURN tf.id AS id, 'MultiscannerFinding' AS label,
     },
     {
         "name": "github_secrets",
+        "id_expr": "g.id",
         "label": "GithubSecret",
         "query": """
 MATCH (g:GithubSecret {user_id: $userId, project_id: $projectId})
@@ -416,6 +433,7 @@ RETURN g.id AS id, 'GithubSecret' AS label, 'github_hunt' AS source,
     },
     {
         "name": "github_files",
+        "id_expr": "gf.id",
         "label": "GithubSensitiveFile",
         "query": """
 MATCH (gf:GithubSensitiveFile {user_id: $userId, project_id: $projectId})
@@ -434,6 +452,7 @@ RETURN gf.id AS id, 'GithubSensitiveFile' AS label, 'github_hunt' AS source,
     },
     {
         "name": "mal_packages",
+        "id_expr": "coalesce(f.finding_id, f.id)",
         "label": "MalPackageFinding",
         "query": """
 MATCH (pkg:Package {user_id: $userId, project_id: $projectId})
@@ -457,6 +476,51 @@ RETURN coalesce(f.finding_id, f.id) AS id, 'MalPackageFinding' AS label,
 """,
     },
 ]
+
+
+def finding_query_by_id(query_def: dict) -> str:
+    """One FINDING_QUERIES entry, narrowed to one finding (`$findingId`).
+
+    The same row a run scores, so the evidence an external reviewer is shown
+    and hashed is exactly what the built-in reviewer would read. A finding the
+    query filters out (muted, a JsRecon `js_file`, a MalPackageFinding with no
+    flagged Package) returns nothing: it is not in triage scope.
+    """
+    query = query_def["query"]
+    head, sep, tail = query.partition("\nWHERE ")
+    if not sep:                                            # pragma: no cover
+        raise ValueError(f"{query_def['name']} has no WHERE to narrow")
+    return f"{head}\nWHERE {query_def['id_expr']} = $findingId AND {tail}"
+
+
+#: The review and decision layers of every non-muted finding of the tenant,
+#: joined to the scored rows by (label, id) in Python. Read once per run, after
+#: scoring: a review or a verdict written while the run works is re-read again,
+#: under the node lock, when the run publishes.
+STORED_LAYERS = {
+    "name": "stored_layers",
+    "query": """
+MATCH (n:Vulnerability|JsReconFinding|Secret|MultiscannerFinding|GithubSecret
+       |GithubSensitiveFile|MalPackageFinding|ExploitGvm {user_id: $userId, project_id: $projectId})
+WHERE NOT n:Muted
+RETURN CASE WHEN n:MalPackageFinding THEN coalesce(n.finding_id, n.id) ELSE n.id END AS id,
+       [l IN labels(n) WHERE l <> 'Muted'][0] AS label,
+       n.triage_status AS triage_status, n.triage_source AS triage_source,
+       n.triage_verdict_channel AS triage_verdict_channel,
+       n.triage_evidence_hash AS triage_evidence_hash,
+       n.triage_ai_verdict AS triage_ai_verdict,
+       n.triage_ai_corrections AS triage_ai_corrections,
+       n.triage_ai_quote AS triage_ai_quote,
+       n.triage_ai_model AS triage_ai_model,
+       n.triage_ai_why AS triage_ai_why,
+       n.triage_ai_channel AS triage_ai_channel,
+       n.triage_ai_by AS triage_ai_by,
+       n.triage_ai_evidence_hash AS triage_ai_evidence_hash,
+       n.triage_ai_prompt_version AS triage_ai_prompt_version,
+       n.triage_fix_lever AS triage_fix_lever,
+       n.triage_reason AS triage_reason
+""",
+}
 
 
 # ===========================================================================

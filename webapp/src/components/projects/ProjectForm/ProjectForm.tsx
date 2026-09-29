@@ -1298,7 +1298,6 @@ export function ProjectForm({
         onLoadUserPreset={(preset) => loadPreset({ kind: 'user', ...preset })}
         currentPresetId={appliedPreset?.id}
         userId={userId}
-        model={(formData.agentOpenaiModel as string) || 'claude-opus-4-6'}
       />
 
       {/* User Preset: Save modal */}

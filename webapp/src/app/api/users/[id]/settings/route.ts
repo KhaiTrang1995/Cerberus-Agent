@@ -5,6 +5,9 @@ import { orchestratorFetch } from '@/lib/orchestrator'
 import { sanitizeBodyRules } from '@/lib/captureBodyRules'
 import { isValidGithubHost } from '@/lib/github/ownerTarget'
 import { ROTATION_TOOL_NAMES } from '@/lib/rotationTools'
+import { requireEffectiveUser } from '@/lib/access'
+import { writeAudit } from '@/lib/audit'
+import { featureModelsMap, parseFeatureModelsPatch, type FeatureModelsPatch } from '@/lib/featureModels'
 
 interface RouteParams {
   params: Promise<{ id: string }>
@@ -83,6 +86,35 @@ function maskSecrets<T extends Record<string, unknown>>(row: T): T {
     if (typeof out[f] === 'string') out[f] = maskSecret(out[f] as string)
   }
   return out as T
+}
+
+/**
+ * Merge a validated featureModels patch in one statement. A Prisma
+ * read-modify-write would let two tabs saving different features drop each
+ * other's key. The raw UPDATE skips Prisma's @updatedAt, hence updated_at here.
+ * Only called for the effective user (the PUT's gate), so the target is also
+ * the effective user the audit row records.
+ */
+async function applyFeatureModels(userId: string, patch: FeatureModelsPatch, actorId: string | null): Promise<void> {
+  if (Object.keys(patch.set).length === 0 && patch.removed.length === 0) return
+  const beforeRow = await prisma.userSettings.findUnique({ where: { userId }, select: { featureModels: true } })
+  if (!beforeRow) {
+    await prisma.userSettings.upsert({ where: { userId }, update: {}, create: { userId } })
+  }
+  await prisma.$executeRaw`
+    UPDATE user_settings
+    SET feature_models = (feature_models || ${JSON.stringify(patch.set)}::jsonb) - ${patch.removed}::text[],
+        updated_at = now()
+    WHERE user_id = ${userId}`
+  const afterRow = await prisma.userSettings.findUnique({ where: { userId }, select: { featureModels: true } })
+  await writeAudit({
+    actorId,
+    action: 'user_settings.feature_models',
+    targetType: 'user',
+    targetId: userId,
+    before: { featureModels: featureModelsMap(beforeRow?.featureModels) },
+    after: { featureModels: featureModelsMap(afterRow?.featureModels), effectiveUserId: userId },
+  })
 }
 
 // GET /api/users/[id]/settings
@@ -184,6 +216,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
         // never saved settings sees a different list from the one both matchers
         // actually apply.
         scaIntelIgnoreSuffixes: 'oastify.com,oast.fun,mburpcollab.com,canarytokens.com,pipedream.net',
+        featureModels: {},
         rotationConfigs,
       })
     }
@@ -213,6 +246,27 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     if (denied) return denied
 
     const body = await request.json()
+
+    // A feature's model decides whose provider keys that feature spends, so it
+    // is the person's own choice: neither the admin bypass of requireUserAccess
+    // nor a service key extends to it. Refused or invalid, the whole PUT stops
+    // here, before anything else in it is written.
+    let featureModelsPatch: FeatureModelsPatch | null = null
+    let featureModelsActor: string | null = null
+    if ('featureModels' in body) {
+      const refused = NextResponse.json(
+        { error: 'Models by feature can only be changed by the signed-in user, for their own account' },
+        { status: 403 },
+      )
+      if (isInternalRequest(request) || isScannerRequest(request)) return refused
+      const eff = await requireEffectiveUser()
+      if (eff instanceof NextResponse) return eff
+      if (eff.userId !== id) return refused
+      const parsed = parseFeatureModelsPatch(body.featureModels)
+      if ('error' in parsed) return NextResponse.json({ error: parsed.error }, { status: 400 })
+      featureModelsPatch = parsed
+      featureModelsActor = (await getSession())?.userId ?? null
+    }
 
     // TrafficMind capture-proxy config (incl. the egress guard) is a GLOBAL,
     // admin-only control: there is a single shared proxy serving every user and
@@ -324,6 +378,9 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     const captureDesiredEnabled = captureEnabledProvided
       ? Boolean(body.captureProxyEnabled)
       : (existing?.captureProxyEnabled ?? true)
+
+    // Before the upsert below, so the row it returns carries the merged map.
+    if (featureModelsPatch) await applyFeatureModels(id, featureModelsPatch, featureModelsActor)
 
     const settings = await prisma.userSettings.upsert({
       where: { userId: id },

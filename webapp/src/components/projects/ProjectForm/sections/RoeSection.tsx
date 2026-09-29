@@ -6,6 +6,8 @@ import { WikiInfoButton } from '@/components/ui'
 import { Modal } from '@/components/ui/Modal/Modal'
 import type { Project } from '@prisma/client'
 import { currentValuesForDiff, type ParseProposal } from '@/lib/reconSettings/roeParse'
+import { FeatureModelLine, useFeatureModelGate } from '@/components/shared/FeatureModelGate'
+import { featureModelMessage, readFeatureModelCode } from '@/lib/llmFeatures'
 import styles from '../ProjectForm.module.css'
 
 type ProjectFormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
@@ -67,21 +69,21 @@ export function RoeSection({ data, updateField, updateMultipleFields, mode, onFi
   const [parseError, setParseError] = useState<string | null>(null)
   const [proposal, setProposal] = useState<(ParseProposal & { roeRawText?: string }) | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const { ensureFeatureModel, fetchWithFeatureModel } = useFeatureModelGate()
 
   const readOnly = mode === 'edit'
 
   const handleFileUpload = async (file: File) => {
-    setIsParsing(true)
     setParseError(null)
+    // The document is read by the user's own "RoE parsing" model, which the
+    // route looks up itself; picking one here only makes sure there is one.
+    if (!(await ensureFeatureModel('roe_parse'))) return
+    setIsParsing(true)
     onFileSelected(file)
 
     try {
       const formData = new FormData()
       formData.append('file', file)
-      // Pass the currently selected LLM model so the agent uses it for parsing
-      if (data.agentOpenaiModel) {
-        formData.append('model', data.agentOpenaiModel as string)
-      }
       // The present values, so what comes back is a DIFF rather than a list of
       // assignments: a parsed value equal to what is already set is not a
       // change. Narrowed to the fields a document could propose - the form's
@@ -89,14 +91,17 @@ export function RoeSection({ data, updateField, updateMultipleFields, mode, onFi
       // travel should not travel.
       formData.append('current', JSON.stringify(currentValuesForDiff(data as never)))
 
-      const response = await fetch('/api/roe/parse', {
+      const response = await fetchWithFeatureModel('roe_parse', () => fetch('/api/roe/parse', {
         method: 'POST',
         body: formData,
-      })
+      }))
 
       if (!response.ok) {
         const err = await response.json().catch(() => ({}))
-        throw new Error(err.error || `Parse failed (${response.status})`)
+        const code = readFeatureModelCode(err)
+        throw new Error(code
+          ? featureModelMessage(code, typeof err.model === 'string' ? err.model : undefined)
+          : err.error || `Parse failed (${response.status})`)
       }
 
       // A PROPOSAL, not a write. There is no field map here and there must never
@@ -175,28 +180,34 @@ export function RoeSection({ data, updateField, updateMultipleFields, mode, onFi
                     style={{ display: 'none' }}
                     onChange={(e) => {
                       const file = e.target.files?.[0]
+                      // Cleared so choosing the same file again, after a
+                      // cancelled model prompt or a failed parse, fires again.
+                      e.target.value = ''
                       if (file) handleFileUpload(file)
                     }}
                   />
-                  <button
-                    type="button"
-                    className="secondaryButton"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={isParsing}
-                    style={{ width: 'fit-content' }}
-                  >
-                    {isParsing ? (
-                      <>
-                        <Loader2 size={14} className={styles.spinner} />
-                        Parsing RoE document...
-                      </>
-                    ) : (
-                      <>
-                        <Upload size={14} />
-                        Upload &amp; Parse Document
-                      </>
-                    )}
-                  </button>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className="secondaryButton"
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={isParsing}
+                      style={{ width: 'fit-content' }}
+                    >
+                      {isParsing ? (
+                        <>
+                          <Loader2 size={14} className={styles.spinner} />
+                          Parsing RoE document...
+                        </>
+                      ) : (
+                        <>
+                          <Upload size={14} />
+                          Upload &amp; Parse Document
+                        </>
+                      )}
+                    </button>
+                    <FeatureModelLine featureId="roe_parse" />
+                  </div>
                   {parseError && (
                     <span style={{ color: 'var(--color-error)', fontSize: '0.8rem', marginTop: 4 }}>
                       {parseError}

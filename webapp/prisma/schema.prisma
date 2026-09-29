@@ -303,6 +303,13 @@ model UserSettings {
   // default list" (the 5 providers the feed actually contains).
   scaIntelIgnoreSuffixes String @default("oastify.com,oast.fun,mburpcollab.com,canarytokens.com,pipedream.net") @map("sca_intel_ignore_suffixes")
 
+  /// The model id each AI feature runs on for this user, in every project,
+  /// keyed by the registry ids in src/lib/llmFeatures.ts. A missing key means
+  /// "not chosen yet": the feature asks for one on first use. Routes read it
+  /// server-side and never take a model from a request body, so a client cannot
+  /// run a feature on a model the user never picked.
+  featureModels Json @default("{}") @map("feature_models")
+
   createdAt       DateTime @default(now()) @map("created_at")
   updatedAt       DateTime @updatedAt @map("updated_at")
 
@@ -2146,7 +2153,18 @@ model TriageRun {
   // A code, never raw provider text: that routinely carries the API key.
   errorClass        String    @default("") @map("error_class")
 
+  // Who started it: `app` (a person's tab) or `mcp` (an external agent). An
+  // MCP start is spaced and capped per project, counted from these rows.
+  trigger           String    @default("app")
+  // The MCP token's id (never the token) for an `mcp` start.
+  tokenId           String?   @map("token_id")
+  // Where the run is, from its heartbeat, so a caller other than the run's own
+  // tab (another tab, an MCP agent) can show it.
+  phase             String    @default("")
+  progress          Int       @default(0)
+
   @@index([projectId, status])
+  @@index([projectId, trigger, startedAt])
   @@map("triage_runs")
 }
 

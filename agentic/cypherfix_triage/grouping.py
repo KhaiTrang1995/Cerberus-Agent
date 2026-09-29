@@ -155,10 +155,16 @@ def group_key(finding: dict) -> str:
 def assign_groups(scored: list) -> dict:
     """Stamp `group_key` on every row and return the groups, best first.
 
-    The group's risk is 1 - PROD(1 - r) over its OPEN, non-false-positive
-    members: the probability that at least one of them gets exploited. More
-    affected hosts raise it with diminishing returns, and it never exceeds 1.
-    The group's tier is its best member's.
+    The group's risk is 1 - PROD(1 - r) over its OPEN members: the probability
+    that at least one of them gets exploited. More affected hosts raise it with
+    diminishing returns, and it never exceeds 1. The group's tier is its best
+    member's.
+
+    A member is read through its `group_view` when the run has combined the
+    layers (else its own base values). A false positive decided by a person or
+    by the built-in AI leaves the group; one an external agent's review called
+    keeps its member, so a review over MCP can never silently delete a fix item
+    (product decision P2). The orchestrator builds that view.
     """
     from . import score_model
 
@@ -170,11 +176,12 @@ def assign_groups(scored: list) -> dict:
 
     result = {}
     for key, members in groups.items():
-        live = [m for m in members
-                if m.get("state") == score_model.STATE_OPEN
-                and m.get("ai_verdict") != "false_positive"]
-        risks = [float(m.get("risk") or 0.0) for m in live]
-        tier = score_model.best_tier([m.get("tier", "T4") for m in live]) if live else "T4"
+        views = [(m, m.get("group_view") or m) for m in members]
+        live = [m for m, view in views if view.get("state") == score_model.STATE_OPEN]
+        live_views = [view for _, view in views if view.get("state") == score_model.STATE_OPEN]
+        risks = [float(view.get("risk") or 0.0) for view in live_views]
+        tier = score_model.best_tier([view.get("tier", "T4") for view in live_views]) \
+            if live_views else "T4"
         risk = score_model.group_risk(risks) if risks else 0.0
         result[key] = {
             "key": key,

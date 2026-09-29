@@ -43,18 +43,37 @@ class _RecordingSemaphore:
 
 
 class _FakeTriageClient:
+    driver = None
+
     def __init__(self):
         self.calls = []
         self.verdict_updates = True
         self.verdict_muted = False
+        self.verdict_busy = False
+        self.review_result = {"written": True, "label": "Vulnerability",
+                              "accepted": {"verdict": "doubtful"},
+                              "before": {"score": 70.0}, "after": {"score": 20.0}}
 
     def list_triage_findings(self, user_id, project_id, **kwargs):
         self.calls.append(("list_triage_findings", user_id, project_id, kwargs))
         return [{"id": "f1", "label": "Vulnerability"}]
 
-    def count_triage_findings(self, user_id, project_id):
-        self.calls.append(("count_triage_findings", user_id, project_id))
+    def count_triage_findings(self, user_id, project_id, **kwargs):
+        self.calls.append(("count_triage_findings", user_id, project_id, kwargs))
         return 137
+
+    def triage_facets(self, user_id, project_id):
+        self.calls.append(("triage_facets", user_id, project_id))
+        return {"total": 3, "decided_by": {"person": 1, "review": 1, "rules": 1}}
+
+    def get_triage_detail(self, user_id, project_id, node_id, label=None):
+        self.calls.append(("get_triage_detail", node_id, label))
+        return {"found": True, "row": {"id": node_id, "label": "Vulnerability",
+                                       "source": "nuclei"}, "group": [], "detector": {}}
+
+    def write_review(self, user_id, project_id, node_id, decide, combine, label=None):
+        self.calls.append(("write_review", node_id, label))
+        return self.review_result
 
     def list_muted(self, user_id, project_id, limit=None, **kwargs):
         self.calls.append(("list_muted", user_id, project_id, limit, kwargs))
@@ -92,13 +111,17 @@ class _FakeTriageClient:
         return {"to_unmute": [], "skipped_rule_mute": [], "not_found": []}
 
     def set_human_verdict(self, user_id, project_id, node_id, status, reason,
-                          channel="", verdict_by="", refuse_muted=False):
+                          channel="", verdict_by="", refuse_muted=False, **kwargs):
         self.calls.append(
             ("set_human_verdict", node_id, status, reason, channel, verdict_by,
-             refuse_muted))
+             refuse_muted, kwargs))
+        if self.verdict_busy:
+            from graph_db.mixins.recon.triage_mixin import TriageWriteBusy
+            raise TriageWriteBusy("timed out")
         if self.verdict_muted and refuse_muted:
             return {"updated": False, "reason": "muted", "label": "Vulnerability"}
-        return {"updated": self.verdict_updates, "label": "Vulnerability"}
+        return {"updated": self.verdict_updates, "label": "Vulnerability",
+                "before": {"score": 40.0}, "after": {"score": 75.0}}
 
 
 class TriageGateTests(unittest.IsolatedAsyncioTestCase):
@@ -178,6 +201,20 @@ class TriageLimitTests(unittest.IsolatedAsyncioTestCase):
         await api.graph_triage(self._req())
         self.assertEqual(self._list_kwargs(), {})
 
+    async def test_filters_reach_both_the_page_and_its_total(self):
+        await api.graph_triage(self._req(decided_by="review", reviewed_via="mcp",
+                                         review_current="stale"))
+        want = {"decided_by": "review", "reviewed_via": "mcp", "review_current": "stale"}
+        self.assertEqual(self._list_kwargs(), want)
+        count = [c for c in self.client.calls if c[0] == "count_triage_findings"][0]
+        self.assertEqual(count[3], want)
+
+    async def test_an_unknown_filter_value_is_refused(self):
+        for name in ("decided_by", "reviewed_via", "review_current"):
+            resp = await api.graph_triage(self._req(**{name: "everything"}))
+            self.assertEqual(resp.status_code, 400, name)
+        self.assertEqual(self.client.calls, [])
+
     async def test_a_limit_is_passed_through(self):
         await api.graph_triage(self._req(limit=25))
         self.assertEqual(self._list_kwargs(), {"limit": 25})
@@ -222,17 +259,17 @@ class TriageOpValidationTests(unittest.IsolatedAsyncioTestCase):
             api._TRIAGE_OPS,
             frozenset({"mute", "unmute", "unmute_many", "list_muted", "muted_facets",
                        "list_findings", "human_verdict", "preflight", "stop_run",
-                       "mute_many", "resolve_muted"}))
+                       "mute_many", "resolve_muted", "mute_batch",
+                       "finding_detail", "finding_evidence", "submit_review",
+                       "triage_facets"}))
 
     async def test_a_node_op_without_a_node_id_is_refused_before_dispatch(self):
-        for op in ("mute", "unmute", "human_verdict"):
+        for op in ("mute", "unmute", "human_verdict", "finding_detail",
+                   "finding_evidence", "submit_review"):
             resp = await api.graph_triage(
                 api.GraphTriageRequest(op=op, user_id="u1", project_id="p1"))
             self.assertEqual(resp.status_code, 400, op)
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class VerdictProvenanceTests(unittest.IsolatedAsyncioTestCase):
@@ -273,6 +310,32 @@ class VerdictProvenanceTests(unittest.IsolatedAsyncioTestCase):
             if c[0] == "set_human_verdict":
                 return c
         self.fail("set_human_verdict was never called")
+
+    async def test_the_verdict_rescores_through_combine_layers(self):
+        from cypherfix_triage.layers import combine_props
+        await api.graph_triage(self._req(label="Secret"))
+        kwargs = self._verdict_call()[7]
+        self.assertIs(kwargs["combine"], combine_props)
+        self.assertEqual(kwargs["label"], "Secret")
+        self.assertEqual(kwargs["token"], "")
+
+    async def test_an_mcp_verdict_is_stamped_with_its_token_prefix(self):
+        await api.graph_triage(self._req(source="mcp", token_prefix="rdmn_mcp_0a1b2c3d"))
+        self.assertEqual(self._verdict_call()[7]["token"], "rdmn_mcp_0a1b2c3d")
+
+    async def test_a_verdict_log_carries_no_text(self):
+        await api.graph_triage(self._req(source="mcp", reason="an agent wrote this"))
+        name, kw = self.events[0]
+        self.assertEqual(name, "finding_verdict_set")
+        self.assertNotIn("reason", kw)
+        self.assertNotIn("an agent wrote this", repr(kw))
+        self.assertEqual((kw["score_before"], kw["score_after"]), (40.0, 75.0))
+
+    async def test_a_write_timeout_is_503_busy(self):
+        self.client.verdict_busy = True
+        resp = await api.graph_triage(self._req())
+        self.assertEqual(resp.status_code, 503)
+        self.assertEqual(_body(resp)["code"], "busy")
 
     async def test_the_source_becomes_the_recorded_channel(self):
         await api.graph_triage(self._req(source="mcp"))
@@ -717,3 +780,102 @@ class MutedTokenFilterTests(_TriageEndpointCase):
                                token="rdmn_mcp_ab12cd34ef567890")
         self.assertEqual(resp.status_code, 400)
         self.assertEqual(self.calls("list_muted"), [])
+
+
+class LayeredOpsTests(unittest.IsolatedAsyncioTestCase):
+    """The single-finding ops, how they are scheduled, and what they answer."""
+
+    def setUp(self):
+        self.client = _FakeTriageClient()
+        self.sem = _RecordingSemaphore()
+        self.threaded = []
+        self.events = []
+
+        async def recording_to_thread(fn, *args, **kwargs):
+            self.threaded.append(fn)
+            return fn(*args, **kwargs)
+
+        import session_log
+        from cypherfix_triage import finding_ops
+        self._patches = [
+            mock.patch.object(api, "_triage_graph_client", lambda: self.client),
+            mock.patch.object(api, "_graph_exec_mcp_semaphore", lambda: self.sem),
+            mock.patch.object(api, "master_key_is_weak", lambda: False),
+            mock.patch.object(api.asyncio, "to_thread", recording_to_thread),
+            mock.patch.object(finding_ops, "read_finding_row",
+                              lambda *a, **k: {"id": "v1", "source": "nuclei", "name": "x",
+                                               "raw_response": "body text here"}),
+            mock.patch.object(session_log, "log_event",
+                              lambda name, **kw: self.events.append((name, kw))),
+        ]
+        for p in self._patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self._patches])
+
+    def _review(self, **kw):
+        base = dict(op="submit_review", user_id="u1", project_id="p1", node_id="v1",
+                    source="mcp", token_prefix="rdmn_mcp_0a1b2c3d", evidence_hash="a" * 40,
+                    review={"verdict": "doubtful", "why": "SECRET-WHY-TEXT"})
+        base.update(kw)
+        return api.GraphTriageRequest(**base)
+
+    async def test_every_op_runs_off_the_event_loop(self):
+        """B18: a browser write waiting on a publish lock stalled every coroutine."""
+        for op, extra in (("list_findings", {}), ("triage_facets", {}),
+                          ("preflight", {}), ("finding_detail", {"node_id": "v1"}),
+                          ("human_verdict", {"node_id": "v1", "status": "confirmed"}),
+                          ("muted_facets", {})):
+            self.threaded.clear()
+            await api.graph_triage(api.GraphTriageRequest(
+                op=op, user_id="u1", project_id="p1", **extra))
+            self.assertEqual(len(self.threaded), 1, op)
+            self.assertEqual(self.sem.entered, 0, op)
+
+    async def test_every_answer_acknowledges_the_layered_publish(self):
+        for source in (None, "mcp"):
+            resp = await api.graph_triage(api.GraphTriageRequest(
+                op="list_findings", user_id="u1", project_id="p1", source=source))
+            self.assertIs(_body(resp)["layered_publish"], True)
+
+    async def test_a_review_is_the_mcp_door_only(self):
+        resp = await api.graph_triage(self._review(source=None))
+        self.assertEqual(resp.status_code, 400)
+        self.assertNotIn("write_review", [c[0] for c in self.client.calls])
+
+    async def test_a_review_needs_a_real_token_prefix_and_hash(self):
+        for bad in (dict(token_prefix="nope"), dict(evidence_hash="xyz"),
+                    dict(evidence_hash="A" * 40), dict(review=None)):
+            resp = await api.graph_triage(self._review(**bad))
+            self.assertEqual(resp.status_code, 400, bad)
+
+    async def test_a_finding_id_and_label_are_validated(self):
+        for bad in (dict(node_id="v1; MATCH (n) DETACH DELETE n"),
+                    dict(label="Domain"), dict(node_id="x" * 201)):
+            resp = await api.graph_triage(self._review(**bad))
+            self.assertEqual(resp.status_code, 400, bad)
+
+    async def test_a_review_takes_the_mcp_ceiling_and_is_logged_without_text(self):
+        resp = await api.graph_triage(self._review())
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.sem.entered, 1)
+        name, kw = self.events[0]
+        self.assertEqual(name, "finding_review_submitted")
+        self.assertEqual(kw["verdict"], "doubtful")
+        self.assertEqual((kw["score_before"], kw["score_after"]), (70.0, 20.0))
+        self.assertNotIn("SECRET-WHY-TEXT", repr(self.events))
+
+    async def test_a_refused_review_is_not_logged_as_one(self):
+        self.client.review_result = {"written": False, "reason": "decided_by_person"}
+        resp = await api.graph_triage(self._review())
+        self.assertEqual(_body(resp)["reason"], "decided_by_person")
+        self.assertEqual(self.events, [])
+
+    async def test_a_stop_stays_on_the_loop(self):
+        """It touches the in-process run registry."""
+        await api.graph_triage(api.GraphTriageRequest(
+            op="stop_run", user_id="u1", project_id="p1"))
+        self.assertEqual(self.threaded, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

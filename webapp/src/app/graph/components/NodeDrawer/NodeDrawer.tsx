@@ -187,7 +187,6 @@ export function NodeDrawer({
 
           <div className={styles.section}>
             <div className={styles.sectionHeader}>
-              <h3 className={styles.sectionTitleBasicInfo}>Basic Info</h3>
               <div className={styles.basicInfoActions}>
                 <button
                   className={styles.iconBtn}
@@ -208,7 +207,7 @@ export function NodeDrawer({
                   </button>
                 )}
                 {/* Hidden on a saved version, like delete: a snapshot is read-only. */}
-                {!muteReadOnly && <GraphNodeMuteButton node={displayNode} onMuted={onClose} />}
+                {!muteReadOnly && <GraphNodeMuteButton node={displayNode} onMuted={onClose} compact={false} />}
                 {displayNode.type !== 'Domain' && displayNode.type !== 'Subdomain' && onDeleteNode && (
                   <button
                     className={`${styles.iconBtn} ${styles.iconBtnDanger}`}
@@ -221,6 +220,7 @@ export function NodeDrawer({
                   </button>
                 )}
               </div>
+              <h3 className={styles.sectionTitleBasicInfo}>Basic Info</h3>
             </div>
             <div className={styles.propertyRow}>
               <span className={styles.propertyKey}>Type</span>

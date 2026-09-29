@@ -1520,8 +1520,16 @@ Additional properties present on this node type, not yet described:
 
 These are written onto ANY finding node - Vulnerability, Secret,
 MultiscannerFinding, GithubSecret, GithubSensitiveFile, JsReconFinding,
-MalPackageFinding - rather than belonging to one label, so they are
-described once here instead of repeated in every block above.
+MalPackageFinding, ExploitGvm - rather than belonging to one label, so they
+are described once here instead of repeated in every block above.
+
+Triage is three stored layers and one computed result. BASE is the rules'
+score from a run's facts (`triage_math_score`, `triage_base_*`). REVIEW is a
+machine reading the evidence: the built-in AI during a run, or an external
+agent over MCP (`triage_ai_*`). DECISION is a person's Real or False positive
+(`triage_status`, `triage_source`, `triage_verdict_*`). The FINAL values
+(`triage_priority_score`, `triage_tier`, `triage_state`, `triage_factors`,
+`triage_decided_by`) are computed from the three; nobody writes them directly.
 
 Suppression is a HUMAN action and triage never performs it: a triage run
 ranks a finding, it never hides one. A suppressed finding carries the
@@ -1533,37 +1541,51 @@ not so you can query for one.
 - muted_at (datetime): When it was suppressed
 - muted_by (string): `user_id` of the operator who suppressed it
 - muted_reason (string): Optional operator note
-- muted_channel (string): How the mute arrived: absent = a person in the UI, `mcp` = an external agent holding that person's access token
+- muted_channel (string): How the mute arrived: absent = a person in the UI, `mcp` = an external agent holding that person's access token; `multi` = a person's Multi mute, and `muted_token` then holds the batch id
 - muted_token (string): The access-token prefix of an `mcp` mute; never the token
-- triage_priority_score (float): 0-100, the sort key. Bigger is more urgent
-- triage_math_score (float): The score before any AI correction
+- triage_priority_score (float): 0-100, the sort key. Bigger is more urgent. The FINAL score, after review and decision
+- triage_math_score (float): The rules-only score (the BASE layer), before any review or decision
 - triage_risk (float): C x L x I x R, 0-1, before the tier is folded into the score. The project-level risk roll-up combines these
 - triage_tier (string): `T1` Act now | `T2` Act soon | `T3` Plan | `T4` Track
 - triage_tier_rule (string): Which rule placed it in that tier
-- triage_factors (string): `C`, `L`, `I`, `R`, each with the evidence it came from
+- triage_factors (string): `C`, `L`, `I`, `R` after review and decision, each with the evidence it came from
+- triage_base_factors (string): The rules-only `C`, `L`, `I`, `R`, each with its evidence
+- triage_base_tier (string): The rules-only tier
+- triage_base_tier_rule (string): The rule behind the rules-only tier
+- triage_base_state (string): `open` | `fixed` | `gone` | `inactive`, from the facts alone; never `false_positive`
+- triage_tier_inputs (string): JSON `{proven, kev}`, what the tier rules read besides the factors
 - triage_signals (list[string]): The readable fact chips: `KEV`, `EPSS 0.94`, `live endpoint`
-- triage_state (string): `open` | `fixed` | `gone` | `inactive` | `false_positive`. Only `open` is ranked
+- triage_state (string): `open` | `fixed` | `gone` | `inactive` | `false_positive`. Only `open` is ranked. `false_positive` comes from a person's decision or a still-valid review
+- triage_decided_by (string): Which layer set the final values: `rules` | `review` | `person`
+- triage_rescored_at (datetime): When the final values were last computed
 - triage_host (string): The host the model resolved and scored against, deterministically
 - triage_group_key (string): One problem, one fix. Replaces `triage_cluster_id`
-- triage_detector (string): Which detector fired (`nuclei:<template>`, `gvm:<oid>`, `trufflehog:<detector>`). Real / False positive clicks are counted per detector, per user, and feed back into C
+- triage_detector (string): Which detector fired (`nuclei:<template>`, `gvm:<oid>`, `trufflehog:<detector>`). A person's Real / False positive clicks in the app are counted per detector, per user, and feed back into C
 - triage_run_id (string): Which run produced this. Drives "new since the last triage"
 - triage_model_version (string): `SCORE_MODEL_VERSION`; two runs are comparable only when it matches
 - triage_intel_date (string): When the CVE intelligence behind it was fetched
 - triage_proof (string): The chain findings that proved it, so proof survives a lost edge
-- triaged_at (datetime): When the run wrote this
+- triaged_at (datetime): When a run last published it. A verdict or a review never moves it
+- triage_evidence_hash (string): Hash of the normalised, redacted evidence the last run recorded. A review is valid while its own hash equals this
 - triage_ai_verdict (string): `real` | `doubtful` | `false_positive` | `unclear` | `not_reviewed`
-- triage_ai_corrections (string): What it changed, and the disputes it raised
-- triage_ai_quote (string): The exact evidence text, VERIFIED as a substring of what was sent
-- triage_ai_model (string): Which model reviewed it
+- triage_ai_corrections (string): What the review changed: its verdict, the impact multiplier with its quote, and the disputed facts
+- triage_ai_quote (string): The exact evidence text, VERIFIED as a substring of the evidence the reviewer read
+- triage_ai_why (string): The review's one-line reason
+- triage_ai_model (string): Which model wrote the review; empty for an external agent
+- triage_ai_channel (string): Who reviewed it: `builtin` (the AI during a run) | `mcp` (an external agent)
+- triage_ai_by (string): The access-token prefix of an `mcp` review; never the token
+- triage_ai_evidence_hash (string): The evidence hash the review read. The review counts only while it equals `triage_evidence_hash`
+- triage_ai_prompt_version (string): The prompt version of a built-in review
 - triage_ai_at (datetime): When
-- triage_evidence_hash (string): The review cache key: evidence + prompt version + model
-- triage_fix_lever (string): The short phrase describing what would fix it
-- triage_status (string): `confirmed` | `likely_noise` | `unreviewed` (absent = unreviewed)
-- triage_confidence (float): 0.0 - 1.0
-- triage_reason (string): One line, why
-- triage_source (string): `ai` | `human`. A human verdict is never overwritten. Deliberately only two values: a third would make the finding prune-eligible, let a later AI run overwrite the verdict, and stop `likely_noise` meaning false-positive. A verdict delegated through a token is still `human` - see `triage_verdict_channel` for how it arrived
-- triage_verdict_channel (string): How a `human` verdict arrived: absent (or `app`) = a person in the UI, `mcp` = an external agent holding that person's access token. Never changes what the verdict MEANS, only who typed it. Absent on findings judged before this existed
-- triage_verdict_by (string): `user_id` of whoever the verdict is attributed to, mirroring `muted_by`. Without it a verdict recorded only who it was NOT (the AI), never who it was
+- triage_fix_lever (string): The short phrase describing what would fix it, from the review
+- triage_status (string): `confirmed` | `likely_noise` | `unreviewed` (absent = unreviewed). Written by a person only
+- triage_confidence (float): 1.0 while a person's decision exists
+- triage_reason (string): A person's one-line reason for their decision
+- triage_source (string): `human` while a person's decision exists; removed on Reset. Deliberately never a third value: a finding with `human` is kept by the rescan prune and guarded from Mute Rules. A legacy `ai` value is an old AI false positive and is not a decision
+- triage_verdict_channel (string): How a person's decision arrived: `app` = the UI, `mcp` = an external agent holding that person's access token. ABSENT means `app`: every decision made before this existed was a person's click
+- triage_verdict_by (string): `user_id` of whoever the decision is attributed to, mirroring `muted_by`
+- triage_verdict_token (string): The access-token prefix of an `mcp` decision; never the token
+- triage_verdict_at (datetime): When the decision was made
 
 """,
     },

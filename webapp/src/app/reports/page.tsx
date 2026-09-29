@@ -6,6 +6,7 @@ import { useAllReports, type ReportMeta } from '@/hooks/useReports'
 import { useProjects } from '@/hooks/useProjects'
 import { useProject } from '@/providers/ProjectProvider'
 import { useToast, WikiInfoButton } from '@/components/ui'
+import { FeatureModelLine } from '@/components/shared/FeatureModelGate'
 import styles from './page.module.css'
 
 function formatBytes(bytes: number): string {
@@ -48,13 +49,13 @@ export default function ReportsPage() {
   const handleGenerate = useCallback(async () => {
     if (!selectedProjectId) return
     try {
-      await generate(selectedProjectId)
-      toast.info('Report generation started')
+      // null: the user cancelled the model prompt, so nothing started.
+      if (await generate(selectedProjectId)) toast.info('Report generation started')
     } catch {
       toast.error('Failed to generate report')
       // error available via generateError
     }
-  }, [generate, selectedProjectId])
+  }, [generate, selectedProjectId, toast])
 
   const handleDelete = useCallback(async (projectId: string, reportId: string) => {
     try {
@@ -131,6 +132,7 @@ export default function ReportsPage() {
               </>
             )}
           </button>
+          <FeatureModelLine featureId="report_narratives" label="Narratives model" />
         </div>
       </div>
 

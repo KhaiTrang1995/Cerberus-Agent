@@ -49,6 +49,7 @@ import { VersionManager } from './components/VersionManager'
 import { ReconDeltaTable } from './components/ReconDelta'
 import { TriageTable } from './components/Triage/TriageTable'
 import { MutedNodesTable } from './components/MutedNodes/MutedNodesTable'
+import type { MutedNodesFocus } from './components/MutedNodes/mutedNodes'
 import { MuteNodeProvider } from './components/MuteNode'
 import { NodeFiltersView } from './components/NodeFilters/NodeFiltersView'
 import { useNodeFilterStatus } from './hooks/useNodeFilterStatus'
@@ -572,6 +573,16 @@ export default function GraphPage() {
     setDeepLinkSheet(null)
     setTableViewMode('nodeFilters')
   }, [])
+  // Multi mute's "Keep hiding new ones": Mute Rules at the seed's kind, from
+  // any view the modal was opened on.
+  const openMuteRulesKind = useCallback((kind: string) => {
+    setNodeFilterFocus({ kind })
+    setDeepLinkSheet(null)
+    setActiveView('table')
+    setTableViewMode('nodeFilters')
+  }, [])
+  // Muted Nodes opens on these filters when set (Multi mute's one batch).
+  const [mutedFocus, setMutedFocus] = useState<MutedNodesFocus | null>(null)
   const { status: nodeFilterStatus, refresh: refreshNodeFilterStatus } = useNodeFilterStatus(projectId, refetchGraph)
 
   // A tab switch unmounts the view being left, so a dirty form in it (Mute
@@ -590,6 +601,7 @@ export default function GraphPage() {
     guardedSwitch(activeView === 'table' && mode !== tableViewMode, () => {
       setDeepLinkSheet(null)
       setNodeFilterFocus(null)
+      setMutedFocus(null)
       setTableViewMode(mode)
     })
   }, [guardedSwitch, activeView, tableViewMode])
@@ -1272,10 +1284,11 @@ export default function GraphPage() {
   }, [projectId, refetchGraph, toast, isViewingPastVersion, alertError])
 
   // "View muted" on the mute toast, which the drawer raises from the graph view.
-  const viewMutedNodes = useCallback(() => {
+  const viewMutedNodes = useCallback((focus?: MutedNodesFocus) => {
     setActiveView('table')
     setDeepLinkSheet(null)
     setNodeFilterFocus(null)
+    setMutedFocus(focus ? { ...focus } : null)
     setTableViewMode('muted')
   }, [])
 
@@ -1755,7 +1768,7 @@ export default function GraphPage() {
               />
             ) : tableViewMode === 'muted' ? (
               // Mute state is live, like triage, so this also sits below the guard.
-              <MutedNodesTable projectId={projectId} onOpenRule={openNodeFilterRule} />
+              <MutedNodesTable projectId={projectId} onOpenRule={openNodeFilterRule} focus={mutedFocus} />
             ) : tableViewMode === 'nodeDetails' ? (
               <NodeDetailsTable
                 data={filterGraphData ?? data}
@@ -2028,6 +2041,7 @@ export default function GraphPage() {
       readOnly={isViewingPastVersion}
       onViewMuted={viewMutedNodes}
       onGraphChanged={refetchGraph}
+      onOpenMuteRules={openMuteRulesKind}
     >
       {page}
     </MuteNodeProvider>

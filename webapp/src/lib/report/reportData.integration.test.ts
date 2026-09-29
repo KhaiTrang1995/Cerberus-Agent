@@ -9,6 +9,10 @@
  * the channel check wrong, the report would present an unattended agent's
  * suppressions as findings a person reviewed.
  *
+ * A Multi mute is a person's mute too (it stays inside the people's count) but
+ * was chosen in bulk from AI suggestions, so it also gets its own line, and is
+ * never counted as an agent's or a rule's.
+ *
  * Skipped unless a Neo4j answers. To run it:
  *   docker run --rm --network host -v "$PWD/webapp:/app" -w /app \
  *     -e NEO4J_URI=bolt://localhost:7687 -e NEO4J_USER -e NEO4J_PASSWORD \
@@ -28,6 +32,7 @@ let session: Session | undefined
 let alive = false
 const PID = `REPORT_MUTES_${Math.random().toString(36).slice(2, 10)}`
 const UID = `report-mutes-${Math.random().toString(36).slice(2, 10)}`
+const PID_MULTI = `REPORT_MM_${Math.random().toString(36).slice(2, 10)}`
 
 beforeAll(async () => {
   if (!PASSWORD) return
@@ -40,7 +45,9 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  if (alive && session) await session.run('MATCH (n {project_id: $pid}) DETACH DELETE n', { pid: PID })
+  if (alive && session) {
+    await session.run('MATCH (n) WHERE n.project_id IN $pids DETACH DELETE n', { pids: [PID, PID_MULTI] })
+  }
   if (session) await session.close()
   if (driver) await driver.close()
 })
@@ -74,5 +81,45 @@ describe('the suppressed-findings line', () => {
       total: overview.suppressedCount,
     }).toEqual({ people: 1, agents: 1, rules: 1, total: 3 })
     expect(overview.suppressedRules).toEqual([{ name: 'Informational templates', count: 1 }])
+  })
+
+  test('a Multi mute is a person\'s, counted on its own line, never an agent\'s or a rule\'s', async (ctx) => {
+    if (!alive || !session) ctx.skip()
+    // Two person mutes, three Multi mutes from two batches, one agent mute, two
+    // rule mutes, and one visible finding that counts nowhere.
+    await session!.run(
+      `UNWIND $rows AS row
+       CREATE (n:Vulnerability:Muted {id: row.id, user_id: $uid, project_id: $pid, severity: 'info',
+                                      muted: true, muted_at: datetime(), muted_by: row.by,
+                                      muted_reason: row.reason})
+       SET n.muted_channel = row.channel, n.muted_token = row.token`,
+      {
+        uid: UID, pid: PID_MULTI,
+        rows: [
+          { id: 'p1', by: UID, reason: 'noise', channel: null, token: null },
+          { id: 'p2', by: UID, reason: 'noise', channel: null, token: null },
+          { id: 'm1', by: UID, reason: 'Multi mute mm-0000000a · x', channel: 'multi', token: 'mm-0000000a' },
+          { id: 'm2', by: UID, reason: 'Multi mute mm-0000000a · x', channel: 'multi', token: 'mm-0000000a' },
+          { id: 'm3', by: UID, reason: 'Multi mute mm-0000000b · x', channel: 'multi', token: 'mm-0000000b' },
+          { id: 'a1', by: UID, reason: 'agent', channel: 'mcp', token: 'rdmn_mcp_ab12cd34' },
+          { id: 'r1', by: 'rule:vuln.nuclei/k3f9a2', reason: 'Filter rule: Info', channel: null, token: null },
+          { id: 'r2', by: 'rule:vuln.nuclei/k3f9a2', reason: 'Filter rule: Info', channel: null, token: null },
+        ],
+      },
+    )
+    await session!.run(
+      `CREATE (:Vulnerability {id: 'visible', user_id: $uid, project_id: $pid, severity: 'high'})`,
+      { uid: UID, pid: PID_MULTI },
+    )
+
+    const overview = await queryGraphOverview(session, PID_MULTI)
+
+    expect({
+      people: overview.suppressedByPeople,
+      multi: overview.suppressedByMultiMute,
+      agents: overview.suppressedByAgents,
+      rules: overview.suppressedByRules,
+      total: overview.suppressedCount,
+    }).toEqual({ people: 5, multi: 3, agents: 1, rules: 2, total: 8 })
   })
 })

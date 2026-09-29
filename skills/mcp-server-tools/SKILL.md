@@ -72,6 +72,20 @@ the generated reference page, never by this skill.
   default). A new write tool that overflows it must raise that test's limit, not drop a call.
 - **A required ARRAY argument needs an `EXAMPLE_EXTRA_ARGS` entry.** `placeholderFor` has no
   array branch, so the generated example would name no item (`mute_findings`' `findingIds`).
+- **A new scope gates writes; reads go under an existing read scope.** Every `ScopeAccess` in
+  [scopeCopy.ts](../../webapp/src/lib/mcp/scopeCopy.ts) is `read` or `write` except `kali:exec`,
+  the one `read-write` scope. A tool that only reads what a write needs (`get_finding_evidence`
+  for `submit_finding_review`) belongs under the read scope, so a read-only token can see
+  what an agent would act on.
+- **Order the body's checks: `requireScope` first, then no `McpToolError` before the first
+  backend read.** The apiReference test proves declared scopes by calling each example and
+  expecting the mocked database failure; a refusal on the example's placeholder arguments
+  ahead of that read looks like a scope gap. A tool that STARTS something checks access (and
+  its own caps) before it spends a rate token, so a refused start costs the caller nothing.
+- **Free text a caller writes goes in `UNAUDITED_ARGS`** in
+  [server.ts](../../webapp/src/lib/mcp/server.ts). `auditDetail` copies every other string
+  argument into the audit row, which also prints as a console line; a quote is target text,
+  and a reason is recorded, better, by the tool that owns it.
 
 ---
 

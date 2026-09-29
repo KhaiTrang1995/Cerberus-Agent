@@ -4,6 +4,8 @@ import httpx
 import logging
 import os
 
+from feature_models import feature_model
+
 logger = logging.getLogger(__name__)
 
 WEBAPP_API_URL = os.environ.get("WEBAPP_API_URL", "http://webapp:3000")
@@ -24,7 +26,9 @@ async def load_cypherfix_settings(project_id: str) -> dict:
                 "default_branch": project.get("cypherfixDefaultBranch", "main"),
                 "branch_prefix": project.get("cypherfixBranchPrefix", "cypherfix/"),
                 "require_approval": project.get("cypherfixRequireApproval", True),
-                "llm_model": project.get("cypherfixLlmModel", "") or project.get("agentOpenaiModel", ""),
+                # The owner's "Triage review" model, filled in below from their
+                # settings. Never the project's agent model: D1 of Models by feature.
+                "llm_model": "",
                 # Triage classification. Defaults mirror the Prisma @defaults so
                 # a project saved before these fields existed behaves the same.
                 # How many findings the AI review may look at. 0 means no
@@ -54,7 +58,15 @@ async def load_cypherfix_settings(project_id: str) -> dict:
                 except Exception as e2:
                     logger.warning(f"Failed to fetch user providers for cypherfix: {e2}")
 
-            # Resolve custom LLM config if model starts with custom/
+            # A model that could not be READ is not a missing model. Refusing
+            # it as `model_required` would ask the owner to pick a model they
+            # already have, so the orchestrator refuses it as unavailable.
+            settings["settings_unavailable"] = not (
+                "user_settings" in settings and "user_llm_providers" in settings)
+
+            settings["llm_model"] = feature_model(settings.get("user_settings"), "triage")
+
+            # A custom/<id> model resolves to that exact provider or to none.
             model = settings["llm_model"]
             if model.startswith("custom/") and settings.get("user_llm_providers"):
                 config_id = model[len("custom/"):]

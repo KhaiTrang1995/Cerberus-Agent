@@ -9,17 +9,13 @@ import { activationBusy, activationBusyResponse } from '@/lib/activationLock'
  *
  * Body: { projectId, nodeId, reason? }
  *
- * NOT cascaded to Remediation, deliberately. A Remediation is synthesised by the
- * CypherFix LLM from CORRELATED findings -- one work item can cover several, and
- * the model carries no link back to the finding nodes it came from (only
- * `affectedAssets`, `cveIds` and prose). There is therefore no key to cascade on,
- * and matching by title or asset would dismiss the wrong work item.
- *
- * What covers the gap instead: the classify phase drops `likely_noise` before
- * remediations are generated, and both the dashboard and the client report
- * exclude `status = 'dismissed'`. Linking the two properly needs a
- * `findingIds String[]` on Remediation plus attribution from the generator,
- * which is a schema change and is written up as a follow-up.
+ * NOT cascaded to Remediation here. A CypherFix work item is one triage group
+ * (`groupKey`) and lists its members in `findingIds`, so the link exists, but a
+ * group usually has other members that still need the fix. The next triage run
+ * reconciles instead: muted findings leave the triage queries, so a work item
+ * nobody touched whose members are all muted is deleted, and one somebody owns
+ * keeps its row with `liveMemberCount` zeroed. Multi mute's apply route counts
+ * the open work items a mute touches so the person is told.
  *
  * Never overwrites: an already-muted finding is left exactly as it was (a
  * rule's or an agent's mute keeps its attribution) and the answer carries

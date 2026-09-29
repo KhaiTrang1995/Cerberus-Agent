@@ -1,25 +1,56 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { readJsonBody } from '@/lib/jsonBody'
+import { requireProjectOwner } from '@/lib/triageClient'
+import { readFeatureModel, featureModelErrorResponse } from '@/lib/featureModels'
+import { callFeatureAgent } from '@/lib/featureAgentCall'
 
-const AGENT_API_URL = process.env.AGENT_API_URL || process.env.NEXT_PUBLIC_AGENT_API_URL || 'http://localhost:8080'
+const WHISPERER_TIMEOUT_MS = 60_000
+const MAX_PROMPT_CHARS = 4_000
+// Formatted into the agent's system prompt, so only a short plain token passes.
+const SESSION_TYPE_RE = /^[a-z0-9_-]{1,32}$/i
 
+/**
+ * POST /api/agent/command-whisperer - turn a plain-English request into one
+ * shell command, on the caller's own "Command whisperer" model and keys.
+ *
+ * The agent body is built field by field, never forwarded: the client could
+ * otherwise name another user, another project or a model the caller never
+ * chose. The answer only fills the terminal's input box; nothing runs it.
+ */
 export async function POST(request: NextRequest) {
-  try {
-    const body = await request.json()
-    const resp = await fetch(`${AGENT_API_URL}/command-whisperer`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    })
-    if (!resp.ok) {
-      const text = await resp.text()
-      return NextResponse.json({ error: text }, { status: resp.status })
-    }
-    return NextResponse.json(await resp.json())
-  } catch (error) {
-    console.error('Command whisperer proxy error:', error)
-    return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Failed to generate command' },
-      { status: 502 }
-    )
+  const parsed = await readJsonBody(request)
+  if (parsed instanceof NextResponse) return parsed
+  const { prompt, session_type: sessionType, project_id: projectId } = parsed.body as {
+    prompt?: unknown; session_type?: unknown; project_id?: unknown
   }
+
+  const caller = await requireProjectOwner(typeof projectId === 'string' ? projectId : null)
+  if (caller instanceof NextResponse) return caller
+
+  if (typeof prompt !== 'string' || !prompt.trim()) {
+    return NextResponse.json({ error: 'prompt is required' }, { status: 400 })
+  }
+  const type = typeof sessionType === 'string' && SESSION_TYPE_RE.test(sessionType) ? sessionType : 'shell'
+
+  const model = await readFeatureModel(caller.userId, 'command_whisperer')
+  if (!model) return featureModelErrorResponse('model_required', 'command_whisperer')
+
+  const agent = await callFeatureAgent({
+    featureId: 'command_whisperer',
+    path: '/command-whisperer',
+    model,
+    body: {
+      prompt: prompt.slice(0, MAX_PROMPT_CHARS),
+      session_type: type,
+      project_id: caller.projectId,
+      user_id: caller.userId,
+      model,
+    },
+    timeoutMs: WHISPERER_TIMEOUT_MS,
+  })
+  if (!agent.ok) return agent.response
+  return NextResponse.json({
+    command: typeof agent.body.command === 'string' ? agent.body.command : '',
+    modelUsed: model,
+  })
 }

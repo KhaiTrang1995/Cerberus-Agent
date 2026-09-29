@@ -3,6 +3,12 @@ import { HIDDEN_KEYS } from './hiddenKeys'
 import { formatNeo4jDateTime } from './formatters'
 import { getNodeId } from './linkHelpers'
 import { getNodeSeverity, getNodeUrl } from './nodeHelpers'
+import { TRIAGE_TEXT_PROPERTIES } from '@/lib/triage/properties'
+
+// Text a review model or an external MCP agent wrote, and the JSON blobs that
+// carry it. The agent this context goes to has tools, so none of it is handed
+// over; the agent fences the rest as untrusted too (prompt_safety).
+const DROPPED_KEYS: ReadonlySet<string> = new Set(TRIAGE_TEXT_PROPERTIES)
 
 // The 30-per-type cap keeps a hub node (a Domain wired to hundreds of
 // subdomains) from producing a context blob too large to be useful as a prompt.
@@ -34,7 +40,7 @@ export function nodeLabel(node: GraphNode): string {
 
 function propertyLines(node: GraphNode): string[] {
   const entries = Object.entries(node.properties || {})
-    .filter(([key]) => !HIDDEN_KEYS.has(key))
+    .filter(([key]) => !HIDDEN_KEYS.has(key) && !DROPPED_KEYS.has(key))
     .sort(([a], [b]) => {
       const aBottom = BOTTOM_KEYS.includes(a)
       const bBottom = BOTTOM_KEYS.includes(b)

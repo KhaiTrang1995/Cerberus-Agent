@@ -6,6 +6,8 @@
  */
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useFeatureModelGate, type FeatureModelGateApi } from '@/components/shared/FeatureModelGate'
+import { featureModelMessage, readFeatureModelCode } from '@/lib/llmFeatures'
 
 export interface ReportMeta {
   id: string
@@ -54,11 +56,24 @@ async function fetchAllReports(): Promise<ReportMeta[]> {
   return res.json()
 }
 
-async function generateReport(projectId: string): Promise<ReportMeta> {
-  const res = await fetch(`/api/projects/${projectId}/reports`, { method: 'POST' })
+type ReportGate = Pick<FeatureModelGateApi, 'ensureFeatureModel' | 'fetchWithFeatureModel'>
+
+/**
+ * Generate one report. Resolves null when the user cancels the first model
+ * prompt: nothing was sent, so there is no failure to show.
+ */
+async function generateReport(projectId: string, gate: ReportGate): Promise<ReportMeta | null> {
+  // The narratives run on the user's own "Report narratives" model, which the
+  // route reads itself; this only makes sure one is saved.
+  if (!(await gate.ensureFeatureModel('report_narratives'))) return null
+  const res = await gate.fetchWithFeatureModel('report_narratives',
+    () => fetch(`/api/projects/${projectId}/reports`, { method: 'POST' }))
   if (!res.ok) {
     const body = await res.json().catch(() => ({}))
-    throw new Error(body.error || 'Report generation failed')
+    const code = readFeatureModelCode(body)
+    throw new Error(code
+      ? featureModelMessage(code, typeof body.model === 'string' ? body.model : undefined)
+      : body.error || 'Report generation failed')
   }
   return res.json()
 }
@@ -71,6 +86,7 @@ async function deleteReport(projectId: string, reportId: string): Promise<void> 
 /** Hook for project-specific reports */
 export function useReports(projectId: string, enabled = true) {
   const queryClient = useQueryClient()
+  const gate = useFeatureModelGate()
 
   const query = useQuery({
     queryKey: [REPORTS_KEY, projectId],
@@ -80,7 +96,7 @@ export function useReports(projectId: string, enabled = true) {
   })
 
   const generateMutation = useMutation({
-    mutationFn: () => generateReport(projectId),
+    mutationFn: () => generateReport(projectId, gate),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [REPORTS_KEY, projectId] })
       queryClient.invalidateQueries({ queryKey: [ALL_REPORTS_KEY] })
@@ -110,6 +126,7 @@ export function useReports(projectId: string, enabled = true) {
 /** Hook for all-projects reports listing */
 export function useAllReports() {
   const queryClient = useQueryClient()
+  const gate = useFeatureModelGate()
 
   const query = useQuery({
     queryKey: [ALL_REPORTS_KEY],
@@ -126,7 +143,7 @@ export function useAllReports() {
   })
 
   const generateMutation = useMutation({
-    mutationFn: (projectId: string) => generateReport(projectId),
+    mutationFn: (projectId: string) => generateReport(projectId, gate),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: [ALL_REPORTS_KEY] })
     },

@@ -315,3 +315,16 @@
   0%, 100% { opacity: 0.5; }
   50% { opacity: 1; }
 }
+
+/* A person's mute, but chosen in bulk from AI suggestions: marked apart from
+   a one-by-one mute, and apart from an agent's. */
+.multiBadge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--status-info-bg);
+  color: var(--status-info-text);
+  font-size: 10px;
+  font-weight: var(--font-semibold);
+  overflow-wrap: anywhere;
+}

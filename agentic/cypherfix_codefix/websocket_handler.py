@@ -59,7 +59,7 @@ class CodeFixStreamingCallback:
         })
 
     async def on_error(self, message: str, recoverable: bool = True, code: str = ""):
-        await self._send("error", {"message": message, "recoverable": recoverable})
+        await self._send("error", {"message": message, "recoverable": recoverable, "code": code})
 
     async def _send(self, msg_type: str, payload: dict):
         try:

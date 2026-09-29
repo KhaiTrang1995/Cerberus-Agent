@@ -4324,8 +4324,18 @@ evidence behind each judgeable one, and writes the fix list the codefix agent
 consumes. The scoring model (`score_model.py`) is pure and needs no LLM; the
 review corrects FACTORS against quoted evidence and never produces a score.
 
-Steps A to D happen entirely in memory and only Step E writes, so a run that is
-stopped or refused leaves the previous ranking exactly as it was. Lives in
+Each finding carries three stored layers: the rules' BASE, a REVIEW (the built-in
+AI's, or an external agent's over MCP), and a person's DECISION.
+`score_model.combine_layers` is the only producer of the final score, both in a
+run and in the instant rescore a verdict or an MCP review triggers. A review
+lasts while its evidence hash is unchanged, so the next run keeps it; a run never
+reviews over a still-valid external review and never writes a decision.
+
+Everything before the publish happens in memory; the publish re-reads each
+finding's decision and review under its lock, so a verdict given mid-run wins. A
+run that is stopped or refused leaves the previous ranking exactly as it was, and
+a Stop is refused once the run is publishing. Runs start from the websocket or
+headless (`POST /triage/runs`, used by MCP `start_triage_run`). Lives in
 [agentic/cypherfix_triage/](../../agentic/cypherfix_triage/); see
 [README.CYPHERFIX_AGENTS.md](README.CYPHERFIX_AGENTS.md) for the full design.
 
@@ -4489,7 +4499,7 @@ This section is a **map of the source tree** for engineers who need to find a sp
 | `orchestrator_helpers/nodes/fireteam_collect_node.py` | Fireteam fan-in, merges per-member `target_info` and findings back into parent state, auto-completes matching TODOs |
 | `orchestrator_helpers/nodes/fireteam_member_think_node.py` | Member ReAct think node + `fireteam_await_confirmation_node` (parks member on `asyncio.Event` for per-member dangerous-tool approvals) |
 | `orchestrator_helpers/nodes/process_fireteam_confirmation_node.py` | Legacy router stub kept for compile-validity (not reached in live flow) |
-| `cypherfix_triage/` | Companion orchestrator: clusters and scores findings post-engagement |
+| `cypherfix_triage/` | Companion orchestrator: scores findings in three layers (rules, review, decision), groups them by fix, writes the fix list |
 | `cypherfix_codefix/` | Companion orchestrator: edits source code to remediate findings (Claude-Code-style GitHub toolkit) |
 | `tests/` | pytest suites (fireteam, deep think, plan mutex, tool stop, token tracking, regressions) |
 

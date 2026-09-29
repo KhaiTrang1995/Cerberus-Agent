@@ -5,8 +5,9 @@
  * reports, whether a person muted it, an external agent did over MCP on a
  * person's token, or a node-filter rule did.
  *
- * An agent's mutes are badged and filterable per token, so one token's work
- * can be reviewed and unmuted together.
+ * An agent's mutes are badged and filterable per token, and a person's Multi
+ * mutes per batch, so one token's or one batch's work can be reviewed and
+ * unmuted together.
  *
  * This is the ONLY place a muted finding is still visible, so it is also where
  * a mute is undone. Paged on the server, because a filter rule can mute
@@ -23,8 +24,8 @@ import { useProject } from '@/providers/ProjectProvider'
 import { downloadBlob, timestampSlug, toGuardedCsv, CSV_MIME } from '../../utils/exportHelpers'
 import {
   EMPTY_FILTERS, EXPORT_COLUMNS, EXPORT_MAX, PAGE_SIZE,
-  exportRows, hasFilters, kindLabel, mutedByText, mutedQuery, stateText,
-  type MutedFacets, type MutedFilters, type MutedRow, type MutedVia,
+  exportRows, focusFilters, hasFilters, kindLabel, mutedByText, mutedQuery, stateText,
+  type MutedFacets, type MutedFilters, type MutedNodesFocus, type MutedRow, type MutedVia,
 } from './mutedNodes'
 import { NodeIdCell, NodeIdTh } from '../RedZoneTables/nodeId'
 import styles from './MutedNodesTable.module.css'
@@ -42,14 +43,17 @@ interface MutedNodesTableProps {
   projectId: string | null
   /** Open the Mute Rules page at a rule. */
   onOpenRule?: (kind: string, ruleId: string) => void
+  /** Open on these filters (Multi mute's "View muted": one batch). A new
+   *  object re-applies them. */
+  focus?: MutedNodesFocus | null
 }
 
-export function MutedNodesTable({ projectId, onOpenRule }: MutedNodesTableProps) {
+export function MutedNodesTable({ projectId, onOpenRule, focus }: MutedNodesTableProps) {
   const { userId } = useProject()
   const { alertError } = useAlertModal()
   const toast = useToast()
 
-  const [filters, setFilters] = useState<MutedFilters>(EMPTY_FILTERS)
+  const [filters, setFilters] = useState<MutedFilters>(() => focusFilters(focus))
   const [searchDraft, setSearchDraft] = useState('')
   const [offset, setOffset] = useState(0)
   const [rows, setRows] = useState<MutedRow[]>([])
@@ -66,6 +70,15 @@ export function MutedNodesTable({ projectId, onOpenRule }: MutedNodesTableProps)
   // The page keeps this table mounted across a project switch. Filters and the
   // page belong to the project they were set on (a rule id means nothing in
   // another project), so they reset before the new project's first request.
+  const [appliedFocus, setAppliedFocus] = useState(focus)
+  if (appliedFocus !== focus) {
+    setAppliedFocus(focus)
+    if (focus) {
+      setFilters(focusFilters(focus))
+      setSearchDraft('')
+      setOffset(0)
+    }
+  }
   const [shownProject, setShownProject] = useState(projectId)
   if (shownProject !== projectId) {
     setShownProject(projectId)
@@ -192,6 +205,12 @@ export function MutedNodesTable({ projectId, onOpenRule }: MutedNodesTableProps)
     () => Object.entries(facets?.labels ?? {}).sort((a, b) => b[1] - a[1]), [facets])
   const ruleOptions = facets?.rules ?? []
   const tokenOptions = facets?.tokens ?? []
+  const batchOptions = facets?.batches ?? []
+  // A batch opened from Multi mute may be missing from the facets (all of it
+  // unmuted since); it stays selectable so the filter still reads right.
+  const unlistedToken = filters.token
+    && !tokenOptions.some(t => t.token === filters.token)
+    && !batchOptions.some(b => b.batch === filters.token)
 
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE))
   const page = Math.floor(offset / PAGE_SIZE) + 1
@@ -240,6 +259,7 @@ export function MutedNodesTable({ projectId, onOpenRule }: MutedNodesTableProps)
         >
           <option value="all">Muted by: all</option>
           <option value="person">People</option>
+          <option value="multi">Multi mute{facets?.by_multi !== undefined ? ` (${facets.by_multi})` : ''}</option>
           <option value="mcp">Agent (MCP){facets?.by_mcp !== undefined ? ` (${facets.by_mcp})` : ''}</option>
           <option value="rule">Rules</option>
           <option value="deleted_rule">Deleted rules</option>
@@ -263,13 +283,25 @@ export function MutedNodesTable({ projectId, onOpenRule }: MutedNodesTableProps)
           value={filters.token}
           onChange={e => setFilter('token', e.target.value)}
           aria-label="Token"
-          disabled={tokenOptions.length === 0 && !filters.token}
-          title="The mutes one access token made"
+          disabled={tokenOptions.length === 0 && batchOptions.length === 0 && !filters.token}
+          title="The mutes one access token made, or one Multi mute batch"
         >
           <option value="">Any token</option>
-          {tokenOptions.map(t => (
-            <option key={t.token} value={t.token}>{t.token} ({t.count})</option>
-          ))}
+          {tokenOptions.length > 0 && (
+            <optgroup label="Access tokens">
+              {tokenOptions.map(t => (
+                <option key={t.token} value={t.token}>{t.token} ({t.count})</option>
+              ))}
+            </optgroup>
+          )}
+          {batchOptions.length > 0 && (
+            <optgroup label="Multi mute batches">
+              {batchOptions.map(b => (
+                <option key={b.batch} value={b.batch}>{b.batch} ({b.count})</option>
+              ))}
+            </optgroup>
+          )}
+          {unlistedToken && <option value={filters.token}>{filters.token}</option>}
         </select>
         <input
           className={styles.search}
@@ -400,6 +432,16 @@ export function MutedNodesTable({ projectId, onOpenRule }: MutedNodesTableProps)
                           <span
                             className={styles.agentBadge}
                             title="Muted by an external agent over MCP, on an access token of this project's owner"
+                          >
+                            {mutedByText(row, userId)}
+                          </span>
+                          {row.muted_reason && <span className={styles.mutedReason}>{row.muted_reason}</span>}
+                        </>
+                      ) : row.muted_via === 'multi' ? (
+                        <>
+                          <span
+                            className={styles.multiBadge}
+                            title="Muted by a person in bulk, from Multi mute's AI suggestions: not judged one by one"
                           >
                             {mutedByText(row, userId)}
                           </span>

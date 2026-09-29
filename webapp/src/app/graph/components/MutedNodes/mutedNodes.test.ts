@@ -3,8 +3,8 @@
  */
 import { describe, test, expect } from 'vitest'
 import {
-  EMPTY_FILTERS, EXPORT_COLUMNS, exportRows, hasFilters, kindLabel, mutedByText, mutedQuery, stateText,
-  type MutedRow,
+  EMPTY_FILTERS, EXPORT_COLUMNS, exportRows, focusFilters, hasFilters, kindLabel, mutedByText, mutedQuery,
+  stateText, type MutedRow,
 } from './mutedNodes'
 import { toGuardedCsv } from '../../utils/exportHelpers'
 
@@ -26,6 +26,16 @@ describe('the request', () => {
       projectId: 'p1', offset: '0', limit: '50', label: 'Secret', mutedVia: 'deleted_rule',
       rule: 'rule:secret/abc123', search: 'aws', facets: '1',
     })
+  })
+
+  test('one Multi mute batch is asked for by its id', () => {
+    const url = new URL(`http://x${mutedQuery('p1', focusFilters({ token: 'mm-3f9a2c1d' }), { offset: 0, limit: 50 })}`)
+    expect(url.searchParams.get('mutedVia')).toBe('multi')
+    expect(url.searchParams.get('token')).toBe('mm-3f9a2c1d')
+    expect(focusFilters(null)).toBe(EMPTY_FILTERS)
+    expect(focusFilters({ mutedVia: 'multi' })).toEqual({ ...EMPTY_FILTERS, mutedVia: 'multi' })
+    // An MCP token prefix does not imply the Multi mute filter.
+    expect(focusFilters({ token: 'rdmn_mcp_ab12cd34' }).mutedVia).toBe('all')
   })
 
   test('knows when anything is filtered', () => {
@@ -68,6 +78,15 @@ describe('how a row reads', () => {
     expect(mutedByText(row({ muted_via: 'mcp' }), 'u1')).toBe('Agent (MCP)')
   })
 
+  test('a Multi mute is yours, and always says it was one, with its batch', () => {
+    // A person confirmed it, but chose it in bulk from AI suggestions: "you"
+    // alone would read as a one-by-one judgement.
+    const multi = row({ muted_via: 'multi', muted_channel: 'multi', muted_token: 'mm-3f9a2c1d' })
+    expect(mutedByText(multi, 'u1')).toBe('you · Multi mute mm-3f9a2c1d')
+    expect(mutedByText({ ...multi, muted_by: 'u2' }, 'u1')).toBe('u2 · Multi mute mm-3f9a2c1d')
+    expect(mutedByText(row({ muted_via: 'multi' }), 'u1')).toBe('you · Multi mute')
+  })
+
   test('a finding the scanner stopped reporting says so', () => {
     expect(stateText(row({ stale_since: '2026-09-20T00:00:00Z' }))).toBe('resolved: no longer reported')
     expect(stateText(row())).toBe('')
@@ -91,6 +110,13 @@ describe('the export', () => {
       rule: '', muted_reason: 'dev banner',
     })
     expect(exportRows([row()], 'u1')[0].token).toBe('')
+  })
+
+  test('a Multi mute exports as multi, with its batch, and never as a plain person mute', () => {
+    const [out] = exportRows([row({ muted_via: 'multi', muted_token: 'mm-3f9a2c1d' })], 'u1')
+    expect(out).toMatchObject({
+      muted_by: 'you · Multi mute mm-3f9a2c1d', muted_via: 'multi', token: 'mm-3f9a2c1d', rule: '',
+    })
   })
 
   test('the Node ID leads, as it does in the table, and is blank when the agent sent none', () => {

@@ -45,6 +45,8 @@ interface UseCypherFixCodeFixWSReturn {
   fixPlan: FixPlanPayload | null
   prData: PRCreatedPayload | null
   error: string | null
+  /** The agent's machine-readable reason for `error`, e.g. 'model_required'. */
+  errorCode: string | null
   currentTool: { name: string; args: Record<string, unknown> } | null
   activityLog: ActivityEntry[]
   startFix: (remediationId: string) => void
@@ -74,6 +76,7 @@ export function useCypherFixCodeFixWS({
   const [fixPlan, setFixPlan] = useState<FixPlanPayload | null>(null)
   const [prData, setPrData] = useState<PRCreatedPayload | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [errorCode, setErrorCode] = useState<string | null>(null)
   const [currentTool, setCurrentTool] = useState<{ name: string; args: Record<string, unknown> } | null>(null)
   const [activityLog, setActivityLog] = useState<ActivityEntry[]>([])
 
@@ -294,7 +297,9 @@ export function useCypherFixCodeFixWS({
 
         case CypherFixCodeFixMessageType.ERROR: {
           const errMsg = (payload as { message?: string }).message || 'Unknown error'
+          const errCode = (payload as { code?: unknown }).code
           setError(errMsg)
+          setErrorCode(typeof errCode === 'string' ? errCode : null)
           setStatus('error')
           onError?.(errMsg)
           pushLog({ type: 'error', message: errMsg })
@@ -337,6 +342,7 @@ export function useCypherFixCodeFixWS({
     setCurrentPhase(null)
     setCurrentTool(null)
     setError(null)
+    setErrorCode(null)
     setActivityLog([])
     logIdRef.current = 0
 
@@ -390,6 +396,7 @@ export function useCypherFixCodeFixWS({
     fixPlan,
     prData,
     error,
+    errorCode,
     currentTool,
     activityLog,
     startFix,

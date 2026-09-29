@@ -86,14 +86,19 @@ class TriageNeo4jToolManager:
         }
         return await self._execute(scoped, query_params)
 
-    async def run_static_query(self, cypher: str) -> list[dict]:
+    async def run_static_query(self, cypher: str, params: dict | None = None) -> list[dict]:
         """Run a repo-authored collection query (already carries $userId/$projectId).
 
         Deliberately separate from `run_query`: these queries are written in
-        `prompts/cypher_queries.py`, hand-write their own `NOT x:Muted` terms and
-        would not survive `scope_query`'s label requirement. Nothing the model
-        emits may reach this method.
+        `fact_queries.py`, hand-write their own `NOT x:Muted` terms and would
+        not survive `scope_query`'s label requirement. Nothing the model emits
+        may reach this method.
+
+        `params` adds values such as `$findingId` for the by-id render. The
+        tenant is bound LAST, so no parameter can widen the query to another
+        project.
         """
         return await self._execute(
-            cypher, {"userId": self.user_id, "projectId": self.project_id}
+            cypher, {**(params or {}),
+                     "userId": self.user_id, "projectId": self.project_id}
         )

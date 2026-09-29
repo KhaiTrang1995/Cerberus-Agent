@@ -90,10 +90,17 @@ class TestDetectorLabelsGraphLive(unittest.TestCase):
                                         source: 'nuclei'})
                 """, b=self.user_b, p1=self.p1)
 
+        import sys as _sys
+        _agentic = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "agentic")
+        if _agentic not in _sys.path:
+            _sys.path.insert(0, _agentic)
+        from triage_layers_live_support import PUBLISH_COMBINE, layer_row
+
         def publish(user, project, ids):
-            self.client.apply_triage_scores(user, project, [
-                {"id": i, "score": 30.0, "detector": DETECTOR} for i in ids],
-                guard_updated_at=False)
+            self.client.publish_triage_layers(user, project, [
+                layer_row({"id": i, "label": "Vulnerability", "source": "nuclei"},
+                          detector=DETECTOR) for i in ids],
+                PUBLISH_COMBINE, guard_updated_at=False)
 
         publish(self.user_a, self.p1, ["a1", "a2", "a3", "a4", "a5"])
         publish(self.user_a, self.p2, ["c1"])
@@ -139,12 +146,24 @@ class TestDetectorLabelsGraphLive(unittest.TestCase):
         self.assertEqual(self._labels(self.user_a), {DETECTOR: {"real": 0, "fp": 1}})
         self.assertEqual(self._labels(self.user_b), {DETECTOR: {"real": 0, "fp": 3}})
 
-    def test_an_ai_verdict_is_not_a_label(self):
+    def test_a_legacy_ai_verdict_is_not_a_label(self):
         """The AI's verdict is the thing being corrected; counting it would make
         the model learn from itself."""
-        self.client.apply_triage_scores(self.user_a, self.p1, [
-            {"id": "a1", "score": 30.0, "detector": DETECTOR,
-             "status": "likely_noise", "confidence": 0.9}], guard_updated_at=False)
+        with self.driver.session() as s:
+            s.run("MATCH (v:Vulnerability {id: 'a1', user_id: $a}) "
+                  "SET v.triage_status = 'likely_noise', v.triage_source = 'ai'", a=self.user_a)
+        self.assertEqual(self._labels(self.user_a), {})
+
+    def test_a_verdict_over_mcp_does_not_teach_the_detector(self):
+        """P1: an unattended agent must not retune every project's detectors."""
+        self.client.set_human_verdict(self.user_a, self.p1, "a1", "likely_noise", channel="mcp")
+        self.client.set_human_verdict(self.user_a, self.p1, "a2", "likely_noise")
+        self.assertEqual(self._labels(self.user_a), {DETECTOR: {"real": 0, "fp": 1}})
+
+    def test_an_imported_owners_decisions_do_not_teach_the_importer(self):
+        """C13: an import keeps the previous owner's verdicts on the nodes."""
+        self.client.set_human_verdict(self.user_a, self.p1, "a1", "likely_noise",
+                                      verdict_by="previous-owner")
         self.assertEqual(self._labels(self.user_a), {})
 
 

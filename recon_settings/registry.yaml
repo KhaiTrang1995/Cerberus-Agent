@@ -2046,9 +2046,9 @@ fields:
     validator: free_text
     group: llm
     meaning: >-
-      Override the LLM model for CypherFix agents, including the Priority Board
-      pass that explains and groups the top-ranked findings. Leave empty to use
-      the model selected in Agent Behaviour.
+      No longer used. The Triage review and CodeFix models are chosen per user,
+      for all of that user's projects, in Global Settings > LLM Providers >
+      Models by feature. Kept only so older exports and presets still load.
   cypherfixRequireApproval:
     tool: cypherfix
     runtime_key: null
@@ -8899,11 +8899,13 @@ fields:
     traffic: active
     roe_capped: false
     mcp: settable
-    bounds: { min: 0, max: 10000 }
+    bounds: { min: 0, max: 1000 }
     group: not-tuning
     meaning: >-
-      How many findings one triage job may review before it stops and reports what
-      it got through.
+      How many findings one triage run may have its evidence reviewed by the
+      configured model before it stops and ranks the rest on the rules alone. 0
+      means no review and needs no model. A run never reviews more than 1000,
+      whatever is stored.
     form_section: "CypherFixSettingsSection"
   trufflehogAllowVerificationOverlap:
     tool: trufflehog

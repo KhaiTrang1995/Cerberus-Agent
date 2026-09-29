@@ -10,6 +10,7 @@
  * The key is used only here, read-only. Nothing writes it back to the graph.
  */
 import type { FormattedGraphData, FormattedNode } from '@/app/api/graph/format'
+import { TRIAGE_PROPERTIES } from '@/lib/triage/properties'
 
 /**
  * Identity properties per node label, most-specific first. A node matches across
@@ -76,6 +77,10 @@ export const VOLATILE_PROPERTIES = new Set([
   'recon_coverage_gaps',
   'recon_skipped_hosts',
   'recon_nuclei_truncated',
+  // Triage and mute state: a run, a verdict or a review rewrites these on
+  // every finding without the finding itself changing (C20).
+  ...TRIAGE_PROPERTIES,
+  'muted_at',
 ])
 
 function stableString(value: unknown): string {

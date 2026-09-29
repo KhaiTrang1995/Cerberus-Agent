@@ -41,6 +41,11 @@ HEARTBEAT_SECONDS = 30
 #: cannot be stopped must stop itself.
 HEARTBEAT_FAILURE_LIMIT = 2
 
+#: A phase change heartbeats at once, so a caller polling the run (an MCP
+#: agent, another tab) sees each phase even when it lasts less than
+#: HEARTBEAT_SECONDS. This floor keeps a burst of phase changes to one call.
+PHASE_HEARTBEAT_MIN_GAP = 2.0
+
 
 def _headers() -> dict:
     return {"X-Internal-Key": os.environ.get("INTERNAL_API_KEY", "")}
@@ -64,13 +69,36 @@ class TriageRunClient:
         self.actor_user_id = actor_user_id
         self.real_actor_user_id = real_actor_user_id
         self.run_id: str | None = None
+        #: Where the run is, sent with every heartbeat so a caller that is not
+        #: the run's own tab (another tab, an MCP agent) can see it.
+        self.phase = ""
+        self.progress = 0
         self._heartbeat_task: asyncio.Task | None = None
         self._abort_reason: str | None = None
         self._consecutive_failures = 0
+        self._phase_changed = asyncio.Event()
+        self._last_beat_at = float("-inf")
 
     # -- authorize ---------------------------------------------------------
-    async def authorize(self, model: str, score_model_version: str) -> str:
-        """Create the run, or raise. Nothing is read before this succeeds."""
+    def set_progress(self, phase: str, progress: int) -> None:
+        phase = str(phase or "")[:40]
+        if phase != self.phase:
+            self._phase_changed.set()
+        self.phase = phase
+        try:
+            self.progress = max(0, min(100, int(progress)))
+        except (TypeError, ValueError):
+            pass
+
+    async def authorize(self, model: str, score_model_version: str,
+                        trigger: str = "app", token_id: str | None = None,
+                        review_budget: int | None = None) -> str:
+        """Create the run, or raise. Nothing is read before this succeeds.
+
+        `trigger` says who started it (`app` or `mcp`), and `token_id` which
+        access token for an MCP start. The effective review budget and model go
+        with it, so the audit row records what the run may actually spend.
+        """
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.post(
@@ -81,6 +109,10 @@ class TriageRunClient:
                         "realActorUserId": self.real_actor_user_id,
                         "model": model,
                         "scoreModelVersion": score_model_version,
+                        "trigger": trigger,
+                        **({"tokenId": token_id} if token_id else {}),
+                        **({"reviewBudget": review_budget}
+                           if review_budget is not None else {}),
                     },
                     headers=_headers(),
                 )
@@ -115,15 +147,27 @@ class TriageRunClient:
             except (asyncio.CancelledError, Exception):           # noqa: BLE001
                 pass
 
+    async def _wait_for_next_beat(self) -> None:
+        try:
+            await asyncio.wait_for(self._phase_changed.wait(), timeout=HEARTBEAT_SECONDS)
+        except asyncio.TimeoutError:
+            return
+        self._phase_changed.clear()
+        since_last = asyncio.get_running_loop().time() - self._last_beat_at
+        if since_last < PHASE_HEARTBEAT_MIN_GAP:
+            await asyncio.sleep(PHASE_HEARTBEAT_MIN_GAP - since_last)
+
     async def _heartbeat_loop(self) -> None:
         while True:
-            await asyncio.sleep(HEARTBEAT_SECONDS)
+            await self._wait_for_next_beat()
+            self._last_beat_at = asyncio.get_running_loop().time()
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     response = await client.post(
                         f"{WEBAPP_API_URL}/api/internal/triage-runs/"
                         f"{self.run_id}/heartbeat",
-                        json={}, headers=_headers(),
+                        json={"phase": self.phase, "progress": self.progress},
+                        headers=_headers(),
                     )
                 body = response.json() if response.content else {}
             except Exception as exc:                              # noqa: BLE001

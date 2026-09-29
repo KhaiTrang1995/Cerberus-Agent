@@ -589,17 +589,23 @@ describe('the inline onboarding (the MCP instructions string)', () => {
     }
   })
 
-  test('the durable-write sentence follows the token\'s write permissions', () => {
+  test('the write sentence follows the token\'s write permissions', () => {
     const verdictOnly = renderInlineOnboarding(tools, ['recon:read', 'triage:write'], 'triage')
-    expect(verdictOnly).toContain('The only durable write you have is a verdict of')
+    expect(verdictOnly).toContain('Your writes to a finding: a verdict of confirmed, likely_noise, unreviewed.')
+    expect(verdictOnly).toContain('You never set a score')
     expect(verdictOnly).not.toContain('mute_findings')
+    expect(verdictOnly).not.toContain('evidence review')
 
-    const both = renderInlineOnboarding(tools, ['recon:read', 'triage:write', 'triage:mute'], 'triage')
-    expect(both).toContain('Your durable writes to a finding are a verdict of')
-    expect(both).toContain('A mute (mute_findings) hides a finding from everyone.')
+    const all = renderInlineOnboarding(
+      tools, ['recon:read', 'triage:read', 'triage:write', 'triage:review', 'triage:mute'], 'triage')
+    expect(all).toContain(
+      'Your writes to a finding: a verdict of confirmed, likely_noise, unreviewed, a quoted evidence review and a mute.')
+    expect(all).toContain('A mute (mute_findings) hides a finding from everyone.')
+    expect(all.length).toBeLessThanOrEqual(4000)
 
     const muteOnly = renderInlineOnboarding(tools, ['recon:read', 'triage:mute'], 'custom')
-    expect(muteOnly).toContain('Your durable write to a finding is a mute.')
+    expect(muteOnly).toContain('Your writes to a finding: a mute.')
+    expect(muteOnly).not.toContain('You never set a score')
   })
 
   test('a null profile still produces usable instructions', () => {
@@ -784,3 +790,23 @@ describe('the Agent Onboarding documentation', () => {
   })
 })
 
+describe('the layered Priority Board in the pack', () => {
+  test('starting a triage run is no longer in the never-on-this-surface list', () => {
+    const text = packText(['recon:read', 'triage:read', 'triage:run'])
+    const never = text.slice(text.indexOf('never'), text.indexOf('## The tool-choice ladder'))
+    expect(never).not.toMatch(/^- start a triage run$/m)
+    expect(text).toMatch(/^- set a score, a tier or a factor directly$/m)
+    expect(text).toMatch(/^- change or reset a verdict a person made in the app$/m)
+  })
+
+  test('the pack explains the layers and that nobody writes a score', () => {
+    const text = packText(['recon:read', 'triage:read'])
+    expect(text).toContain('The score has three layers, and nobody writes it.')
+  })
+
+  test('the review and run workflows render only with their tools', () => {
+    expect(packText(['recon:read', 'triage:read', 'triage:review'])).toContain('Review the evidence behind a ranking')
+    expect(packText(['recon:read', 'triage:read'])).not.toContain('Review the evidence behind a ranking')
+    expect(packText(['recon:read', 'triage:read', 'triage:run'])).toContain('Re-rank after a scan')
+  })
+})

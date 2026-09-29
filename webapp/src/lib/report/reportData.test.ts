@@ -354,6 +354,15 @@ describe('every finding query in reportData excludes muted findings', () => {
     expect(SRC).toMatch(/suppressedRules,\s*suppressedByAgents,/)
   })
 
+  test('a Multi mute stays in the people\'s count and is counted apart inside it', () => {
+    // P9: a person confirmed it, so it is theirs; but they chose it in bulk
+    // from AI suggestions, so the template must be able to say so.
+    expect(SRC).toContain("(NOT byRule AND coalesce(n.muted_channel, '') = 'multi') AS byMulti")
+    expect(SRC).toMatch(/suppressedByPeople \+= total\s*\n\s*if \(r\.get\('byMulti'\)\) suppressedByMultiMute \+= total/)
+    expect(SRC).toMatch(/suppressedByAgents,\s*suppressedByMultiMute,/)
+    expect(SRC).toMatch(/suppressedCount = suppressedByPeople \+ suppressedByAgents \+ suppressedByRules\b/)
+  })
+
   test('ChainFinding queries are deliberately left alone', () => {
     // EvoGraph attack-chain memory is out of triage scope and not muteable.
     const chain = cypherLiterals().filter(q => /:ChainFinding\b/.test(q))

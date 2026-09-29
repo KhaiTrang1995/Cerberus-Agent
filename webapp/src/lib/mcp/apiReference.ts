@@ -148,6 +148,8 @@ const EXAMPLE_EXTRA_ARGS: Record<string, Record<string, unknown>> = {
   // Both refuse a call that names no finding, and `placeholderFor` has no array
   // branch, so a required-only example would name none.
   mute_findings: { findingIds: ['YOUR_FINDING_ID'] },
+  // The hash must be 40 hex, which a YOUR_* placeholder is not.
+  submit_finding_review: { evidenceHash: '0'.repeat(40) },
   unmute_findings: { findingIds: ['YOUR_FINDING_ID'] },
   // The digest must be 64 hex and issuedAt a real timestamp, neither of which a
   // YOUR_* placeholder satisfies.

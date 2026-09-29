@@ -9,6 +9,7 @@ import { useEffect, useRef, useCallback, useState } from 'react'
 import { buildAgentWsUrl } from './agentWsUrl'
 import {
   CypherFixTriageMessageType,
+  PUBLISHING_STOP_REFUSAL,
   type TriagePhase,
   type TriagePhasePayload,
   type TriageFindingPayload,
@@ -19,7 +20,8 @@ import {
 // TYPES
 // =============================================================================
 
-type TriageStatus = 'disconnected' | 'connecting' | 'connected' | 'running' | 'completed' | 'error'
+export type TriageStatus =
+  | 'disconnected' | 'connecting' | 'connected' | 'running' | 'completed' | 'stopped' | 'error'
 
 interface TriageMessage {
   type: string
@@ -38,7 +40,7 @@ interface UseCypherFixTriageWSConfig {
    * ONLY from startTriage, so returning to the page after leaving mid-run
    * showed an idle screen over a run that was still going.
    *
-   * Off by default so the CypherFix page keeps connecting lazily.
+   * Off by default; both the Priority Board and the CypherFix page turn it on.
    */
   autoConnect?: boolean
   onPhase?: (payload: TriagePhasePayload) => void
@@ -54,6 +56,9 @@ export interface UseCypherFixTriageWSReturn {
   findings: TriageFindingPayload[]
   thinking: string
   error: string | null
+  /** Something the operator should read that is not a failure, such as a Stop
+   *  the agent refused because the run is publishing. The run goes on. */
+  notice: string | null
   startTriage: () => void
   stopTriage: () => void
   disconnect: () => void
@@ -79,6 +84,7 @@ export function useCypherFixTriageWS({
   const [findings, setFindings] = useState<TriageFindingPayload[]>([])
   const [thinking, setThinking] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
 
   const wsRef = useRef<WebSocket | null>(null)
   const isAuthenticatedRef = useRef(false)
@@ -200,6 +206,7 @@ export function useCypherFixTriageWS({
 
         case CypherFixTriageMessageType.TRIAGE_COMPLETE: {
           const complete = payload as unknown as TriageCompletePayload
+          setNotice(null)
           setStatus('completed')
           setProgress(100)
           onComplete?.(complete)
@@ -207,15 +214,25 @@ export function useCypherFixTriageWS({
         }
 
         case CypherFixTriageMessageType.ERROR: {
-          const errMsg = (payload as { message?: string }).message || 'Unknown error'
+          const { message, code } = payload as { message?: string; code?: string }
+          const errMsg = message || 'Unknown error'
+          // A refused Stop is not a failed run: the run is still going and
+          // will finish, so the status must stay where it is.
+          if (code === 'publishing') {
+            setNotice(message || PUBLISHING_STOP_REFUSAL)
+            break
+          }
           setError(errMsg)
           setStatus('error')
           onError?.(errMsg)
           break
         }
 
+        // Its own status, not `connected`: a stopped run is a terminal state
+        // the board reloads on and the progress panel offers to close (U4).
         case CypherFixTriageMessageType.STOPPED:
-          setStatus('connected')
+          setStatus('stopped')
+          setNotice(null)
           break
 
         case CypherFixTriageMessageType.PONG:
@@ -235,7 +252,7 @@ export function useCypherFixTriageWS({
         clearInterval(pingIntervalRef.current)
         pingIntervalRef.current = null
       }
-      if (status !== 'completed' && status !== 'error') {
+      if (status !== 'completed' && status !== 'error' && status !== 'stopped') {
         setStatus('disconnected')
       }
     }
@@ -248,6 +265,7 @@ export function useCypherFixTriageWS({
     setFindings([])
     setThinking('')
     setError(null)
+    setNotice(null)
     isAuthenticatedRef.current = false
     pendingStartRef.current = false
   }, [])
@@ -279,12 +297,16 @@ export function useCypherFixTriageWS({
     setCurrentPhase(null)
     setProgress(0)
     setError(null)
+    setNotice(null)
 
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
       // Defer start until CONNECTED event fires
       pendingStartRef.current = true
       connect()
     } else {
+      // Leave the previous run's terminal state, or the panel shows "stopped"
+      // over the new run until its first phase arrives.
+      setStatus(s => (s === 'completed' || s === 'stopped' || s === 'error') ? 'connected' : s)
       sendMessage(CypherFixTriageMessageType.START_TRIAGE)
     }
   }, [connect, sendMessage])
@@ -342,6 +364,7 @@ export function useCypherFixTriageWS({
     findings,
     thinking,
     error,
+    notice,
     startTriage,
     stopTriage,
     disconnect,

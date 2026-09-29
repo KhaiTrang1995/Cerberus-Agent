@@ -2133,7 +2133,7 @@
    "group": "llm",
    "has_default": true,
    "mcp": "settable",
-   "meaning": "Override the LLM model for CypherFix agents, including the Priority Board pass that explains and groups the top-ranked findings. Leave empty to use the model selected in Agent Behaviour.",
+   "meaning": "No longer used. The Triage review and CodeFix models are chosen per user, for all of that user's projects, in Global Settings > LLM Providers > Models by feature. Kept only so older exports and presets still load.",
    "optional": false,
    "phase": "standalone",
    "prisma_type": "String",
@@ -12473,14 +12473,14 @@
   "triageReviewBudget": {
    "bounds": {
     "min": 0,
-    "max": 10000
+    "max": 1000
    },
    "default": 150,
    "form_section": "CypherFixSettingsSection",
    "group": "not-tuning",
    "has_default": true,
    "mcp": "settable",
-   "meaning": "How many findings one triage job may review before it stops and reports what it got through.",
+   "meaning": "How many findings one triage run may have its evidence reviewed by the configured model before it stops and ranks the rest on the rules alone. 0 means no review and needs no model. A run never reviews more than 1000, whatever is stored.",
    "optional": false,
    "phase": "standalone",
    "prisma_type": "Int",

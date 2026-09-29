@@ -13,7 +13,9 @@ import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { isInternalRequest } from '@/lib/session'
 import { writeAudit } from '@/lib/audit'
-import { TRIAGE_STATUSES, type TriageStatus } from '@/lib/triageRun'
+import {
+  LIVE_TRIAGE_STATUSES, TRIAGE_STATUSES, trimTriageRuns, type TriageStatus,
+} from '@/lib/triageRun'
 
 interface RouteParams {
   params: Promise<{ runId: string }>
@@ -28,7 +30,9 @@ const SUMMARY_KEYS = new Set([
   'scored', 'reviewed', 'cache_hits', 'not_reviewed', 'skipped_changed',
   'false_positives', 'groups', 'llm_calls', 'duration_ms',
   'remediations_created', 'remediations_updated', 'remediations_deleted',
-  'remediations_skipped', 'nodes_written',
+  'remediations_skipped', 'nodes_written', 'llm_available',
+  'reviews_kept', 'external_reviews', 'reviews_adopted', 'review_budget',
+  'publish_failed',
 ])
 
 function cleanSummary(value: unknown): Record<string, number> {
@@ -69,27 +73,43 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
   }
 
   const summary = cleanSummary(body.summary)
-  await prisma.triageRun.update({
-    where: { id: runId },
+  const errorClass = typeof body.errorClass === 'string' ? body.errorClass.slice(0, 60) : ''
+
+  // Only a LIVE run takes the agent's verdict. A row already marked
+  // `failed/agent_lost` (its heartbeat went stale, and the graph was declared
+  // free) keeps that status: overwriting it would claim the run held the
+  // project the whole time, which is what an activation relied on it not doing.
+  const updated = await prisma.triageRun.updateMany({
+    where: { id: runId, status: { in: [...LIVE_TRIAGE_STATUSES] } },
     data: {
       status,
       summary,
-      errorClass: typeof body.errorClass === 'string' ? body.errorClass.slice(0, 60) : '',
+      errorClass,
       finishedAt: new Date(),
       ...(typeof body.intelDate === 'string' && body.intelDate
         ? { intelDate: new Date(body.intelDate) }
         : {}),
     },
   })
+  const late = updated.count === 0
+  if (late) {
+    await prisma.triageRun.update({
+      where: { id: runId },
+      data: { summary: { ...summary, late: 1 } },
+    })
+  }
 
   await writeAudit({
     actorId: run.realActorUserId ?? run.actorUserId,
-    action: 'triage.finish',
+    action: late ? 'triage.finish.late' : 'triage.finish',
     targetType: 'project',
     targetId: run.projectId,
-    after: { runId, status, summary },
+    after: { runId, status, summary, ...(late ? { late: true, reported: errorClass } : {}) },
     source: 'system',
   })
 
-  return NextResponse.json({ status })
+  // Never delays or fails the finish.
+  void trimTriageRuns(run.projectId)
+
+  return NextResponse.json({ status: late ? 'late' : status, late })
 }

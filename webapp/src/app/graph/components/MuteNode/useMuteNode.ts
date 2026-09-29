@@ -30,6 +30,21 @@ export interface MuteCallbacks {
   onStale?: () => void | Promise<void>
 }
 
+/** The confirm every mute asks, for one named finding or for several at once. */
+export function muteConfirmText(what: { name: string } | { count: number }): string {
+  if ('name' in what) {
+    return `Mute "${what.name}"?\n\n` +
+      'It will be hidden from the graph, from reports, and from the AI agent, ' +
+      'which will no longer be able to see or reason about it. You can restore ' +
+      'it from Muted Nodes (in the All Nodes menu) at any time.'
+  }
+  const n = what.count
+  return `Mute ${n} finding${n === 1 ? '' : 's'}?\n\n` +
+    `${n === 1 ? 'It' : 'They'} will be hidden from the graph, from reports, and from the AI agent, ` +
+    `which will no longer be able to see or reason about ${n === 1 ? 'it' : 'them'}. You can restore ` +
+    `${n === 1 ? 'it' : 'them'} from Muted Nodes (in the All Nodes menu) at any time.`
+}
+
 export function useMuteNode(
   projectId: string | null | undefined,
   /** Switch the page to Muted Nodes; offered on the toast after a mute. */
@@ -45,10 +60,7 @@ export function useMuteNode(
       const key = target.nodeId ?? target.graphId
       if (!projectId || !key) return
       const ok = await dangerConfirm(
-        `Mute "${target.name || key}"?\n\n` +
-          'It will be hidden from the graph, from reports, and from the AI agent, ' +
-          'which will no longer be able to see or reason about it. You can restore ' +
-          'it from Muted Nodes (in the All Nodes menu) at any time.',
+        muteConfirmText({ name: target.name || key }),
         'Mute finding',
         { confirmLabel: 'Mute' },
       )

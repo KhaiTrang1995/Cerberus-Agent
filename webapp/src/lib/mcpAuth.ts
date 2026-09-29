@@ -53,6 +53,18 @@ export const MCP_SCOPES = [
   // the in-app agent. An agent misled by target text could hide a real issue,
   // so this is opt-in, never auto-ticked, and bounded in code (see muteTools).
   'triage:mute',
+  // A second reviewer's correction of the factors behind a finding's score,
+  // every one quoted from the evidence and checked, with RedAmon recomputing
+  // the score itself. Split from triage:write because a verdict is the
+  // operator's decision and a review is a machine's reading: it is labelled as
+  // an agent's, replaced by the next review or an evidence change, and can
+  // never override a person's decision.
+  'triage:review',
+  // Starting and stopping a Priority Board run. Split because a run rewrites
+  // the whole board and the fix list, spends the owner's model budget, and
+  // holds up version switching, Recon Delta and Mute Rules while it works.
+  // MCP starts are spaced and capped per project in code (triageRun.ts).
+  'triage:run',
   'graph:cypher',
   // The act that binds the platform to a target. It gets its own checkbox so an
   // operator can mint a token that tunes existing engagements without being able

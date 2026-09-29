@@ -27,12 +27,42 @@ write `:Muted`, `NOT n:Muted`, or any filter on it: the exclusion is already
 applied for you. If the user asks about suppressed or muted findings, tell them
 to use the Triage page rather than trying to query for them.
 
+## Node IDs
+A "Node ID" (also "node id", "graph id", "node #1234") is the number the RedAmon
+tables show in their leftmost column: the node's internal id, read with `id(n)`.
+It is NOT the `id` PROPERTY (`n.id`), which is a different value on the labels
+that have one (a CVE id, a finding key). Compare `id(n)` with an integer literal;
+`id(n) = "1234"` never matches.
+
+  Good: MATCH (n) WHERE id(n) = 1234 RETURN labels(n) AS labels, n
+  Good: MATCH (v:Vulnerability) WHERE id(v) IN [1234, 1301] RETURN v
+  Bad:  MATCH (n) WHERE n.id = "1234"             <- that is the property, not the Node ID
+
+A lookup by Node ID is the ONE place a bare `(n)` is right: it reads the named
+node, it does not scan the graph. Use the label whenever you know it. A bare
+neighbour `(m)` only returns this project's nodes, so give CVE, MitreData and
+Capec neighbours their own labelled OPTIONAL MATCH.
+
+CVE, MitreData and Capec are shared reference nodes. Neither a bare `(n)` nor a
+query that matches ONLY reference nodes can reach them; go through this
+project's node that links to one:
+
+  Good: MATCH (t:Technology)-[:HAS_KNOWN_CVE]->(c:CVE) WHERE id(c) = 1234 RETURN DISTINCT c
+  Bad:  MATCH (c:CVE) WHERE id(c) = 1234 RETURN c   <- rejected: nothing ties it to the project
+
+When each row describes exactly ONE node and you return its property values
+rather than the node itself, also return `id(x) AS nodeId` for that node, so the
+answer can be matched back to the row the user is looking at. Never add it to a
+query that counts, groups, aggregates or uses DISTINCT: it would split every
+group into one row per node.
+
 ## Node Types and Key Properties
 
 ### Infrastructure Nodes (Hierarchy: Domain -> Subdomain -> IP -> Port -> Service)
 
 **Domain** - Root domain being assessed
 - name (string): "example.com"
+- wildcard_mode (boolean): this domain was ENUMERATED (the operator wrote `*.domain.com` in a Domain batch, or it is a single-domain full-discovery run), rather than scanned as the exact host list that was supplied
 - registrar: WHOIS data
 - creation_date: WHOIS data
 - expiration_date: WHOIS data
@@ -66,6 +96,10 @@ to use the Triage page rather than trying to query for them.
 - criminalip_risk_grade (string): domain risk grade from Criminal IP
 - criminalip_abuse_count (int): number of abuse reports for this domain from Criminal IP
 - criminalip_current_service (string): current service classification from Criminal IP
+- recon_coverage_at (datetime): when this run stamped its coverage record; present on every Domain a full recon run completed, absent when the run crashed, the graph write failed, or an older recon wrote the node
+- recon_coverage_gaps (string): JSON array of what this run could NOT check, one object per cut source (`source`, `module`, `reason`, `skipped`, `hosts`); "[]" on a clean run
+- recon_skipped_hosts (list[string]): host:port targets this run skipped as unreachable (first 500, sorted); their findings were kept, not re-checked
+- recon_nuclei_truncated (boolean): a Nuclei pass hit NUCLEI_MAX_RUNTIME and was stopped; its partial findings were kept
 
 Additional properties present on this node type, not yet described:
 - admin_name (string)
@@ -421,6 +455,12 @@ Additional properties present on this node type, not yet described:
 
 Additional properties present on this node type, not yet described:
 
+JS Recon secret properties (source="js_recon" only):
+- key_type (string): the matching pattern's category
+- confidence (string): high, medium, low
+- validation_status (string): validated, invalid, unvalidated, skipped, incomplete, format_validated, error
+- detection_method (string): "regex"
+
 - matched_text
 **Traceroute** - Network route from scanner to target (from GVM)
 - target_ip (string): target IP address
@@ -554,6 +594,26 @@ Web cache poisoning properties (source="cache_poisoning"):
 - source_engine (string): "wcvs" (surfaced by the WCVS breadth engine) or "hypothesis" (native framework/generic pack)
 - poc_link (string): reproduction; evidence (string): JSON blob with baseline/poisoned/clean hashes
 - curl_verify (string): reproduction; evidence (string): JSON blob with baseline/poisoned/clean hashes
+
+Per-source properties node filters also read (graph_db/node_filters/catalog.yaml):
+- url (string): the probed URL (security_check, origin_discovery)
+- status_code (integer): HTTP status of the probe (security_check, origin_discovery)
+- state (string): nmap_nse script state, "VULNERABLE" or "LIKELY VULNERABLE"
+- output (string): nmap_nse script output, up to 2000 characters
+- port_number (integer): nmap_nse port
+- cve_id (string): nmap_nse CVE id, "" when the script reported none
+- cvss (float): criminalip CVSS score (v3, else v2)
+- confidence_score (float): origin_discovery confidence, 0 to 100
+- origin_discovery_method (string): "subdomain", "cert_san", "favicon_hash", "passive_dns" or "unknown"
+- origin_source (string): where the origin candidate came from ("dns", "crtsh", "shodan", "censys", ...)
+- cdn_fronting (string): the CDN in front of the origin
+- confidence_tier (string): cache_poisoning "Confirmed", "Strong" or "Tentative"
+- ai_owasp_llm_id (string): the OWASP LLM and MITRE ATLAS classification
+- ai_atlas_technique (string): the OWASP LLM and MITRE ATLAS classification
+- advisory_id (string): osv advisory, package and CVE aliases
+- purl (string): osv advisory, package and CVE aliases
+- package_version (string): osv advisory, package and CVE aliases
+- aliases (list): osv advisory, package and CVE aliases
 
 **CVE / MitreData / Capec** - the PUBLIC NVD+MITRE catalogue. These three are
 - Relationship: `(svc:Service)-[:HAS_VULNERABILITY]->(v:Vulnerability)` — linked to the Service where the vulnerable software was detected
@@ -872,6 +932,9 @@ Additional properties present on this node type, not yet described:
 Additional properties present on this node type, not yet described:
 - aliases (list[string])
 - soft_error (boolean)
+
+Incident catalog property node filters read:
+- incident_id (string): set only when the package is in the incident catalog
 - id (string): the advisory id, "CVE-..." or "GHSA-..."
 - severity (string): "critical", "high", "medium", "low", "info" - from the OSV advisory band; "info" means OSV graded it, so do NOT read it as low risk
 - cvss_metrics (string): CVSS vector when the advisory carries one
@@ -925,6 +988,10 @@ never report an uploaded-SBOM hit as something found on the target.
 Additional properties present on this node type, not yet described:
 - discovered_at (string)
 - sample_urls (list[string])
+
+Package properties on dependency and framework findings:
+- package_name (string): the package the finding names
+- package_version (string): the package the finding names
 - finding_type: 'js_file'
 - title (string): filename (e.g. "app.js", "test_app.js")
 - detail (string): full URL or upload:// path
@@ -1034,8 +1101,16 @@ Additional properties present on this node type, not yet described:
 
 These are written onto ANY finding node - Vulnerability, Secret,
 MultiscannerFinding, GithubSecret, GithubSensitiveFile, JsReconFinding,
-MalPackageFinding - rather than belonging to one label, so they are
-described once here instead of repeated in every block above.
+MalPackageFinding, ExploitGvm - rather than belonging to one label, so they
+are described once here instead of repeated in every block above.
+
+Triage is three stored layers and one computed result. BASE is the rules'
+score from a run's facts (`triage_math_score`, `triage_base_*`). REVIEW is a
+machine reading the evidence: the built-in AI during a run, or an external
+agent over MCP (`triage_ai_*`). DECISION is a person's Real or False positive
+(`triage_status`, `triage_source`, `triage_verdict_*`). The FINAL values
+(`triage_priority_score`, `triage_tier`, `triage_state`, `triage_factors`,
+`triage_decided_by`) are computed from the three; nobody writes them directly.
 
 Suppression is a HUMAN action and triage never performs it: a triage run
 ranks a finding, it never hides one. A suppressed finding carries the
@@ -1047,35 +1122,51 @@ not so you can query for one.
 - muted_at (datetime): When it was suppressed
 - muted_by (string): `user_id` of the operator who suppressed it
 - muted_reason (string): Optional operator note
-- triage_priority_score (float): 0-100, the sort key. Bigger is more urgent
-- triage_math_score (float): The score before any AI correction
+- muted_channel (string): How the mute arrived: absent = a person in the UI, `mcp` = an external agent holding that person's access token; `multi` = a person's Multi mute, and `muted_token` then holds the batch id
+- muted_token (string): The access-token prefix of an `mcp` mute; never the token
+- triage_priority_score (float): 0-100, the sort key. Bigger is more urgent. The FINAL score, after review and decision
+- triage_math_score (float): The rules-only score (the BASE layer), before any review or decision
 - triage_risk (float): C x L x I x R, 0-1, before the tier is folded into the score. The project-level risk roll-up combines these
 - triage_tier (string): `T1` Act now | `T2` Act soon | `T3` Plan | `T4` Track
 - triage_tier_rule (string): Which rule placed it in that tier
-- triage_factors (string): `C`, `L`, `I`, `R`, each with the evidence it came from
+- triage_factors (string): `C`, `L`, `I`, `R` after review and decision, each with the evidence it came from
+- triage_base_factors (string): The rules-only `C`, `L`, `I`, `R`, each with its evidence
+- triage_base_tier (string): The rules-only tier
+- triage_base_tier_rule (string): The rule behind the rules-only tier
+- triage_base_state (string): `open` | `fixed` | `gone` | `inactive`, from the facts alone; never `false_positive`
+- triage_tier_inputs (string): JSON `{proven, kev}`, what the tier rules read besides the factors
 - triage_signals (list[string]): The readable fact chips: `KEV`, `EPSS 0.94`, `live endpoint`
-- triage_state (string): `open` | `fixed` | `gone` | `inactive` | `false_positive`. Only `open` is ranked
+- triage_state (string): `open` | `fixed` | `gone` | `inactive` | `false_positive`. Only `open` is ranked. `false_positive` comes from a person's decision or a still-valid review
+- triage_decided_by (string): Which layer set the final values: `rules` | `review` | `person`
+- triage_rescored_at (datetime): When the final values were last computed
 - triage_host (string): The host the model resolved and scored against, deterministically
 - triage_group_key (string): One problem, one fix. Replaces `triage_cluster_id`
-- triage_detector (string): Which detector fired (`nuclei:<template>`, `gvm:<oid>`, `trufflehog:<detector>`). Real / False positive clicks are counted per detector, per user, and feed back into C
+- triage_detector (string): Which detector fired (`nuclei:<template>`, `gvm:<oid>`, `trufflehog:<detector>`). A person's Real / False positive clicks in the app are counted per detector, per user, and feed back into C
 - triage_run_id (string): Which run produced this. Drives "new since the last triage"
 - triage_model_version (string): `SCORE_MODEL_VERSION`; two runs are comparable only when it matches
 - triage_intel_date (string): When the CVE intelligence behind it was fetched
 - triage_proof (string): The chain findings that proved it, so proof survives a lost edge
-- triaged_at (datetime): When the run wrote this
+- triaged_at (datetime): When a run last published it. A verdict or a review never moves it
+- triage_evidence_hash (string): Hash of the normalised, redacted evidence the last run recorded. A review is valid while its own hash equals this
 - triage_ai_verdict (string): `real` | `doubtful` | `false_positive` | `unclear` | `not_reviewed`
-- triage_ai_corrections (string): What it changed, and the disputes it raised
-- triage_ai_quote (string): The exact evidence text, VERIFIED as a substring of what was sent
-- triage_ai_model (string): Which model reviewed it
+- triage_ai_corrections (string): What the review changed: its verdict, the impact multiplier with its quote, and the disputed facts
+- triage_ai_quote (string): The exact evidence text, VERIFIED as a substring of the evidence the reviewer read
+- triage_ai_why (string): The review's one-line reason
+- triage_ai_model (string): Which model wrote the review; empty for an external agent
+- triage_ai_channel (string): Who reviewed it: `builtin` (the AI during a run) | `mcp` (an external agent)
+- triage_ai_by (string): The access-token prefix of an `mcp` review; never the token
+- triage_ai_evidence_hash (string): The evidence hash the review read. The review counts only while it equals `triage_evidence_hash`
+- triage_ai_prompt_version (string): The prompt version of a built-in review
 - triage_ai_at (datetime): When
-- triage_evidence_hash (string): The review cache key: evidence + prompt version + model
-- triage_fix_lever (string): The short phrase describing what would fix it
-- triage_status (string): `confirmed` | `likely_noise` | `unreviewed` (absent = unreviewed)
-- triage_confidence (float): 0.0 - 1.0
-- triage_reason (string): One line, why
-- triage_source (string): `ai` | `human`. A human verdict is never overwritten. Deliberately only two values: a third would make the finding prune-eligible, let a later AI run overwrite the verdict, and stop `likely_noise` meaning false-positive. A verdict delegated through a token is still `human` - see `triage_verdict_channel` for how it arrived
-- triage_verdict_channel (string): How a `human` verdict arrived: absent (or `app`) = a person in the UI, `mcp` = an external agent holding that person's access token. Never changes what the verdict MEANS, only who typed it. Absent on findings judged before this existed
-- triage_verdict_by (string): `user_id` of whoever the verdict is attributed to, mirroring `muted_by`. Without it a verdict recorded only who it was NOT (the AI), never who it was
+- triage_fix_lever (string): The short phrase describing what would fix it, from the review
+- triage_status (string): `confirmed` | `likely_noise` | `unreviewed` (absent = unreviewed). Written by a person only
+- triage_confidence (float): 1.0 while a person's decision exists
+- triage_reason (string): A person's one-line reason for their decision
+- triage_source (string): `human` while a person's decision exists; removed on Reset. Deliberately never a third value: a finding with `human` is kept by the rescan prune and guarded from Mute Rules. A legacy `ai` value is an old AI false positive and is not a decision
+- triage_verdict_channel (string): How a person's decision arrived: `app` = the UI, `mcp` = an external agent holding that person's access token. ABSENT means `app`: every decision made before this existed was a person's click
+- triage_verdict_by (string): `user_id` of whoever the decision is attributed to, mirroring `muted_by`
+- triage_verdict_token (string): The access-token prefix of an `mcp` decision; never the token
+- triage_verdict_at (datetime): When the decision was made
 
 ## Relationships
 
@@ -1527,8 +1618,13 @@ OPTIONAL MATCH (s)-[:FAILED_WITH]->(fl:ChainFailure)
 RETURN s.iteration, s.tool_name, f.title, fl.error_message
 ORDER BY s.iteration
 
-// Decisions made during a chain (with preceding/following steps)
-MATCH (ac:AttackChain {chain_id: "session-123"})-[:HAS_STEP]->(:ChainStep)-[:NEXT_STEP*0..]->(s:ChainStep)-[:LED_TO]->(d:ChainDecision)
+// Decisions made during a chain (with preceding/following steps).
+// HAS_STEP links only the FIRST step, so do not walk NEXT_STEP to reach the rest:
+// every ChainStep carries its chain's chain_id, so match the steps by that.
+// Variable-length paths ([*], [:R*1..3], (..){n,m}) are REJECTED: the nodes they
+// pass through cannot be scoped to this project.
+MATCH (ac:AttackChain {chain_id: "session-123"})
+MATCH (s:ChainStep {chain_id: ac.chain_id})-[:LED_TO]->(d:ChainDecision)
 OPTIONAL MATCH (d)-[:DECISION_PRECEDED]->(next:ChainStep)
 RETURN d.decision_type, d.from_state, d.to_state, d.reason, s.tool_name AS triggered_by, next.tool_name AS followed_by
 ```
