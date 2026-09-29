@@ -5,11 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [6.21.0] - 2026-09-29
 
 ### Added
 
-- **API usage report.** A **Check API usage** button on Settings > API Keys (and on the LLM Providers tab) checks every saved credential in one click, each rotation key on its own, and reports per key the plan, used, limit, remaining and next reset, or why a key cannot be checked. It calls only account and usage endpoints, never a search; the keys never reach the browser, and the saved report keeps numbers and last-4 hints only. The report is saved and reopens from **Last report**; a new check replaces it after you confirm. It warns before checking while a scan or the agent is running, since its calls share their rate limits. An admin can run it for a user only while acting as that user, and every run is audited. Set `API_USAGE_CHECK_ENABLED=false` on an air-gapped host. Three checks use a little quota and say so: NVD (1 request of its 30 s window), ProjectDiscovery (1 vulnx request) and Postman (1 monthly API call).
+- **API usage report.** **Check API usage** (Settings > API Keys and LLM Providers) checks every saved key, rotation keys included, in one click and shows each key's plan, remaining quota and next reset, or why it could not be checked. It calls only account and usage endpoints, never a search, and the keys never reach the browser. The report is saved and reopens from **Last report**. Turn it off on air-gapped hosts with `API_USAGE_CHECK_ENABLED=false`.
+- **Recon circuit breakers.** Every external dependency the recon pipeline calls — OSINT/search providers, CVE feeds, the DNS resolver, the subdomain tools, the JS/secret validators, npm and the agent LLM — now sits behind a circuit breaker: one that rate-limits, refuses a key or goes down is paused for the rest of the run instead of retried, and a scan host that stops responding is skipped after 3 failures. A degraded run keeps the findings it could not re-check (never deletes them as "gone"), records what it skipped per domain, and surfaces it as "partial — N sources skipped" in run history, the Recon Delta and the report. Nuclei and httpx gain runtime caps. Off switch: `RECON_CIRCUIT_BREAKERS=off`.
+
+### Security
+
+- **Provider API keys never reach a recon log line.** Circuit-breaker and error messages carry only the provider, endpoint and a refused key's rotation position — never the key or a response body that might echo it.
 
 ### Fixed
 
