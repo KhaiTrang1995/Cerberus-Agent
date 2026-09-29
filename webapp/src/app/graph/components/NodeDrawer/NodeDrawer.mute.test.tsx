@@ -59,7 +59,7 @@ describe('NodeDrawer Mute button', () => {
   it('sits immediately left of the delete button', () => {
     renderDrawer()
     const row = screen.getByRole('heading', { name: 'Basic Info' }).parentElement!
-    const buttons = Array.from(row.querySelectorAll('button'))
+    const buttons: Element[] = Array.from(row.querySelectorAll('button'))
     const del = screen.getByLabelText('Delete node')
     expect(buttons.indexOf(drawerMute())).toBe(buttons.indexOf(del) - 1)
   })
