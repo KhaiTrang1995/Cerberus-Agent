@@ -40,6 +40,7 @@ OK_BODY = {
 
 def _response(body):
     resp = MagicMock()
+    resp.status_code = 200
     resp.json.return_value = body
     resp.raise_for_status.return_value = None
     return resp
