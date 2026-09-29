@@ -147,8 +147,7 @@
 .chip:focus-visible,
 .button:focus-visible,
 .runBannerBtn:focus-visible,
-.verdictButton:focus-visible,
-.muteButton:focus-visible {
+.verdictButton:focus-visible {
   outline: 2px solid var(--border-focus);
   outline-offset: 1px;
 }
@@ -343,33 +342,6 @@
 
 .confidence {
   color: var(--pb-muted-fg);
-}
-
-.muteButton {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 8px;
-  border: 1px solid var(--border-default);
-  border-radius: var(--radius-md);
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 11px;
-  font-weight: var(--font-medium);
-  cursor: pointer;
-  white-space: nowrap;
-  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
-}
-
-.muteButton:hover:not(:disabled) {
-  background: var(--pb-neutral-bg);
-  color: var(--text-primary);
-  border-color: var(--border-strong);
-}
-
-.muteButton:disabled {
-  opacity: 0.5;
-  cursor: default;
 }
 
 .empty {

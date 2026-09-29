@@ -22,6 +22,7 @@ import {
   exportRows, hasFilters, kindLabel, mutedByText, mutedQuery, stateText,
   type MutedFacets, type MutedFilters, type MutedRow, type MutedVia,
 } from './mutedNodes'
+import { NodeIdCell, NodeIdTh } from '../RedZoneTables/nodeId'
 import styles from './MutedNodesTable.module.css'
 
 const UNMUTE_TITLE =
@@ -301,7 +302,7 @@ export function MutedNodesTable({ projectId, onOpenRule }: MutedNodesTableProps)
             <tbody>
               {Array.from({ length: 6 }, (_, i) => (
                 <tr key={i} className={styles.skeletonRow}>
-                  {Array.from({ length: 7 }, (__, j) => (
+                  {Array.from({ length: 8 }, (__, j) => (
                     <td key={j}><div className={styles.skeletonBar} /></td>
                   ))}
                 </tr>
@@ -334,6 +335,7 @@ export function MutedNodesTable({ projectId, onOpenRule }: MutedNodesTableProps)
                       onChange={() => setSelected(allSelected ? new Set() : new Set(rows.map(r => r.id)))}
                     />
                   </th>
+                  <NodeIdTh />
                   <th>Kind</th>
                   <th>Name</th>
                   <th>Sev</th>
@@ -354,6 +356,7 @@ export function MutedNodesTable({ projectId, onOpenRule }: MutedNodesTableProps)
                         onChange={() => toggle(row.id)}
                       />
                     </td>
+                    <td><NodeIdCell value={row.node_id} /></td>
                     <td className={styles.nowrap}>{kindLabel(row)}</td>
                     <td className={styles.name}>
                       {row.name || row.id}

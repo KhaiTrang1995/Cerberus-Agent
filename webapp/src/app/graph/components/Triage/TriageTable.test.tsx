@@ -129,3 +129,49 @@ describe('Priority Board no longer carries the muted list', () => {
     expect(onViewMuted).toHaveBeenCalledOnce()
   })
 })
+
+
+describe('Priority Board Node ID column', () => {
+  const withNodeId = { ...ranked, node_id: '4711' }
+
+  afterEach(() => {
+    cleanup()
+    vi.unstubAllGlobals()
+    vi.clearAllMocks()
+  })
+
+  test('it is the leftmost column, ahead of the rank', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => ok({ findings: [withNodeId], total: 1 })))
+    render(<TriageTable projectId="p1" />)
+    await screen.findByText(/real 34%/)
+    const headers = screen.getAllByRole('columnheader')
+    expect(headers[0]).toHaveTextContent('Node ID')
+    expect(headers[1]).toHaveTextContent('#')
+    expect(screen.getByRole('button', { name: 'Copy node ID 4711' })).toBeInTheDocument()
+  })
+
+  test('a row from an agent that predates the column shows "-"', async () => {
+    vi.stubGlobal('fetch', vi.fn(() => ok({ findings: [ranked], total: 1 })))
+    render(<TriageTable projectId="p1" />)
+    await screen.findByText(/real 34%/)
+    expect(screen.queryByRole('button', { name: /Copy node ID/ })).toBeNull()
+    expect(screen.getAllByRole('row')[1].querySelector('td')).toHaveTextContent('-')
+  })
+
+  test('a verdict is still written against the id property, never the graph id', async () => {
+    // The graph id changes on import and version-activate; a verdict keyed on
+    // it would land on whatever node reuses that number.
+    const fetchMock = vi.fn((url: string) =>
+      url.includes('/api/triage/verdict')
+        ? ok({ updated: true })
+        : ok({ findings: [withNodeId], total: 1 }))
+    vi.stubGlobal('fetch', fetchMock)
+    render(<TriageTable projectId="p1" />)
+    fireEvent.click(await screen.findByTitle(/Mark this real/))
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some(c => String(c[0]).includes('/api/triage/verdict'))).toBe(true))
+    const call = fetchMock.mock.calls.find(c => String(c[0]).includes('/api/triage/verdict'))!
+    const body = JSON.parse((call as unknown as [string, { body: string }])[1].body)
+    expect(body.nodeId).toBe('f1')
+  })
+})
