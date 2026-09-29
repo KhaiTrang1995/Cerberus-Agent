@@ -18,6 +18,7 @@ const h = vi.hoisted(() => ({
   authCreate: vi.fn(),
   jobs: vi.fn(),
   schedules: vi.fn(),
+  schedulesUpdate: vi.fn(),
   userSettings: vi.fn(),
   live: vi.fn(),
   seed: vi.fn(),
@@ -32,7 +33,10 @@ vi.mock('@/lib/prisma', () => {
     },
     engagementAuthorization: { create: (...a: unknown[]) => h.authCreate(...a) },
     jobQueue: { findMany: (...a: unknown[]) => h.jobs(...a) },
-    scanSchedule: { findMany: (...a: unknown[]) => h.schedules(...a) },
+    scanSchedule: {
+      findMany: (...a: unknown[]) => h.schedules(...a),
+      updateMany: (...a: unknown[]) => h.schedulesUpdate(...a),
+    },
     userSettings: { findUnique: (...a: unknown[]) => h.userSettings(...a) },
     $transaction: (fn: (tx: unknown) => unknown) => fn(client),
   }
@@ -88,6 +92,7 @@ beforeEach(() => {
   h.authCreate.mockResolvedValue({ id: 'auth1' })
   h.jobs.mockResolvedValue([])
   h.schedules.mockResolvedValue([])
+  h.schedulesUpdate.mockResolvedValue({ count: 0 })
   h.userSettings.mockResolvedValue(null)
   h.live.mockResolvedValue(null)
   h.seed.mockResolvedValue(true)
@@ -211,6 +216,13 @@ describe('the write itself', () => {
   test('refused while anything reads or writes the graph', async () => {
     h.live.mockResolvedValue('an agent session is running')
     await expect(call({ gvmScanTargets: 'ips_only' })).rejects.toMatchObject({ code: 'busy' })
+    await expect(call({ gvmScanTargets: 'ips_only' })).rejects.toThrow(/stop the session in the RedAmon UI/)
+    expect(h.projectUpdateMany).not.toHaveBeenCalled()
+  })
+
+  test('a session flag the agent could not confirm says to check the agent (C-8)', async () => {
+    h.live.mockResolvedValue('an agent session is marked running and the agent could not be reached to confirm it')
+    await expect(call({ gvmScanTargets: 'ips_only' })).rejects.toThrow(/check that its container is up/)
   })
 
   test('a failed Domain seed is reported, and the update stands', async () => {
@@ -230,5 +242,59 @@ describe('the write itself', () => {
 
   test('a call that changes nothing is refused', async () => {
     await expect(call({ gvmScanTargets: 'both' })).rejects.toMatchObject({ code: 'bad_args' })
+  })
+})
+
+describe('a batch that gains hosts pauses the scan schedules (C-7)', () => {
+  const SCHEDULES = [{ id: 's1', label: 'nightly' }, { id: 's2', label: '' }]
+
+  test('in the same transaction, and the result and the audit say which', async () => {
+    h.schedules.mockResolvedValueOnce(SCHEDULES).mockResolvedValue([])
+    h.schedulesUpdate.mockResolvedValue({ count: 2 })
+    const r = await call({ domainBatchHosts: ['a.example.com', 'b.example.com', 'c.example.com'] })
+    expect(h.schedules.mock.calls[0][0]).toEqual({
+      where: { projectId: 'p1', enabled: true }, select: { id: true, label: true },
+    })
+    expect(h.schedulesUpdate).toHaveBeenCalledWith({
+      where: { id: { in: ['s1', 's2'] }, enabled: true },
+      data: { enabled: false },
+    })
+    expect(r.pausedSchedules).toEqual({ count: 2, names: ['nightly', 's2'] })
+    expect(r.affectedSchedules).toEqual({ count: 0, names: [] })
+    expect(r.note).toMatch(/2 scheduled scan\(s\) were paused; a person re-enables them in the Scans tab/)
+    expect(h.audit.mock.calls[0][0].after.pausedScheduleIds).toEqual(['s1', 's2'])
+  })
+
+  test('a wildcard on an existing root gains entries too', async () => {
+    h.schedules.mockResolvedValueOnce(SCHEDULES).mockResolvedValue([])
+    await call({ domainBatchHosts: ['a.example.com', 'b.example.com', '*.example.com'] })
+    expect(h.schedulesUpdate).toHaveBeenCalled()
+  })
+
+  test('the pause is written only when the project update wins its compare-and-swap', async () => {
+    h.schedules.mockResolvedValue(SCHEDULES)
+    h.projectUpdateMany.mockResolvedValue({ count: 0 })
+    await expect(call({ domainBatchHosts: ['a.example.com', 'b.example.com', 'c.example.com'] }))
+      .rejects.toMatchObject({ code: 'conflict' })
+    expect(h.schedulesUpdate).not.toHaveBeenCalled()
+  })
+
+  test.each([
+    ['a narrowed batch', { domainBatchHosts: ['a.example.com'] }],
+    ['a batch that only reorders', { domainBatchHosts: ['b.example.com', 'a.example.com', 'a.example.com'] }],
+    ['a new GitHub organisation: no scheduled run reads it', { githubTargetOrg: 'other-org' }],
+    ['the GVM strategy', { gvmScanTargets: 'ips_only' }],
+  ])('%s pauses nothing and only reports the schedules', async (_label, changes) => {
+    h.schedules.mockResolvedValue(SCHEDULES)
+    const r = await call(changes)
+    expect(h.schedulesUpdate).not.toHaveBeenCalled()
+    expect(r.pausedSchedules).toEqual({ count: 0, names: [] })
+    expect(r.affectedSchedules).toEqual({ count: 2, names: ['nightly', 's2'] })
+    expect(r.note).not.toMatch(/paused/)
+  })
+
+  test('no enabled schedule: nothing to pause, no empty update', async () => {
+    await call({ domainBatchHosts: ['a.example.com', 'b.example.com', 'c.example.com'] })
+    expect(h.schedulesUpdate).not.toHaveBeenCalled()
   })
 })

@@ -48,9 +48,10 @@ import {
   validatePresetSettings,
   type ResolvedPreset,
 } from '@/lib/reconPresets/server'
+import { clearPresetBadges, renamePresetBadges } from '@/lib/reconPresets/badges'
 import { McpToolError } from '@/lib/mcp/errors'
 import { enforceRate, type McpContext } from '@/lib/mcp/tools'
-import { casVersion, countQueuedJobsNeedingReview, describeAffectedSchedules } from '@/lib/mcp/writeTools'
+import { busyHint, casVersion, countQueuedJobsNeedingReview, describeAffectedSchedules } from '@/lib/mcp/writeTools'
 
 /** How many changed keys a response lists before it only counts them. */
 const UPDATE_DIFF_CAP = 50
@@ -372,22 +373,26 @@ export async function updateReconPreset(ctx: McpContext, args: UpdatePresetArgs)
   if (!valid.ok) throw refusedSetting(valid.error, valid.key)
   if (name !== row.name) await assertNameFree(ctx.token.userId, name, row.id)
 
-  const { count } = await prisma.userProjectPreset.updateMany({
-    where: { id: row.id, userId: ctx.token.userId, updatedAt: casVersion(row.updatedAt, args.expectedUpdatedAt) },
-    data: {
-      name,
-      description,
-      settings: valid.settings as never,
-      updatedVia: 'mcp',
-      lastWriterTokenPrefix: ctx.token.tokenPrefix,
-    },
+  const renamed = name !== row.name
+  const badgesRenamed = await prisma.$transaction(async tx => {
+    const { count } = await tx.userProjectPreset.updateMany({
+      where: { id: row.id, userId: ctx.token.userId, updatedAt: casVersion(row.updatedAt, args.expectedUpdatedAt) },
+      data: {
+        name,
+        description,
+        settings: valid.settings as never,
+        updatedVia: 'mcp',
+        lastWriterTokenPrefix: ctx.token.tokenPrefix,
+      },
+    })
+    if (count === 0) {
+      throw new McpToolError(
+        'The preset changed since you read it. Read it again with list_recon_presets and retry.',
+        'conflict'
+      )
+    }
+    return renamed ? renamePresetBadges(tx, ctx.token.userId, row.id, name) : 0
   })
-  if (count === 0) {
-    throw new McpToolError(
-      'The preset changed since you read it. Read it again with list_recon_presets and retry.',
-      'conflict'
-    )
-  }
 
   void writeAudit({
     actorId: ctx.token.userId,
@@ -402,6 +407,7 @@ export async function updateReconPreset(ctx: McpContext, args: UpdatePresetArgs)
       tokenId: ctx.token.tokenId, tokenPrefix: ctx.token.tokenPrefix,
       name, description,
       settings: Object.fromEntries(changed.map(k => [k, valid.settings[k] ?? null])),
+      ...(renamed ? { badgesRenamed } : {}),
     },
     source: 'mcp',
   })
@@ -415,10 +421,13 @@ export async function updateReconPreset(ctx: McpContext, args: UpdatePresetArgs)
       before: before[k] ?? null,
       after: Object.prototype.hasOwnProperty.call(valid.settings, k) ? valid.settings[k] : '(removed)',
     })),
-    ...(name !== row.name ? { renamedFrom: row.name } : {}),
+    ...(renamed ? { renamedFrom: row.name, badgesRenamed } : {}),
     note:
       'Projects that already loaded this preset keep the settings it produced then; nothing is ' +
-      're-applied. Their "Preset applied" badge stays true to what they hold.',
+      're-applied. ' +
+      (renamed
+        ? `Their "Preset applied" badge now shows the new name (${badgesRenamed} project(s)).`
+        : 'Their "Preset applied" badge stays: they still hold what loading it produced.'),
   }
 }
 
@@ -438,10 +447,13 @@ export async function deleteReconPreset(
   })
   if (!row) throw notFound(args.presetId)
 
-  const { count } = await prisma.userProjectPreset.deleteMany({
-    where: { id: row.id, userId: ctx.token.userId, updatedAt: casVersion(row.updatedAt, args.expectedUpdatedAt) },
+  const badgesCleared = await prisma.$transaction(async tx => {
+    const { count } = await tx.userProjectPreset.deleteMany({
+      where: { id: row.id, userId: ctx.token.userId, updatedAt: casVersion(row.updatedAt, args.expectedUpdatedAt) },
+    })
+    return count === 0 ? null : clearPresetBadges(tx, ctx.token.userId, row.id)
   })
-  if (count === 0) {
+  if (badgesCleared === null) {
     const still = await prisma.userProjectPreset.findFirst({
       where: { id: row.id, userId: ctx.token.userId }, select: { id: true },
     })
@@ -459,7 +471,7 @@ export async function deleteReconPreset(
     targetType: 'preset',
     targetId: row.id,
     before: { name: row.name, description: row.description, settings: projectPresetForRead(row.settings).settings },
-    after: { tokenId: ctx.token.tokenId, tokenPrefix: ctx.token.tokenPrefix, deleted: true },
+    after: { tokenId: ctx.token.tokenId, tokenPrefix: ctx.token.tokenPrefix, deleted: true, badgesCleared },
     source: 'mcp',
   })
 
@@ -467,7 +479,10 @@ export async function deleteReconPreset(
     presetId: row.id,
     name: row.name,
     deleted: true,
-    note: 'Projects that loaded it keep their settings. There is no undo on this surface.',
+    badgesCleared,
+    note:
+      `Projects that loaded it keep their settings; their "Preset applied" badge is cleared ` +
+      `(${badgesCleared} project(s)). There is no undo on this surface.`,
   }
 }
 
@@ -505,9 +520,7 @@ export async function applyReconPreset(
     throw new McpToolError(
       `Cannot apply a preset while ${busy} for this project: it would change settings under work ` +
       'that is reading them. ' +
-      (busy.includes('agent session')
-        ? 'If no session is really running, a person can stop it in the RedAmon UI.'
-        : 'Wait for it to finish.'),
+      busyHint(busy),
       'busy'
     )
   }
@@ -537,7 +550,7 @@ export async function applyReconPreset(
     (Record<string, unknown> & { updatedAt: Date }) | null
   if (!row) throw new McpToolError('Project not found', 'not_found')
 
-  const application = computePresetApplication(row, preset.settings, defaults, preset.name)
+  const application = computePresetApplication(row, preset.settings, defaults, preset)
   const problem = await validateApplication(application, row, args.projectId, ctx.token.userId)
   if (problem) {
     const fromPreset = problem.key !== '' && Object.prototype.hasOwnProperty.call(preset.settings, problem.key)

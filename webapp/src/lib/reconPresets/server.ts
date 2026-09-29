@@ -337,7 +337,7 @@ export function computePresetApplication(
   currentRow: Record<string, unknown>,
   presetSettings: Record<string, unknown>,
   backendDefaults: Record<string, unknown>,
-  presetName: string,
+  preset: { name: string; id: string; source: 'builtin' | 'user' },
 ): PresetApplication {
   const next = applyPresetSettings(currentRow, presetSettings, backendDefaults)
   const data = pickPresetFields(next)
@@ -349,7 +349,12 @@ export function computePresetApplication(
     resetToDefault: changed.filter(k => !named(k)),
     keptAsIs: [...KEPT_WHEN_ABSENT].filter(k => !named(k)).sort(),
     unchangedCount: PRESET_FIELD_KEYS.length - changed.length,
-    loadedPreset: { name: presetName, fingerprint: presetFingerprint(next) },
+    loadedPreset: {
+      name: preset.name,
+      fingerprint: presetFingerprint(next),
+      presetId: preset.id,
+      source: preset.source,
+    },
   }
 }
 

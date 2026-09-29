@@ -17,7 +17,10 @@
  *  - on a third-party engagement a WIDENING must arrive with an authorization
  *    record, written in the same transaction, and passing one needs
  *    engagement:authorize as well;
- *  - a compare-and-swap on `updatedAt`, and an audit row with every before/after.
+ *  - a compare-and-swap on `updatedAt`, and an audit row with every before/after;
+ *  - a batch that gains hosts pauses the project's scan schedules in the same
+ *    transaction, so no unattended run reaches the new hosts before a person
+ *    has looked at them.
  */
 import prisma from '@/lib/prisma'
 import { writeAudit } from '@/lib/audit'
@@ -32,7 +35,7 @@ import { validateCrossFieldRules } from '@/lib/reconSettings/crossField'
 import { McpToolError } from '@/lib/mcp/errors'
 import { enforceRate, type McpContext } from '@/lib/mcp/tools'
 import { normaliseAuthorization, refuseHardBlocked, type AuthorizationArgs } from '@/lib/mcp/engagementTools'
-import { casVersion, countQueuedJobsNeedingReview, describeAffectedSchedules } from '@/lib/mcp/writeTools'
+import { busyHint, casVersion, countQueuedJobsNeedingReview, describeAffectedSchedules } from '@/lib/mcp/writeTools'
 
 export interface UpdateProjectScopeArgs {
   projectId: string
@@ -57,6 +60,13 @@ function batchSignature(groups: unknown): Set<string> {
   return out
 }
 
+/** How many host or wildcard entries this change adds to the batch. */
+function batchEntriesAdded(row: Row, data: Record<string, unknown>): number {
+  if (!('domainBatchGroups' in data)) return 0
+  const before = batchSignature(row.domainBatchGroups)
+  return [...batchSignature(data.domainBatchGroups)].filter(s => !before.has(s)).length
+}
+
 const rootsOf = (groups: unknown) => new Set(
   (Array.isArray(groups) ? groups as Partial<DomainGroup>[] : []).map(g => String(g?.rootDomain ?? '')).filter(Boolean)
 )
@@ -74,11 +84,8 @@ const text = (v: unknown) => String(v ?? '').trim().toLowerCase()
  */
 function wideningsOf(row: Row, data: Record<string, unknown>): string[] {
   const out: string[] = []
-  if ('domainBatchGroups' in data) {
-    const before = batchSignature(row.domainBatchGroups)
-    const added = [...batchSignature(data.domainBatchGroups)].filter(s => !before.has(s))
-    if (added.length > 0) out.push(`the batch gains ${added.length} host or wildcard entr${added.length === 1 ? 'y' : 'ies'}`)
-  }
+  const added = batchEntriesAdded(row, data)
+  if (added > 0) out.push(`the batch gains ${added} host or wildcard entr${added === 1 ? 'y' : 'ies'}`)
   if ('githubTargetOrg' in data && text(data.githubTargetOrg) && text(data.githubTargetOrg) !== text(row.githubTargetOrg)) {
     out.push('the GitHub hunt points at a different organisation')
   }
@@ -111,9 +118,7 @@ export async function updateProjectScope(ctx: McpContext, args: UpdateProjectSco
     throw new McpToolError(
       `Cannot change this project's targets while ${busy}: the work in progress read its targets ` +
       'when it started and would report on a scope that no longer exists. ' +
-      (busy.includes('agent session')
-        ? 'If no session is really running, a person can stop it in the RedAmon UI.'
-        : 'Wait for it to finish.'),
+      busyHint(busy),
       'busy'
     )
   }
@@ -177,7 +182,8 @@ export async function updateProjectScope(ctx: McpContext, args: UpdateProjectSco
   }
 
   const version = casVersion(row.updatedAt, args.expectedUpdatedAt)
-  const authorizationId = await prisma.$transaction(async tx => {
+  const batchGained = batchEntriesAdded(row, data) > 0
+  const { authorizationId, paused } = await prisma.$transaction(async tx => {
     const { count } = await tx.project.updateMany({
       where: { id: args.projectId, updatedAt: version },
       data: { ...data, updatedById: ctx.token.userId } as never,
@@ -188,7 +194,22 @@ export async function updateProjectScope(ctx: McpContext, args: UpdateProjectSco
         'conflict'
       )
     }
-    if (!authorization) return null
+    // A scheduled run is a full recon of the whole batch that nobody watches
+    // start. Only the batch pauses them: the GitHub and supply-chain targets
+    // are never read by a scheduled run, and a narrowing takes nothing new.
+    const paused = batchGained
+      ? await tx.scanSchedule.findMany({
+          where: { projectId: args.projectId, enabled: true },
+          select: { id: true, label: true },
+        })
+      : []
+    if (paused.length > 0) {
+      await tx.scanSchedule.updateMany({
+        where: { id: { in: paused.map(s => s.id) }, enabled: true },
+        data: { enabled: false },
+      })
+    }
+    if (!authorization) return { authorizationId: null, paused }
     const created = await tx.engagementAuthorization.create({
       data: {
         projectId: args.projectId,
@@ -199,8 +220,9 @@ export async function updateProjectScope(ctx: McpContext, args: UpdateProjectSco
       },
       select: { id: true },
     })
-    return created.id
+    return { authorizationId: created.id, paused }
   })
+  const pausedSchedules = { count: paused.length, names: paused.map(s => s.label || s.id) }
 
   // After the commit, and best-effort: the partial-recon picker lists Domain
   // nodes, so a new root without one could not be scanned on its own.
@@ -222,6 +244,7 @@ export async function updateProjectScope(ctx: McpContext, args: UpdateProjectSco
       authorizationId,
       authorizationDigest: authorization?.documentSha256 ?? null,
       graphSeeded,
+      pausedScheduleIds: paused.map(s => s.id),
     },
     source: 'mcp',
   })
@@ -239,10 +262,15 @@ export async function updateProjectScope(ctx: McpContext, args: UpdateProjectSco
     widenings,
     authorizationId,
     queuedJobsNeedingReview,
+    pausedSchedules,
     affectedSchedules,
     graphSeeded,
     note:
       (graphSeeded ? '' : 'The new roots could not be added to the graph yet; the next full recon adds them. ') +
+      (pausedSchedules.count > 0
+        ? `The batch gained hosts, so ${pausedSchedules.count} scheduled scan(s) were paused; a person ` +
+          're-enables them in the Scans tab once they have reviewed the new scope. '
+        : '') +
       'The change applies to the NEXT scan. Call preflight_scope_check and report what it says.',
   }
 }

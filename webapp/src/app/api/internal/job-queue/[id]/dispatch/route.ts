@@ -23,6 +23,7 @@ import { nextBackoff, CAPACITY_RECHECK_MS } from '@/lib/jobQueue'
 import { currentFingerprintFor } from '@/lib/jobFingerprint'
 import { classifyStartFailure, isCapacityWait } from '@/lib/scanStartOutcome'
 import { dispatchStart, stopScan } from '@/lib/startScan'
+import { checkAgentSessions, describeAgentSessionState } from '@/lib/agentSessions'
 
 export const runtime = 'nodejs'
 
@@ -114,17 +115,14 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     // 5. Agent running + full_recon (C-5). Stricter than the manual path on purpose:
     // an unattended dispatcher must not wipe the graph under a live agent session.
     if (row.kind === 'full_recon') {
-      const agent = await prisma.conversation.findFirst({
-        where: { projectId: row.projectId, agentRunning: true },
-        select: { id: true },
-      })
+      const agent = describeAgentSessionState(await checkAgentSessions(row.projectId))
       if (agent) {
         await prisma.jobQueue.updateMany({
           where: { id, status: 'dispatching' },
           data: {
             status: 'queued',
             blockedCode: 'agent_running',
-            blockedReason: 'an agent session is running for this project; a full recon would wipe its graph',
+            blockedReason: `${agent} for this project; a full recon would wipe its graph`,
             // Capacity/contention wait: short fixed recheck, no attempt spent.
             notBefore: new Date(Date.now() + CAPACITY_RECHECK_MS),
           },

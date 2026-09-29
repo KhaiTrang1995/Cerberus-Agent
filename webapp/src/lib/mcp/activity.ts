@@ -20,11 +20,11 @@
  * empty list, which is right for a UI with database fallbacks and wrong here:
  * on this surface it becomes a false negative in a security tool.
  */
-import prisma from '@/lib/prisma'
 import { orchestratorFetch } from '@/lib/orchestrator'
 import { isActivationInProgress } from '@/lib/activationLock'
 import { findLiveTriageRun } from '@/lib/triageRun'
 import { findLiveNodeFilterRun } from '@/lib/nodeFilterRun'
+import { checkAgentSessions } from '@/lib/agentSessions'
 
 const RECON_ORCHESTRATOR_URL = process.env.RECON_ORCHESTRATOR_URL || 'http://localhost:8010'
 
@@ -174,11 +174,9 @@ export async function readProjectActivity(projectId: string): Promise<ProjectAct
   }
 
   try {
-    const agent = await prisma.conversation.findFirst({
-      where: { projectId, agentRunning: true },
-      select: { id: true },
-    })
-    out.agentSession = Boolean(agent)
+    // 'unverified' (a flag set, the agent unreachable) counts as a session: this
+    // report must never read as settled when it cannot tell.
+    out.agentSession = (await checkAgentSessions(projectId)) !== 'idle'
   } catch (err) {
     console.error('[mcp] agent session state unreadable:', err)
     unreadable('the agent session state could not be read')

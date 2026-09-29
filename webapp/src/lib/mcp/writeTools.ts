@@ -380,6 +380,15 @@ export async function countQueuedJobsNeedingReview(projectId: string): Promise<Q
  * every future scheduled run. Report-only for now; pausing them is a product
  * decision, not this tool's to make.
  */
+/** What a caller refused as busy by describeLiveGraphWriters can do about it. */
+export function busyHint(busy: string): string {
+  // A flag the agent disowns is cleared before this is reached, so what is
+  // left is a confirmed session or an agent that did not answer.
+  if (busy.includes('could not be reached')) return 'The agent did not answer; check that its container is up, then retry.'
+  if (busy.includes('agent session')) return 'A person can stop the session in the RedAmon UI, or wait for it to finish.'
+  return 'Wait for it to finish.'
+}
+
 export async function describeAffectedSchedules(projectId: string) {
   try {
     const schedules = await prisma.scanSchedule.findMany({

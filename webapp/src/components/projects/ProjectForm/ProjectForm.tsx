@@ -662,6 +662,8 @@ export function ProjectForm({
     const loadedPreset: LoadedPreset = {
       name: presetName,
       fingerprint: presetFingerprint(next as unknown as Record<string, unknown>),
+      presetId: source.kind === 'builtin' ? source.preset.id : source.id,
+      source: source.kind,
     }
     next.loadedPreset = loadedPreset as unknown as ProjectFormData['loadedPreset']
 
@@ -1142,7 +1144,7 @@ export function ProjectForm({
             {loadedPresetName && (
               <div
                 className={styles.presetApplied}
-                title={`The project's settings match the "${loadedPresetName}" preset. Changing a setting and saving removes this.`}
+                title={`The project still holds the settings that loading the "${loadedPresetName}" preset produced. Changing a setting and saving removes this.`}
               >
                 <span className={styles.tabGroupLabel}>Preset applied</span>
                 <span className={styles.presetAppliedName}>

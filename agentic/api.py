@@ -1117,6 +1117,19 @@ async def stop_agent_session(body: SessionStopRequest):
     return {"stopped": stopped}
 
 
+@app.get("/agent-sessions/live", tags=["Sessions"], dependencies=[Depends(require_internal_auth_only)])
+async def live_agent_sessions(project_id: str):
+    """Session ids of a project whose agent run is still in progress.
+
+    The webapp asks this before it treats a Conversation.agentRunning flag as a
+    running session, so a flag left behind by a restarted agent does not lock
+    the project. 503 when the manager is not up: the caller then stays busy.
+    """
+    if not ws_manager:
+        return JSONResponse(content={"error": "agent not ready"}, status_code=503)
+    return {"project_id": project_id, "session_ids": ws_manager.live_session_ids(project_id)}
+
+
 @app.get("/health", response_model=HealthResponse, tags=["System"])
 async def health():
     """

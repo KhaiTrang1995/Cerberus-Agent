@@ -203,21 +203,28 @@ describe('resolvePreset', () => {
 
 // --- applying ---------------------------------------------------------------------------------
 
+const X = { name: 'x', id: 'up-x', source: 'user' } as const
+
 describe('computePresetApplication is the form\'s preset load', () => {
   test('parity: for every built-in, the data equals the form\'s save body', () => {
     for (const p of RECON_PRESETS) {
       const settings = { ...p.parameters, reconPresetId: p.id } as Record<string, unknown>
       const row = baseRow()
-      const app = computePresetApplication(row, settings, DEFAULTS, p.name)
+      const app = computePresetApplication(row, settings, DEFAULTS, { name: p.name, id: p.id, source: 'builtin' })
       expect(app.data, p.id).toEqual(pickPresetFields(applyPresetSettings(row, settings, DEFAULTS)))
       expect(app.loadedPreset.fingerprint, p.id)
         .toBe(presetFingerprint(applyPresetSettings(row, settings, DEFAULTS)))
     }
   })
 
+  test('C-10: the badge names the preset by id and source, so a rename or delete can find it', () => {
+    const app = computePresetApplication(baseRow(), { naabuEnabled: true }, DEFAULTS, { name: 'Mine', id: 'up1', source: 'user' })
+    expect(app.loadedPreset).toMatchObject({ name: 'Mine', presetId: 'up1', source: 'user' })
+  })
+
   test('it reports what changes, what only resets, and what a replace keeps', () => {
     const row = { ...baseRow(), katanaDepth: 9, naabuEnabled: false, agentOpenaiModel: 'mine' }
-    const app = computePresetApplication(row, { naabuEnabled: true }, DEFAULTS, 'x')
+    const app = computePresetApplication(row, { naabuEnabled: true }, DEFAULTS, X)
     expect(app.changed).toContain('naabuEnabled')
     expect(app.changed).toContain('katanaDepth')
     expect(app.resetToDefault).toContain('katanaDepth')
@@ -228,7 +235,7 @@ describe('computePresetApplication is the form\'s preset load', () => {
   })
 
   test('C-1: the MCP sandbox switch and graph writes are never part of it', () => {
-    const app = computePresetApplication(baseRow(), { naabuEnabled: true }, { mcpKaliExecEnabled: true }, 'x')
+    const app = computePresetApplication(baseRow(), { naabuEnabled: true }, { mcpKaliExecEnabled: true }, X)
     expect(app.data).not.toHaveProperty('mcpKaliExecEnabled')
     expect(app.data).not.toHaveProperty('updateGraphDb')
   })
@@ -245,7 +252,7 @@ describe('validateApplication', () => {
 
   test('a default that breaks its bound refuses the whole apply, naming the key', async () => {
     const row = baseRow()
-    const app = computePresetApplication(row, {}, { katanaDepth: 999 }, 'x')
+    const app = computePresetApplication(row, {}, { katanaDepth: 999 }, X)
     const problem = await validateApplication(app, row, 'p1', 'u1')
     expect(problem?.key).toBe('katanaDepth')
   })

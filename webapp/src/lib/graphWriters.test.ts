@@ -10,14 +10,18 @@
 import { describe, test, expect, beforeEach, vi } from 'vitest'
 
 const prismaMock = vi.hoisted(() => ({
-  conversation: { findFirst: vi.fn() },
   triageRun: { findMany: vi.fn(), updateMany: vi.fn() },
   nodeFilterRun: { findMany: vi.fn(), updateMany: vi.fn() },
 }))
 const fetchMock = vi.hoisted(() => vi.fn())
+const agentState = vi.hoisted(() => vi.fn())
 
 vi.mock('@/lib/prisma', () => ({ default: prismaMock }))
 vi.mock('@/lib/orchestrator', () => ({ orchestratorFetch: (...a: unknown[]) => fetchMock(...a) }))
+vi.mock('@/lib/agentSessions', async importOriginal => ({
+  ...(await importOriginal<typeof import('./agentSessions')>()),
+  checkAgentSessions: (...a: unknown[]) => agentState(...a),
+}))
 
 import { describeLiveGraphWriters, describeScanWriters, describeSecondaryScanWriters } from './graphWriters'
 
@@ -25,7 +29,7 @@ const okJson = (body: unknown) => ({ ok: true, json: async () => body })
 
 beforeEach(() => {
   vi.clearAllMocks()
-  prismaMock.conversation.findFirst.mockResolvedValue(null)
+  agentState.mockResolvedValue('idle')
   prismaMock.triageRun.findMany.mockResolvedValue([])
   prismaMock.triageRun.updateMany.mockResolvedValue({ count: 0 })
   prismaMock.nodeFilterRun.findMany.mockResolvedValue([])
@@ -66,8 +70,15 @@ describe('describeLiveGraphWriters', () => {
   })
 
   test('a running agent session blocks, without even asking the orchestrator', async () => {
-    prismaMock.conversation.findFirst.mockResolvedValue({ id: 'c1' })
+    agentState.mockResolvedValue('running')
     expect(await describeLiveGraphWriters('p1')).toBe('an agent session is running')
+    expect(agentState).toHaveBeenCalledWith('p1')
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  test('a session flag the agent could not confirm still blocks (C-8, fail closed)', async () => {
+    agentState.mockResolvedValue('unverified')
+    expect(await describeLiveGraphWriters('p1')).toMatch(/marked running and the agent could not be reached/)
     expect(fetchMock).not.toHaveBeenCalled()
   })
 
@@ -111,7 +122,7 @@ describe('describeLiveGraphWriters', () => {
   })
 
   test('FAIL CLOSED: an unreadable agent-session state reads as busy', async () => {
-    prismaMock.conversation.findFirst.mockRejectedValue(new Error('db down'))
+    agentState.mockRejectedValue(new Error('db down'))
     expect(await describeLiveGraphWriters('p1')).toMatch(/agent session state could not be verified/)
   })
 

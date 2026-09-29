@@ -26,10 +26,12 @@ const h = vi.hoisted(() => ({
   live: vi.fn(),
   defaults: vi.fn(),
   audit: vi.fn(),
+  renameBadges: vi.fn(),
+  clearBadges: vi.fn(),
 }))
 
-vi.mock('@/lib/prisma', () => ({
-  default: {
+vi.mock('@/lib/prisma', () => {
+  const client = {
     userProjectPreset: {
       findFirst: (...a: unknown[]) => h.presetFindFirst(...a),
       findMany: (...a: unknown[]) => h.presetFindMany(...a),
@@ -46,7 +48,13 @@ vi.mock('@/lib/prisma', () => ({
     jobQueue: { findMany: (...a: unknown[]) => h.jobs(...a) },
     scanSchedule: { findMany: (...a: unknown[]) => h.schedules(...a) },
     userSettings: { findUnique: (...a: unknown[]) => h.userSettings(...a) },
-  },
+    $transaction: (fn: (tx: unknown) => unknown) => fn(client),
+  }
+  return { default: client }
+})
+vi.mock('@/lib/reconPresets/badges', () => ({
+  renamePresetBadges: (...a: unknown[]) => h.renameBadges(...a),
+  clearPresetBadges: (...a: unknown[]) => h.clearBadges(...a),
 }))
 vi.mock('@/lib/graphWriters', () => ({ describeLiveGraphWriters: (...a: unknown[]) => h.live(...a) }))
 vi.mock('@/lib/audit', () => ({ writeAudit: (...a: unknown[]) => h.audit(...a) }))
@@ -100,6 +108,8 @@ beforeEach(() => {
   }))
   h.presetUpdateMany.mockResolvedValue({ count: 1 })
   h.presetDeleteMany.mockResolvedValue({ count: 1 })
+  h.renameBadges.mockResolvedValue(0)
+  h.clearBadges.mockResolvedValue(0)
   h.projectFind.mockImplementation(async (args: { select?: Record<string, unknown> }) =>
     args.select && Object.keys(args.select).length === 2 && 'userId' in args.select
       ? { id: 'p1', userId: 'owner' }
@@ -262,6 +272,23 @@ describe('update_recon_preset', () => {
     await expect(updateReconPreset(ctx(), { presetId: 'up1', name: 'renamed' }))
       .rejects.toMatchObject({ code: 'conflict' })
     expect(h.presetUpdateMany).toHaveBeenCalledTimes(1)
+    expect(h.renameBadges).not.toHaveBeenCalled()
+  })
+
+  test('C-10: a rename renames the badge of the projects that loaded it, and says how many', async () => {
+    h.renameBadges.mockResolvedValue(3)
+    const r = await updateReconPreset(ctx(), { presetId: 'up1', name: 'Renamed' })
+    expect(h.renameBadges.mock.calls[0].slice(1)).toEqual(['owner', 'up1', 'Renamed'])
+    expect(r).toMatchObject({ renamedFrom: 'My preset', badgesRenamed: 3 })
+    expect(r.note).toMatch(/badge now shows the new name \(3 project\(s\)\)/)
+    expect(h.audit.mock.calls[0][0].after.badgesRenamed).toBe(3)
+  })
+
+  test('C-10: a settings change moves no badge: they hold what loading it produced', async () => {
+    const r = await updateReconPreset(ctx(), { presetId: 'up1', settings: { katanaDepth: 4 } })
+    expect(h.renameBadges).not.toHaveBeenCalled()
+    expect(r).not.toHaveProperty('badgesRenamed')
+    expect(r.note).toMatch(/badge stays/)
   })
 
   test('the merged result is validated whole', async () => {
@@ -283,12 +310,21 @@ describe('delete_recon_preset', () => {
     expect(entry.before.settings).toEqual({ katanaDepth: 3, naabuEnabled: false })
   })
 
+  test('C-10: the badge of every project that loaded it is cleared, and counted', async () => {
+    h.clearBadges.mockResolvedValue(2)
+    const r = await deleteReconPreset(ctx(), { presetId: 'up1' })
+    expect(h.clearBadges.mock.calls[0].slice(1)).toEqual(['owner', 'up1'])
+    expect(r).toMatchObject({ deleted: true, badgesCleared: 2 })
+    expect(h.audit.mock.calls[0][0].after.badgesCleared).toBe(2)
+  })
+
   test('a lost compare-and-swap reads back as conflict or not_found', async () => {
     h.presetDeleteMany.mockResolvedValue({ count: 0 })
     h.presetFindFirst.mockResolvedValueOnce(userPreset()).mockResolvedValueOnce({ id: 'up1' })
     await expect(deleteReconPreset(ctx(), { presetId: 'up1' })).rejects.toMatchObject({ code: 'conflict' })
     h.presetFindFirst.mockResolvedValueOnce(userPreset()).mockResolvedValueOnce(null)
     await expect(deleteReconPreset(ctx(), { presetId: 'up1' })).rejects.toMatchObject({ code: 'not_found' })
+    expect(h.clearBadges).not.toHaveBeenCalled()
   })
 })
 
@@ -304,10 +340,16 @@ describe('apply_recon_preset', () => {
     expect(h.projectUpdateMany).not.toHaveBeenCalled()
   })
 
-  test('C-8: a running agent session names the way out', async () => {
+  test('C-8: a session the agent confirmed names the way out', async () => {
     h.live.mockResolvedValue('an agent session is running')
     await expect(applyReconPreset(ctx(), { projectId: 'p1', presetId: 'stealth-recon' }))
-      .rejects.toThrow(/stop it in the RedAmon UI/)
+      .rejects.toThrow(/stop the session in the RedAmon UI/)
+  })
+
+  test('C-8: a flag the agent could not confirm points at the agent, not at the operator', async () => {
+    h.live.mockResolvedValue('an agent session is marked running and the agent could not be reached to confirm it')
+    await expect(applyReconPreset(ctx(), { projectId: 'p1', presetId: 'stealth-recon' }))
+      .rejects.toThrow(/The agent did not answer; check that its container is up, then retry/)
   })
 
   test('unreadable defaults write nothing', async () => {
@@ -329,7 +371,9 @@ describe('apply_recon_preset', () => {
     await applyReconPreset(ctx(), { projectId: 'p1', presetId: 'stealth-recon' })
     const call = h.projectUpdateMany.mock.calls[0][0]
     expect(call.where).toEqual({ id: 'p1', updatedAt: PROJECT_AT })
-    expect(call.data.loadedPreset).toMatchObject({ name: 'Stealth Recon' })
+    // C-10: which preset, so a rename or delete of a user preset can find it.
+    expect(call.data.loadedPreset).toMatchObject({ name: 'Stealth Recon', presetId: 'stealth-recon', source: 'builtin' })
+    expect(call.data.loadedPreset.fingerprint).toMatch(/^v2:/)
     expect(call.data).not.toHaveProperty('mcpKaliExecEnabled')
     expect(call.data).not.toHaveProperty('targetDomain')
 

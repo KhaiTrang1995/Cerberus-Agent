@@ -764,7 +764,8 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
         'Built-in presets cannot be changed: copy one with create_recon_preset({fromPresetId}) and ' +
         'change the copy. A call that changes nothing is refused rather than reported as done.\n\n' +
         'Projects that already loaded the preset keep the settings it produced then; nothing is ' +
-        're-applied. Every write is a compare-and-swap on the preset\'s updatedAt.',
+        're-applied. A rename renames their "Preset applied" badge too (`badgesRenamed`). Every ' +
+        'write is a compare-and-swap on the preset\'s updatedAt.',
       // It overwrites the preset's previous values, which is destructive in the
       // spec's sense even though they can be written back.
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
@@ -790,7 +791,7 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
       title: 'Delete one of your recon presets',
       description:
         'Delete a preset YOU saved. Built-in presets cannot be deleted. Projects that loaded it ' +
-        'keep their settings.\n\n' +
+        'keep their settings; their "Preset applied" badge is cleared (`badgesCleared`).\n\n' +
         'There is no undo on this surface: the audit log keeps what the preset held, and that is ' +
         'the only way back. Refused if the preset changed since you read it.',
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
@@ -1618,6 +1619,9 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
         'refused unless `authorization` records what authorized the wider scope, in the same ' +
         'transaction. Passing `authorization` needs the engagement:authorize permission too. ' +
         'Removals and narrowing need neither.\n\n' +
+        'A batch that gains hosts also PAUSES the project\'s scan schedules in the same ' +
+        'transaction, so no unattended run reaches the new hosts first; the result lists them in ' +
+        '`pausedSchedules`, and only a person re-enables them, in the Scans tab.\n\n' +
         'Refused while anything reads or writes this project\'s graph. A compare-and-swap on the ' +
         'project\'s updatedAt. Applies to the NEXT scan: call preflight_scope_check afterwards and ' +
         'report what it says.',

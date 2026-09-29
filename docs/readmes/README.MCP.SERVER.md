@@ -683,11 +683,44 @@ The UI's own preset save and the project import now store only preset fields,
 and reads, the export and apply project a stored blob down to them, so a legacy
 preset carrying a target or a credential keeps it in the database.
 
+**The badge.** `Project.loadedPreset` holds the preset's name, a fingerprint and
+which preset it was (`presetId`, `source`). Renaming a user preset renames the
+badge on the owner's projects that loaded it; deleting one, from the tool or
+the preset drawer, clears it in the same transaction (`lib/reconPresets/badges.ts`,
+a compare-and-swap per project). Editing a preset's values leaves the badge: it
+says the project still holds what loading that preset produced. A badge written
+before it carried an id keeps its name, since a name can also be a built-in's.
+The fingerprint is `v2:` plus a digest of the preset fields NOT at their Prisma
+default, so a column added later reaches every row at its default and hides no
+badge. The unversioned digests written before (over the field set before and
+after `mcpKaliExecEnabled` and `updateGraphDb` left presets) are still accepted:
+that is the backfill, with no migration step to run.
+
 **Rescope.** `update_project_scope` reopens eight `create_only` fields, the
 registry's `rescope: true`, which are the target lists the project form already
 lets a person edit after creation. The target domain, the address list, the
 targeting mode, ownership verification and the target guardrail stay refused
 whatever the token holds.
+
+A batch that gains a host or wildcard entry pauses every enabled `ScanSchedule`
+of the project in the same transaction (`pausedSchedules` in the result,
+`pausedScheduleIds` in the audit). A scheduled run is a full recon of the whole
+batch that nobody watches start, so it must not be the first thing to reach a
+host an agent added; a person resumes the schedules in the Scans tab. A
+narrowing, the GitHub and supply-chain targets (no scheduled run reads them),
+`apply_recon_preset` and `update_recon_settings` pause nothing and only report
+`affectedSchedules`: those change how a run scans, capped by the engagement's
+limits at start, not what it reaches.
+
+**A stale agent flag.** `Conversation.agentRunning` is set and cleared by
+fire-and-forget PATCHes, so an agent restarted mid-run left it true and every
+busy check (apply, rescope, activation, the job-queue dispatcher,
+`get_project_activity`) read the project as busy for good. `lib/agentSessions.ts`
+asks the agent (`GET /agent-sessions/live?project_id=`, internal key, backed by
+`WebSocketManager._active_tasks`) whenever a flag is set, and clears the flags
+the agent does not hold with a compare-and-swap on the row's `updatedAt`. There
+is no time-to-live, because a run lasts hours. An agent that cannot answer
+leaves a set flag counting as a running session: fail closed.
 
 **Residual, stated plainly.** A token holding both `project:rescope` and
 `engagement:authorize` can record an authorization for any document digest and

@@ -19,7 +19,7 @@ const h = vi.hoisted(() => ({
   findProject: vi.fn(),
   findManyProjects: vi.fn(),
   findVersion: vi.fn(),
-  findConversation: vi.fn(),
+  agentState: vi.fn(),
   liveTriageRun: vi.fn(),
   liveNodeFilterRun: vi.fn(),
   liveGraphWriters: vi.fn(),
@@ -41,7 +41,6 @@ vi.mock('@/lib/prisma', () => ({
     },
     scanVersion: { findFirst: (...a: unknown[]) => h.findVersion(...a) },
     scanJob: { findFirst: (...a: unknown[]) => h.findScanJob(...a) },
-    conversation: { findFirst: (...a: unknown[]) => h.findConversation(...a) },
     remediation: {
       findMany: (...a: unknown[]) => h.findRemediations(...a),
       count: (...a: unknown[]) => h.countRemediations(...a),
@@ -52,6 +51,7 @@ vi.mock('@/lib/orchestrator', () => ({ orchestratorFetch: (...a: unknown[]) => h
 vi.mock('@/lib/activationLock', () => ({ isActivationInProgress: (...a: unknown[]) => h.isActivating(...a) }))
 vi.mock('@/lib/triageRun', () => ({ findLiveTriageRun: (...a: unknown[]) => h.liveTriageRun(...a) }))
 vi.mock('@/lib/nodeFilterRun', () => ({ findLiveNodeFilterRun: (...a: unknown[]) => h.liveNodeFilterRun(...a) }))
+vi.mock('@/lib/agentSessions', () => ({ checkAgentSessions: (...a: unknown[]) => h.agentState(...a) }))
 vi.mock('@/lib/graphWriters', () => ({
   describeLiveGraphWriters: (...a: unknown[]) => h.liveGraphWriters(...a),
 }))
@@ -107,7 +107,7 @@ beforeEach(() => {
   h.findVersion.mockResolvedValue({ id: 'v3', seq: 3, label: 'Scan 3', createdAt: new Date() })
   h.isActivating.mockResolvedValue(false)
   h.liveNodeFilterRun.mockResolvedValue(null)
-  h.findConversation.mockResolvedValue(null)
+  h.agentState.mockResolvedValue('idle')
   h.liveTriageRun.mockResolvedValue(null)
   h.liveGraphWriters.mockResolvedValue(null)
   h.findRemediations.mockResolvedValue([])
@@ -510,7 +510,12 @@ describe('resolveLiveGraphState', () => {
   })
 
   test('a live agent session is agent_writing', async () => {
-    h.findConversation.mockResolvedValue({ id: 'c1' })
+    h.agentState.mockResolvedValue('running')
+    expect(await resolveLiveGraphState('p1')).toBe('agent_writing')
+  })
+
+  test('a session flag the agent could not confirm is agent_writing, never stable (C-8)', async () => {
+    h.agentState.mockResolvedValue('unverified')
     expect(await resolveLiveGraphState('p1')).toBe('agent_writing')
   })
 
@@ -531,7 +536,7 @@ describe('resolveLiveGraphState', () => {
 
   test('a running scan outranks an agent session', async () => {
     h.activeScans.mockReturnValue([scanRow()])
-    h.findConversation.mockResolvedValue({ id: 'c1' })
+    h.agentState.mockResolvedValue('running')
     expect(await resolveLiveGraphState('p1')).toBe('scan_running')
   })
 

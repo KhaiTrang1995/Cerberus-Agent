@@ -26,7 +26,7 @@ const h = vi.hoisted(() => ({
   sweep: (() => {}) as (rows: unknown[], runKeyed?: boolean) => void,
   sjUpdateMany: vi.fn(),
   projectFindUnique: vi.fn(),
-  conversationFindFirst: vi.fn(),
+  agentState: vi.fn(),
   dispatchStart: vi.fn(),
   stopScan: vi.fn(),
   orchFetch: vi.fn(),
@@ -48,7 +48,6 @@ vi.mock('@/lib/prisma', () => ({
       updateMany: (...a: unknown[]) => h.sjUpdateMany(...a),
     },
     project: { findUnique: (...a: unknown[]) => h.projectFindUnique(...a) },
-    conversation: { findFirst: (...a: unknown[]) => h.conversationFindFirst(...a) },
   },
 }))
 vi.mock('@/lib/startScan', () => ({
@@ -56,6 +55,10 @@ vi.mock('@/lib/startScan', () => ({
   stopScan: (...a: unknown[]) => h.stopScan(...a),
 }))
 vi.mock('@/lib/orchestrator', () => ({ orchestratorFetch: (...a: unknown[]) => h.orchFetch(...a) }))
+vi.mock('@/lib/agentSessions', async importOriginal => ({
+  ...(await importOriginal<typeof import('@/lib/agentSessions')>()),
+  checkAgentSessions: (...a: unknown[]) => h.agentState(...a),
+}))
 
 import { POST as dispatch } from './[id]/dispatch/route'
 import { GET as candidates } from './candidates/route'
@@ -99,7 +102,7 @@ beforeEach(() => {
   h.sjUpdateMany.mockResolvedValue({ count: 1 })
   h.orchFetch.mockResolvedValue({ ok: true, json: async () => ({ status: 'idle' }) })
   h.projectFindUnique.mockResolvedValue(PROJECT)
-  h.conversationFindFirst.mockResolvedValue(null)
+  h.agentState.mockResolvedValue('idle')
   h.dispatchStart.mockResolvedValue({ ok: true, runId: 'r1', scanJobId: 'sj1' })
   h.stopScan.mockResolvedValue(undefined)
 })
@@ -147,14 +150,36 @@ describe('dispatch route fail-closed checks', () => {
   })
 
   test('agent running + full_recon -> deferred, no start (C-5)', async () => {
-    h.conversationFindFirst.mockResolvedValue({ id: 'c1' })
+    h.agentState.mockResolvedValue('running')
     const res = await dispatch(post('http://x/api/internal/job-queue/j1/dispatch'), sp('j1'))
     const body = await res.json()
     expect(body.blocked).toBe('agent_running')
     expect(h.dispatchStart).not.toHaveBeenCalled()
     expect(h.jqUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
-      data: expect.objectContaining({ status: 'queued', blockedCode: 'agent_running' }),
+      data: expect.objectContaining({
+        status: 'queued',
+        blockedCode: 'agent_running',
+        blockedReason: 'an agent session is running for this project; a full recon would wipe its graph',
+      }),
     }))
+  })
+
+  test('a session flag the agent could not confirm also defers, saying so (C-8)', async () => {
+    h.agentState.mockResolvedValue('unverified')
+    const res = await dispatch(post('http://x/api/internal/job-queue/j1/dispatch'), sp('j1'))
+    expect((await res.json()).blocked).toBe('agent_running')
+    expect(h.dispatchStart).not.toHaveBeenCalled()
+    expect(h.jqUpdateMany).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ blockedReason: expect.stringMatching(/could not be reached to confirm it/) }),
+    }))
+  })
+
+  test('a stale flag the agent disowns does not block the dispatch (C-8)', async () => {
+    // checkAgentSessions cleared it and answered idle.
+    h.agentState.mockResolvedValue('idle')
+    await dispatch(post('http://x/api/internal/job-queue/j1/dispatch'), sp('j1'))
+    expect(h.agentState).toHaveBeenCalledWith(PROJECT.id)
+    expect(h.dispatchStart).toHaveBeenCalled()
   })
 
   test('a claim lost to a concurrent dispatch -> 409, no start', async () => {
