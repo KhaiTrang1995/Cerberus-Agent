@@ -41,7 +41,8 @@ export async function GET(request: NextRequest) {
             kevCount,
             [x IN baseurls WHERE x IS NOT NULL]   AS baseurlsClean,
             [x IN (svcIps + portIps) WHERE x IS NOT NULL] AS ipsClean
-       RETURN t.name                              AS techName,
+       RETURN toString(id(t))                     AS nodeId,
+              t.name                              AS techName,
               t.version                           AS techVersion,
               size(cveIds)                        AS cveCount,
               CASE WHEN size(cvssClean) = 0 THEN null
@@ -59,6 +60,7 @@ export async function GET(request: NextRequest) {
     )
 
     const rows = result.records.map(r => ({
+      nodeId: (r.get('nodeId') as string | null) ?? null,
       techName: (r.get('techName') as string) || 'Unknown',
       techVersion: r.get('techVersion') as string | null,
       cveCount: toNum(r.get('cveCount')),

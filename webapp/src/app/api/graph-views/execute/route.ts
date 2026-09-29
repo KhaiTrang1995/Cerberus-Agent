@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getGraphSession } from '../../graph/neo4j'
 import { formatGraphRecords } from '../../graph/format'
-import { injectProjectFilter, findUnscopedNodePattern, namesMutedLabel } from './injectProjectFilter'
+import { injectProjectFilter, findUnscopedNodePattern, namesMutedLabel, hasVariableLengthPath, findDisallowedCall } from './injectProjectFilter'
 import { requireEffectiveUser, requireProjectAccess } from '@/lib/access'
 
 /**
@@ -43,6 +43,26 @@ export async function POST(request: NextRequest) {
     if (namesMutedLabel(cypherQuery)) {
       return NextResponse.json(
         { error: "The 'Muted' label is reserved: findings suppressed as noise are hidden from views and cannot be queried." },
+        { status: 400 }
+      )
+    }
+
+    // A namespaced function bypasses the CALL block above (apoc.* functions need
+    // no CALL) and runs unscoped Cypher / fetches URLs from inside the DB.
+    const badCall = findDisallowedCall(cypherQuery)
+    if (badCall) {
+      return NextResponse.json(
+        { error: `The function or procedure '${badCall}' is not permitted in a view query.` },
+        { status: 400 }
+      )
+    }
+
+    // A variable-length or quantified path traverses nodes with no pattern of
+    // their own, so they cannot be tenant-scoped and could surface another
+    // project's nodes. Refuse rather than run one unscoped.
+    if (hasVariableLengthPath(cypherQuery)) {
+      return NextResponse.json(
+        { error: 'Variable-length and quantified path patterns are not allowed: their intermediate nodes cannot be tenant-scoped.' },
         { status: 400 }
       )
     }

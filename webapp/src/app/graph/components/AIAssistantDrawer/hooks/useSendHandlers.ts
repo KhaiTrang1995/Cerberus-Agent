@@ -3,6 +3,7 @@ import type { ApprovalRequestPayload, QuestionRequestPayload, ToolConfirmationRe
 import type { ChatItem, Message, FireteamItem, FireteamMemberPanel } from '../types'
 import type { PlanWaveItem } from '../AgentTimeline'
 import { saveProjectSession } from '../sessionMemory'
+import { wrapNodeContextQuery } from '@/lib/agentQueryEnvelope'
 
 interface ChatSkillSummary {
   id: string
@@ -306,6 +307,43 @@ export function useSendHandlers(deps: SendHandlersDeps) {
   }, [userId, isLoading, addSystemMessage, setActiveSkill, activateSkill,
       conversationId, projectId, sessionId, createConversation, setConversationId,
       setChatItems, setIsLoading, sendQuery, sendGuidance, saveMessage, updateConvMeta, chatItems])
+
+  // Start a node-scoped conversation: sends the wrapped node context + the
+  // user's request as the very first message of a fresh session. Mirrors the
+  // non-loading branch of handleSend; the caller guarantees a clean session.
+  // No title PATCH here: the by-session messages route titles the chat from
+  // the persisted user_message (see conversationTitleFromUserMessage).
+  const sendNodeContextQuery = useCallback(async (payload: { nodeLabel: string; context: string; request: string }) => {
+    const request = payload.request.trim()
+    if (!request) return
+
+    const finalQuestion = wrapNodeContextQuery(payload.nodeLabel, payload.context, request)
+
+    if (!conversationId && projectId && userId && sessionId) {
+      const conv = await createConversation(sessionId)
+      if (conv) {
+        setConversationId(conv.id)
+        saveProjectSession(projectId, conv.id)
+      }
+    }
+
+    const userMessage: Message = {
+      type: 'message',
+      id: `user-${Date.now()}`,
+      role: 'user',
+      content: finalQuestion,
+      timestamp: new Date(),
+    }
+    setChatItems(prev => [...prev, userMessage])
+    setIsLoading(true)
+
+    try {
+      sendQuery(finalQuestion)
+    } catch {
+      setIsLoading(false)
+    }
+  }, [conversationId, projectId, userId, sessionId, createConversation, setConversationId,
+      setChatItems, setIsLoading, sendQuery])
 
   const handleSend = useCallback(async () => {
     const question = inputValue.trim()
@@ -748,6 +786,7 @@ export function useSendHandlers(deps: SendHandlersDeps) {
   return {
     inputRef,
     handleSend,
+    sendNodeContextQuery,
     handleApproval,
     handleTimelineToolConfirmation,
     handleAnswer,

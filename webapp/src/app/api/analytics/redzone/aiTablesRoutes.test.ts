@@ -201,3 +201,53 @@ describe('aiRisk route — Cypher shape', () => {
     expect(runCalls.every(c => c.params.pid === 'proj-x')).toBe(true)
   })
 })
+
+// --------------------------------------------------------------------------- //
+describe('AI red-zone routes — Node ID', () => {
+  // The node each sheet's row is about, in route query order.
+  test.each([
+    ['aiSurface', aiSurface.GET, ['ep', 'ep', 't', 't', 'min(ep)']],
+    ['aiRisk', aiRisk.GET, ['v', 'p', 'ep', 't', 'ep', 'v']],
+  ])('%s projects the row node id in every sheet query', async (_name, handler, vars) => {
+    await handler(req('p1'))
+    ;(vars as string[]).forEach((v, i) => {
+      const expr = v === 'min(ep)' ? 'toString(min(id(ep)))' : `toString(id(${v}))`
+      expect(runCalls[i].cypher).toContain(expr)
+      expect(runCalls[i].cypher).toMatch(/\bnodeId\b/)
+    })
+  })
+
+  test('aiSurface maps nodeId on every sheet, null when absent', async () => {
+    runQueue = [
+      [{ nodeId: '1' }], [{ nodeId: '2' }], [{ nodeId: '3' }], [{ nodeId: '4' }], [{}],
+    ]
+    const { sheets } = await (await aiSurface.GET(req('p1'))).json()
+    expect(sheets.llmEndpoints[0].nodeId).toBe('1')
+    expect(sheets.mcpServers[0].nodeId).toBe('2')
+    expect(sheets.technologies[0].nodeId).toBe('3')
+    expect(sheets.vectorDbs[0].nodeId).toBe('4')
+    expect(sheets.models[0].nodeId).toBeNull()
+  })
+
+  test('aiRisk maps nodeId on every sheet; testedVulns keeps the representative row', async () => {
+    runQueue = [
+      [{ nodeId: '10' }], [{ nodeId: '11' }], [{ nodeId: '12' }], [{ nodeId: '13', exposedOn: [] }],
+      [{ nodeId: '14' }],
+      [
+        { nodeId: '20', source: 'garak', severity: 'medium', owaspLlmId: 'LLM01', asr: 0.4,
+          target: 'http://h/v1', evidence: 'weak' },
+        { nodeId: '21', source: 'promptfoo', severity: 'high', owaspLlmId: 'LLM01', asr: 0.7,
+          target: 'http://h/v1', evidence: 'strong' },
+      ],
+    ]
+    const { sheets } = await (await aiRisk.GET(req('p1'))).json()
+    expect(sheets.findings[0].nodeId).toBe('10')
+    expect(sheets.injectableParams[0].nodeId).toBe('11')
+    expect(sheets.ragPoints[0].nodeId).toBe('12')
+    expect(sheets.exposedRuntimes[0].nodeId).toBe('13')
+    expect(sheets.unauthenticatedMcp[0].nodeId).toBe('14')
+    // Two tools fold into one row; its id is the worst-ASR row whose evidence it shows.
+    expect(sheets.testedVulns).toHaveLength(1)
+    expect(sheets.testedVulns[0]).toMatchObject({ nodeId: '21', evidence: 'strong' })
+  })
+})

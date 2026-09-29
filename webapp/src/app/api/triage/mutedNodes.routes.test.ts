@@ -124,6 +124,20 @@ describe('GET /api/triage/muted', () => {
     expect(body.findings[2]).toMatchObject({ rule_name: null, rule_deleted: false, rule_kind: null })
   })
 
+  test('the graph node id the table shows survives the rule annotation', async () => {
+    mockAgentFetch.mockResolvedValue(agentReply({
+      total: 2,
+      findings: [
+        { id: 'v1', node_id: '812', muted_by: 'rule:vuln.nuclei/k3f9a2' },
+        { id: 'v2', node_id: '813', muted_by: OWNER },
+      ],
+    }))
+    const res = await getMuted(new NextRequest(`http://x/api/triage/muted?projectId=${PROJECT}`))
+    const body = await res.json()
+    expect(body.findings.map((f: { id: string; node_id: string }) => [f.id, f.node_id]))
+      .toEqual([['v1', '812'], ['v2', '813']])
+  })
+
   test('the deleted-rules filter names the rules that still exist', async () => {
     mockAgentFetch.mockResolvedValue(agentReply({ findings: [], total: 0 }))
     await getMuted(new NextRequest(`http://x/api/triage/muted?projectId=${PROJECT}&mutedVia=deleted_rule`))

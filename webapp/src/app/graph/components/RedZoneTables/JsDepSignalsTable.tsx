@@ -11,6 +11,8 @@ import {
   UpdatedAtTh,
   useUpdatedAtSort,
 } from './updatedAt'
+import { NODE_ID_COLUMN, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton } from '../MuteNode'
 import { ExternalLink } from '@/components/ui'
 import { githubSlugToUrl, isGithubSlug } from '@/lib/url-utils'
 import {
@@ -38,6 +40,7 @@ import rowStyles from './RedZoneTableRow.module.css'
  * rename and renaming the endpoint would buy nothing.
  */
 interface JsDepSignalsRow {
+  nodeId: string | null
   id: string
   findingType: string
   severity: string
@@ -77,6 +80,7 @@ function TypeChip({ t }: { t: string }) {
 /** Module-level: the filter profiles are keyed off these, and a fresh array
  *  literal per render would re-profile every row. */
 const COLUMNS: RedZoneFilterColumn[] = [
+  NODE_ID_COLUMN,
   { key: 'findingType', header: 'Type' },
   { key: 'severity', header: 'Severity' },
   { key: 'confidence', header: 'Confidence' },
@@ -146,6 +150,7 @@ export const JsDepSignalsTable = memo(function JsDepSignalsTable({ projectId }: 
       <table className={rowStyles.table}>
         <thead>
           <tr>
+            <NodeIdTh />
             <th>Type</th>
             <th>Sev</th>
             <th>Title</th>
@@ -155,11 +160,13 @@ export const JsDepSignalsTable = memo(function JsDepSignalsTable({ projectId }: 
             <th>Subdomain</th>
             <th>Evidence</th>
             <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+            <th />
           </tr>
         </thead>
         <tbody>
           {sliced.map((r, i) => (
             <tr key={r.id || `${r.findingType}-${i}`}>
+              <td><NodeIdCell value={r.nodeId} /></td>
               <td><TypeChip t={r.findingType} /></td>
               <td><SeverityBadge severity={normalizeSeverity(r.severity)} /></td>
               <td><Truncated text={r.title} max={260} /></td>
@@ -178,6 +185,7 @@ export const JsDepSignalsTable = memo(function JsDepSignalsTable({ projectId }: 
               <td>{r.subdomain ? <HostCell host={r.subdomain} /> : <Truncated text={r.subdomain} max={160} />}</td>
               <td><Truncated text={r.evidence || r.detail} max={260} /></td>
               <td><UpdatedAtCell value={r.updatedAt} /></td>
+              <td><MuteNodeButton name={r.title || r.findingType} graphId={r.nodeId} nodeId={r.id} label="JsReconFinding" /></td>
             </tr>
           ))}
         </tbody>

@@ -72,9 +72,14 @@ function renderTable(projectId: string | null = PROJECT) {
   return render(<TakeoverTable projectId={projectId} />, { wrapper: makeWrapper() })
 }
 
+/** Located by header, not position: the Node ID column is pinned first. Throws
+ *  rather than returning [] so a renamed header cannot pass an empty-result test. */
 function hostnames(container: HTMLElement): string[] {
+  const col = [...container.querySelectorAll('thead th')]
+    .findIndex(th => th.textContent?.trim() === 'Hostname')
+  if (col < 0) throw new Error('Hostname column not found')
   return [...container.querySelectorAll('tbody tr')]
-    .map(r => r.querySelector('td')?.textContent?.trim() ?? '')
+    .map(r => r.querySelectorAll('td')[col]?.textContent?.trim() ?? '')
     .filter(Boolean)
 }
 

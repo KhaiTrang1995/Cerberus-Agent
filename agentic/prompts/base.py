@@ -1547,6 +1547,35 @@ write `:Muted`, `NOT n:Muted`, or any filter on it: the exclusion is already
 applied for you. If the user asks about suppressed or muted findings, tell them
 to use the Triage page rather than trying to query for them.
 
+## Node IDs
+A "Node ID" (also "node id", "graph id", "node #1234") is the number the RedAmon
+tables show in their leftmost column: the node's internal id, read with `id(n)`.
+It is NOT the `id` PROPERTY (`n.id`), which is a different value on the labels
+that have one (a CVE id, a finding key). Compare `id(n)` with an integer literal;
+`id(n) = "1234"` never matches.
+
+  Good: MATCH (n) WHERE id(n) = 1234 RETURN labels(n) AS labels, n
+  Good: MATCH (v:Vulnerability) WHERE id(v) IN [1234, 1301] RETURN v
+  Bad:  MATCH (n) WHERE n.id = "1234"             <- that is the property, not the Node ID
+
+A lookup by Node ID is the ONE place a bare `(n)` is right: it reads the named
+node, it does not scan the graph. Use the label whenever you know it. A bare
+neighbour `(m)` only returns this project's nodes, so give CVE, MitreData and
+Capec neighbours their own labelled OPTIONAL MATCH.
+
+CVE, MitreData and Capec are shared reference nodes. Neither a bare `(n)` nor a
+query that matches ONLY reference nodes can reach them; go through this
+project's node that links to one:
+
+  Good: MATCH (t:Technology)-[:HAS_KNOWN_CVE]->(c:CVE) WHERE id(c) = 1234 RETURN DISTINCT c
+  Bad:  MATCH (c:CVE) WHERE id(c) = 1234 RETURN c   <- rejected: nothing ties it to the project
+
+When each row describes exactly ONE node and you return its property values
+rather than the node itself, also return `id(x) AS nodeId` for that node, so the
+answer can be matched back to the row the user is looking at. Never add it to a
+query that counts, groups, aggregates or uses DISTINCT: it would split every
+group into one row per node.
+
 __GRAPH_SCHEMA__
 
 ## Common Query Patterns
@@ -1840,8 +1869,13 @@ OPTIONAL MATCH (s)-[:FAILED_WITH]->(fl:ChainFailure)
 RETURN s.iteration, s.tool_name, f.title, fl.error_message
 ORDER BY s.iteration
 
-// Decisions made during a chain (with preceding/following steps)
-MATCH (ac:AttackChain {chain_id: "session-123"})-[:HAS_STEP]->(:ChainStep)-[:NEXT_STEP*0..]->(s:ChainStep)-[:LED_TO]->(d:ChainDecision)
+// Decisions made during a chain (with preceding/following steps).
+// HAS_STEP links only the FIRST step, so do not walk NEXT_STEP to reach the rest:
+// every ChainStep carries its chain's chain_id, so match the steps by that.
+// Variable-length paths ([*], [:R*1..3], (..){n,m}) are REJECTED: the nodes they
+// pass through cannot be scoped to this project.
+MATCH (ac:AttackChain {chain_id: "session-123"})
+MATCH (s:ChainStep {chain_id: ac.chain_id})-[:LED_TO]->(d:ChainDecision)
 OPTIONAL MATCH (d)-[:DECISION_PRECEDED]->(next:ChainStep)
 RETURN d.decision_type, d.from_state, d.to_state, d.reason, s.tool_name AS triggered_by, next.tool_name AS followed_by
 ```

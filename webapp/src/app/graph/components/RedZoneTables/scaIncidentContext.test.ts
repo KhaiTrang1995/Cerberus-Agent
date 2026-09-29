@@ -88,9 +88,10 @@ describe('table wiring', () => {
   })
 
   test('the incident detail row spans the full verdicts table', () => {
-    // A short colSpan leaves a visually broken row; the verdicts sheet has 12
-    // columns since the Incident column was added.
-    expect(SOURCE).toContain('colSpan={12}')
+    // A short colSpan leaves a visually broken row; the verdicts sheet has 15
+    // columns: Node ID, the 12 finding columns through Incident, Updated, and
+    // the Mute action.
+    expect(SOURCE).toContain('colSpan={15}')
   })
 })
 

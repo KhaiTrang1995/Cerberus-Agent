@@ -195,6 +195,48 @@ describe('computeReconDelta', () => {
   })
 })
 
+describe('the Node ID a delta row carries', () => {
+  // A stored version keeps no internal ids, and its nodes may have been deleted
+  // or recreated since. Only a node on the side read from the LIVE graph has an
+  // id worth showing; everything else must be null, never a guess.
+  const past = graph([
+    node('x1', 'Port', { ip_address: '10.0.0.1', number: 22, protocol: 'tcp' }),
+    node('x2', 'Technology', { name: 'nginx', version: '1.20' }),
+  ])
+  const live = graph([
+    node('y1', 'Port', { ip_address: '10.0.0.1', number: 6379, protocol: 'tcp' }),
+    node('y2', 'Technology', { name: 'nginx', version: '1.25' }),
+  ])
+  const liveIds = new Map([['y1', '101'], ['y2', '102']])
+
+  test('past -> live: added and changed rows name the live node; removed rows cannot', () => {
+    const d = computeReconDelta(past, live, { to: liveIds })
+    expect(d.addedNodes.map(n => n.nodeId)).toEqual(['101'])
+    expect(d.changedNodes.map(n => n.nodeId)).toEqual(['102'])
+    expect(d.removedNodes.map(n => n.nodeId)).toEqual([null])
+  })
+
+  test('live -> past: a removed row is still in the live graph, an added one is not', () => {
+    const d = computeReconDelta(live, past, { from: liveIds })
+    expect(d.removedNodes.map(n => n.nodeId)).toEqual(['101'])
+    // Changed exists on both sides, so the live side names it.
+    expect(d.changedNodes.map(n => n.nodeId)).toEqual(['102'])
+    expect(d.addedNodes.map(n => n.nodeId)).toEqual([null])
+  })
+
+  test('two stored versions name nothing', () => {
+    const d = computeReconDelta(past, live)
+    for (const n of [...d.addedNodes, ...d.removedNodes, ...d.changedNodes]) {
+      expect(n.nodeId).toBeNull()
+    }
+  })
+
+  test('a live node the capture has no id for is null, not undefined', () => {
+    const d = computeReconDelta(past, live, { to: new Map() })
+    expect(d.addedNodes[0].nodeId).toBeNull()
+  })
+})
+
 describe('buildDeltaOverlay', () => {
   const before = graph([
     node('1', 'IP', { address: '10.0.0.1' }),

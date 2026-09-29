@@ -294,6 +294,8 @@ export interface AiTarget {
 
 export interface AiFinding {
   id: string
+  /** The Vulnerability's Neo4j internal id, for the Node ID column. */
+  nodeId?: string | null
   source: string
   name: string
   severity: string

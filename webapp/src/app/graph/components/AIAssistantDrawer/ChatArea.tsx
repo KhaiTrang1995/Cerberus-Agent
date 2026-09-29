@@ -13,6 +13,7 @@ import { AgentStatusChips } from './AgentStatusChips'
 import { deriveAgentStatus, hasAgentStatus } from './agentStatus'
 import { SuggestionPanels } from './SuggestionPanels'
 import { extractTextFromChildren } from './phaseConfig'
+import { parseNodeContextQuery } from '@/lib/agentQueryEnvelope'
 import type { ChatItem, Message, FileDownloadItem, FireteamItem, LatsSearchItem } from './types'
 import type { ThinkingItem, ToolExecutionItem, PlanWaveItem, DeepThinkItem } from './AgentTimeline'
 import styles from './AIAssistantDrawer.module.css'
@@ -107,6 +108,10 @@ export function ChatArea({
   }, [])
 
   const renderMessage = (item: Message) => {
+    // A node-scoped first message carries the whole node context inline. Show
+    // the operator's actual request as the bubble and tuck the context behind
+    // a disclosure so the chat stays readable (live and on restore alike).
+    const nodeCtx = item.role === 'user' ? parseNodeContextQuery(item.content) : null
     return (
       <div
         key={item.id}
@@ -121,6 +126,19 @@ export function ChatArea({
           {item.isGuidance && (
             <span className={styles.guidanceBadge}>Guidance</span>
           )}
+          {nodeCtx ? (
+            <>
+              <span className={styles.nodeContextBadge}>{nodeCtx.nodeLabel}</span>
+              <div className={styles.messageText}>
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{nodeCtx.request}</ReactMarkdown>
+              </div>
+              <details className={styles.nodeContextDetails}>
+                <summary>Node context sent to the agent</summary>
+                <pre className={styles.nodeContextPre}>{nodeCtx.context}</pre>
+              </details>
+            </>
+          ) : (
+            <>
           {item.responseTier === 'full_report' && (
             <div className={styles.reportHeader}>
               <span className={styles.reportBadge}>Report</span>
@@ -211,6 +229,8 @@ export function ChatArea({
             >
               {copiedMessageId === item.id ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy</>}
             </button>
+          )}
+            </>
           )}
 
           {item.error && (

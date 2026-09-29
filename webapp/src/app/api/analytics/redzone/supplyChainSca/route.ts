@@ -77,7 +77,8 @@ export async function GET(request: NextRequest) {
       `MATCH (p:Package {project_id: $pid})-[:FLAGGED_AS]->(f:MalPackageFinding {project_id: $pid})
        WHERE ${notMuted('f')}
        WITH p, f,${ANCHORS}
-       RETURN f.finding_id      AS findingId,
+       RETURN toString(id(f))   AS nodeId,
+              f.finding_id      AS findingId,
               f.verdict         AS verdict,
               f.severity        AS severity,
               f.source_tool     AS sourceTool,
@@ -123,7 +124,8 @@ export async function GET(request: NextRequest) {
               WHERE f.project_id = $pid AND ${notMuted('f')} | f] AS findings,
             [(p)-[:HAS_VULNERABILITY]->(v:Vulnerability)
               WHERE v.project_id = $pid AND ${notMuted('v')} | v] AS vulns
-       RETURN p.purl        AS purl,
+       RETURN toString(id(p)) AS nodeId,
+              p.purl        AS purl,
               p.name        AS name,
               p.version     AS version,
               p.ecosystem   AS ecosystem,
@@ -152,7 +154,8 @@ export async function GET(request: NextRequest) {
       `MATCH (p:Package {project_id: $pid})-[:HAS_VULNERABILITY]->(v:Vulnerability {project_id: $pid})
        WHERE v.source = 'osv' AND ${notMuted('v')}
        WITH p, v,${ANCHORS}
-       RETURN v.id           AS advisoryId,
+       RETURN toString(id(v)) AS nodeId,
+              v.id           AS advisoryId,
               v.severity     AS severity,
               v.cvss_metrics AS cvss,
               v.name         AS title,
@@ -186,6 +189,7 @@ export async function GET(request: NextRequest) {
 
     const sheets = {
       verdicts: verdicts.records.map((r: Neo4jRecord) => ({
+        nodeId: (r.get('nodeId') as string | null) ?? null,
         findingId: (r.get('findingId') as string) || '',
         verdict: (r.get('verdict') as string) || 'unknown',
         severity: (r.get('severity') as string) || 'unknown',
@@ -217,6 +221,7 @@ export async function GET(request: NextRequest) {
         updatedAt: (r.get('updatedAt') as string) ?? null,
       })),
       packages: packages.records.map((r: Neo4jRecord) => ({
+        nodeId: (r.get('nodeId') as string | null) ?? null,
         purl: (r.get('purl') as string) || '',
         name: (r.get('name') as string) ?? null,
         version: (r.get('version') as string) ?? null,
@@ -236,6 +241,7 @@ export async function GET(request: NextRequest) {
         updatedAt: (r.get('updatedAt') as string) ?? null,
       })),
       advisories: advisories.records.map((r: Neo4jRecord) => ({
+        nodeId: (r.get('nodeId') as string | null) ?? null,
         advisoryId: (r.get('advisoryId') as string) || '',
         severity: (r.get('severity') as string) || 'unknown',
         cvss: (r.get('cvss') as string) ?? null,

@@ -303,3 +303,28 @@ describe('supplyChainSca: meta totals', () => {
     expect(body.meta.byEcosystem).toHaveLength(2)
   })
 })
+
+describe('supplyChainSca: Node ID', () => {
+  // Each sheet points at the node its row is about: the finding, the package,
+  // the advisory - never the untenanted CVE reference an MCP lookup can't reach.
+  test('each sheet query projects its own row node id', async () => {
+    setDatasets({})
+    await route.GET(makeRequest('p1'))
+    expect(runCalls[0].cypher).toContain('toString(id(f))')
+    expect(runCalls[1].cypher).toContain('toString(id(p))')
+    expect(runCalls[2].cypher).toContain('toString(id(v))')
+    for (const c of runCalls.slice(0, 3)) expect(c.cypher).toMatch(/AS nodeId\b/)
+  })
+
+  test('maps nodeId on all three sheets, null when absent', async () => {
+    setDatasets({
+      verdicts: [{ nodeId: '101', findingId: 'f1', purl: 'p' }],
+      packages: [{ nodeId: '102', purl: 'p' }],
+      advisories: [{ advisoryId: 'GHSA-1', purl: 'p' }],
+    })
+    const body = await (await route.GET(makeRequest('p1'))).json()
+    expect(body.sheets.verdicts[0].nodeId).toBe('101')
+    expect(body.sheets.packages[0].nodeId).toBe('102')
+    expect(body.sheets.advisories[0].nodeId).toBeNull()
+  })
+})

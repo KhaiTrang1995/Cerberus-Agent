@@ -3,10 +3,15 @@
  * Kept apart from the component so both are tested without rendering.
  */
 
+import { formatNodeId } from '../RedZoneTables/nodeId'
+
 export type MutedVia = 'all' | 'person' | 'rule' | 'deleted_rule'
 
 export interface MutedRow {
   id: string
+  /** Neo4j's internal id, for the Node ID column only. `id` stays the key the
+   *  selection, unmute and exemptions use. */
+  node_id?: string | null
   label: string
   name: string
   severity: string
@@ -90,13 +95,14 @@ export function stateText(row: Pick<MutedRow, 'stale_since'>): string {
 }
 
 export const EXPORT_COLUMNS = [
-  'id', 'kind', 'name', 'severity', 'host', 'muted_by', 'muted_via', 'rule', 'muted_reason',
+  'node_id', 'id', 'kind', 'name', 'severity', 'host', 'muted_by', 'muted_via', 'rule', 'muted_reason',
   'muted_at', 'state',
 ] as const
 
 /** The rows an export writes: what the table shows, one column per field. */
 export function exportRows(rows: MutedRow[], me: string | null | undefined): Record<string, unknown>[] {
   return rows.map(row => ({
+    node_id: formatNodeId(row.node_id) ?? '',
     id: row.id,
     kind: kindLabel(row),
     name: row.name,

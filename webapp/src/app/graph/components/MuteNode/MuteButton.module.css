@@ -1,0 +1,47 @@
+/* The Priority Board's mute button. The hover fill is its --pb-neutral-bg,
+   redeclared here because that token is scoped to the board's wrapper. */
+.muteButton {
+  --mute-hover-bg: rgba(255, 255, 255, 0.07);
+
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: var(--font-medium);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+:global([data-theme='light']) .muteButton {
+  --mute-hover-bg: var(--color-gray-100);
+}
+
+.muteButton:hover:not(:disabled) {
+  background: var(--mute-hover-bg);
+  color: var(--text-primary);
+  border-color: var(--border-strong);
+}
+
+.muteButton:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 1px;
+}
+
+.muteButton:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}

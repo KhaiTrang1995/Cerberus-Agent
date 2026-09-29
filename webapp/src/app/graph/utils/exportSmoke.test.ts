@@ -664,9 +664,10 @@ describe('Node Details envelope under load', () => {
     const data = JSON.parse(downloads[0].text)
     expect(data.nodeType).toBe('Domain')
     expect(data.generatedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/)
-    expect(data.columns).toEqual(['Name', 'registrar', 'country', 'ttl', 'In'])
+    expect(data.columns).toEqual(['Node ID', 'Name', 'registrar', 'country', 'ttl', 'In'])
     expect(data.rows).toHaveLength(5000)
     expect(data.rows[0]).toEqual({
+      'Node ID': null, // `d-0` is not a numeric graph id
       Name: 'dom-0.example.com',
       registrar: 'GoDaddy',
       country: 'US',
@@ -769,7 +770,7 @@ describe('JS Recon under load and ordering', () => {
     const secretsSection = md.split('## Secrets (1100)')[1].split('## ')[0]
     const dataLines = secretsSection
       .split('\n')
-      .filter(l => l.startsWith('| ') && !l.includes(' --- ') && !l.startsWith('| severity '))
+      .filter(l => l.startsWith('| ') && !l.includes(' --- ') && !l.startsWith('| nodeId | severity '))
     expect(dataLines).toHaveLength(1100)
   })
 })

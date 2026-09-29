@@ -26,7 +26,8 @@ export async function GET(request: NextRequest) {
     const llm = await session.run(
       `MATCH (ep:Endpoint {project_id: $pid})
        WHERE ep.ai_interface_type IS NOT NULL OR ep.is_ai_framework_detected = true
-       RETURN ep.baseurl AS baseUrl, ep.path AS path, ep.method AS method,
+       RETURN toString(id(ep)) AS nodeId,
+              ep.baseurl AS baseUrl, ep.path AS path, ep.method AS method,
               ep.ai_interface_type AS interfaceType,
               ep.ai_supports_streaming AS streaming,
               ep.ai_supports_tools AS tools,
@@ -44,7 +45,7 @@ export async function GET(request: NextRequest) {
     // --- MCP servers ---
     const mcp = await session.run(
       `MATCH (ep:Endpoint {project_id: $pid}) WHERE ep.ai_interface_type = 'mcp'
-       RETURN ep.baseurl AS baseUrl, ep.path AS path,
+       RETURN toString(id(ep)) AS nodeId, ep.baseurl AS baseUrl, ep.path AS path,
               ep.ai_mcp_server_name AS serverName,
               ep.ai_mcp_server_version AS serverVersion,
               ep.ai_mcp_protocol_version AS protocolVersion,
@@ -61,7 +62,10 @@ export async function GET(request: NextRequest) {
     const tech = await session.run(
       `MATCH (t:Technology {project_id: $pid}) WHERE t.category STARTS WITH 'ai-'
        OPTIONAL MATCH (x)-[r]->(t) WHERE type(r) IN ['USES_TECHNOLOGY','HAS_TECHNOLOGY']
-       RETURN t.name AS name, t.category AS category, t.version AS version,
+       // Adding id(t) to the implicit grouping key cannot split a row: the
+       // Technology MERGE key is (name, version) per project, already grouped on.
+       RETURN toString(id(t)) AS nodeId,
+              t.name AS name, t.category AS category, t.version AS version,
               [d IN collect(DISTINCT r.detected_by) WHERE d IS NOT NULL] AS detectedBy,
               count(DISTINCT x) AS attachedTo, t.updated_at AS updatedAt
        ORDER BY t.category, t.name LIMIT ${rowCap()}`,
@@ -72,7 +76,7 @@ export async function GET(request: NextRequest) {
       `MATCH (t:Technology {project_id: $pid, category: 'ai-vector-db'})
        OPTIONAL MATCH (p:Port)-[r:HAS_TECHNOLOGY]->(t)
        OPTIONAL MATCH (ip:IP)-[:HAS_PORT]->(p)
-       RETURN t.name AS name, ip.address AS host, p.number AS port,
+       RETURN toString(id(t)) AS nodeId, t.name AS name, ip.address AS host, p.number AS port,
               coalesce(r.detected_by, t.source) AS detectedBy, t.updated_at AS updatedAt
        ORDER BY t.name LIMIT ${rowCap()}`,
       { pid })
@@ -81,15 +85,20 @@ export async function GET(request: NextRequest) {
     const models = await session.run(
       `MATCH (ep:Endpoint {project_id: $pid}) WHERE ep.ai_model_ids IS NOT NULL
        UNWIND ep.ai_model_ids AS modelId
+       // A model is a list value, not a node, so the row points at the Endpoint
+       // that reports it. The GET and POST Endpoints of one path (method is in
+       // the Endpoint key) fold into one row here; min() makes the pick stable.
        WITH modelId, ep.ai_model_family_guess AS family,
             ep.baseurl AS baseUrl, ep.path AS sourceEndpoint,
-            max(ep.updated_at) AS updatedAt
-       RETURN modelId, family, baseUrl, sourceEndpoint, updatedAt
+            max(ep.updated_at) AS updatedAt,
+            toString(min(id(ep))) AS nodeId
+       RETURN nodeId, modelId, family, baseUrl, sourceEndpoint, updatedAt
        ORDER BY modelId LIMIT ${rowCap()}`,
       { pid })
 
     const sheets = {
       llmEndpoints: llm.records.map((r: { get: (key: string) => unknown }) => ({
+        nodeId: (r.get('nodeId') as string | null) ?? null,
         baseUrl: r.get('baseUrl'), path: r.get('path'), method: r.get('method'),
         interfaceType: r.get('interfaceType'), streaming: r.get('streaming'),
         tools: r.get('tools'), vision: r.get('vision'), modelFamily: r.get('modelFamily'),
@@ -99,6 +108,7 @@ export async function GET(request: NextRequest) {
         updatedAt: r.get('updatedAt') ?? null,
       })),
       mcpServers: mcp.records.map((r: { get: (key: string) => unknown }) => ({
+        nodeId: (r.get('nodeId') as string | null) ?? null,
         baseUrl: r.get('baseUrl'), path: r.get('path'), serverName: r.get('serverName'),
         serverVersion: r.get('serverVersion'), protocolVersion: r.get('protocolVersion'),
         toolCount: toNum(r.get('toolCount')), resourceCount: toNum(r.get('resourceCount')),
@@ -108,16 +118,19 @@ export async function GET(request: NextRequest) {
         updatedAt: r.get('updatedAt') ?? null,
       })),
       technologies: tech.records.map((r: { get: (key: string) => unknown }) => ({
+        nodeId: (r.get('nodeId') as string | null) ?? null,
         name: r.get('name'), category: r.get('category'), version: r.get('version'),
         detectedBy: (r.get('detectedBy') as string[]) || [], attachedTo: toNum(r.get('attachedTo')),
         updatedAt: r.get('updatedAt') ?? null,
       })),
       vectorDbs: vdb.records.map((r: { get: (key: string) => unknown }) => ({
+        nodeId: (r.get('nodeId') as string | null) ?? null,
         name: r.get('name'), host: r.get('host'), port: toNum(r.get('port')),
         detectedBy: r.get('detectedBy'),
         updatedAt: r.get('updatedAt') ?? null,
       })),
       models: models.records.map((r: { get: (key: string) => unknown }) => ({
+        nodeId: (r.get('nodeId') as string | null) ?? null,
         modelId: r.get('modelId'), family: r.get('family'),
         baseUrl: r.get('baseUrl'), sourceEndpoint: r.get('sourceEndpoint'),
         updatedAt: r.get('updatedAt') ?? null,

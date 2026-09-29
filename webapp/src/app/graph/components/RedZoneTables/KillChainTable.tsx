@@ -11,6 +11,8 @@ import {
   UpdatedAtTh,
   useUpdatedAtSort,
 } from './updatedAt'
+import { NODE_ID_COLUMN, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton } from '../MuteNode'
 import { ExternalLink } from '@/components/ui'
 import { capecToUrl, cveToUrl, cweToUrl } from '@/lib/url-utils'
 import {
@@ -27,6 +29,8 @@ import { normalizeSeverity } from './types'
 import rowStyles from './RedZoneTableRow.module.css'
 
 interface KillChainRow {
+  /** The Technology carrying the CVE; CVE nodes are global and unaddressable by id. */
+  nodeId: string | null
   subdomain: string | null
   ipAddress: string | null
   port: number | null
@@ -54,6 +58,7 @@ const PAGE_SIZE = 100
 /** Module-level: the filter profiles are keyed off these, and a fresh array
  *  literal per render would re-profile every row. */
 const COLUMNS: RedZoneFilterColumn[] = [
+  NODE_ID_COLUMN,
   { key: 'subdomain', header: 'Subdomain' },
   { key: 'ipAddress', header: 'IP' },
   { key: 'port', header: 'Port' },
@@ -123,6 +128,7 @@ export const KillChainTable = memo(function KillChainTable({ projectId }: Props)
       <table className={rowStyles.table}>
         <thead>
           <tr>
+            <NodeIdTh />
             <th>Subdomain</th>
             <th>IP</th>
             <th>Port</th>
@@ -135,11 +141,13 @@ export const KillChainTable = memo(function KillChainTable({ projectId }: Props)
             <th>CWE</th>
             <th>CAPEC</th>
             <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+            <th />
           </tr>
         </thead>
         <tbody>
           {sliced.map((r, i) => (
             <tr key={`${r.subdomain}-${r.port}-${r.cveId}-${i}`}>
+              <td><NodeIdCell value={r.nodeId} /></td>
               <td>{r.subdomain ? <HostCell host={r.subdomain} /> : <Truncated text={r.subdomain} max={180} />}</td>
               <td>{r.ipAddress ? <IpCell ip={r.ipAddress} port={r.port ?? undefined} /> : <Mono>-</Mono>}</td>
               <td>
@@ -178,6 +186,7 @@ export const KillChainTable = memo(function KillChainTable({ projectId }: Props)
                 ) : <span className={rowStyles.nullCell}>-</span>}
               </td>
               <td><UpdatedAtCell value={r.updatedAt} /></td>
+              <td><MuteNodeButton name={r.techName || r.cveId} graphId={r.nodeId} label="Technology" /></td>
             </tr>
           ))}
         </tbody>

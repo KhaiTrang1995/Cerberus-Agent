@@ -277,3 +277,37 @@ describe('/api/analytics/redzone/dnsDrift', () => {
     expect(c).toMatch(/WHERE size\(historicResolutionsClean\) > 0\s+OR size\(externalDomainsClean\) > 0\s+OR size\(danglingSubsClean\) > 0/s)
   })
 })
+
+// ---------------------------------------------------------------------------
+// nodeId
+// ---------------------------------------------------------------------------
+describe('phase C: nodeId', () => {
+  test('threatIntel: every arm points at its asset node and the id survives the merge-sort', async () => {
+    runReturnByCall = [
+      [{ nodeId: '1', assetType: 'Domain', pulseCount: { low: 0, high: 0 } }],
+      [{ nodeId: '2', assetType: 'IP', pulseCount: { low: 3, high: 0 } }],
+      [{ nodeId: '3', assetType: 'BaseURL' }],
+    ]
+    const body = await (await threatIntelRoute.GET(makeRequest('p1'))).json()
+    expect(runCalls[0].cypher).toMatch(/toString\(id\(d\)\)\s+AS nodeId/)
+    expect(runCalls[1].cypher).toMatch(/toString\(id\(ip\)\)\s+AS nodeId/)
+    expect(runCalls[2].cypher).toMatch(/toString\(id\(u\)\)\s+AS nodeId/)
+    const byType = Object.fromEntries(
+      body.rows.map((r: { assetType: string; nodeId: string | null }) => [r.assetType, r.nodeId]))
+    expect(byType).toEqual({ Domain: '1', IP: '2', BaseURL: '3' })
+  })
+
+  test('supplyChain: points at the JsReconFinding, null when absent', async () => {
+    runReturn = [{ nodeId: '8', id: 'jf-1' }, { id: 'jf-2' }]
+    const body = await (await supplyChainRoute.GET(makeRequest('p1'))).json()
+    expect(runCalls[0].cypher).toMatch(/toString\(id\(j\)\)\s+AS nodeId/)
+    expect(body.rows.map((r: { nodeId: string | null }) => r.nodeId)).toEqual(['8', null])
+  })
+
+  test('dnsDrift: points at the Domain the row is grouped by', async () => {
+    runReturn = [{ nodeId: '4', domain: 'example.com' }]
+    const body = await (await dnsDriftRoute.GET(makeRequest('p1'))).json()
+    expect(runCalls[0].cypher).toMatch(/toString\(id\(d\)\)\s+AS nodeId/)
+    expect(body.rows[0].nodeId).toBe('4')
+  })
+})

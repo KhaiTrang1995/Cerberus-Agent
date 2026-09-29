@@ -186,6 +186,29 @@ describe('MutedNodesTable', () => {
     expect(forP2.every(u => u.includes('offset=0') && !u.includes('label='))).toBe(true)
   })
 
+  test('the Node ID sits right after the selection column', async () => {
+    fetchMock.mockReturnValue(reply({ total: 2, findings: [row({ node_id: '812' }), row({ id: 'v2', name: 'other' })] }))
+    render(<MutedNodesTable projectId="p1" />)
+    await screen.findByText('other')
+    const headers = screen.getAllByRole('columnheader')
+    expect(headers[1]).toHaveTextContent('Node ID')
+    expect(headers[2]).toHaveTextContent('Kind')
+    expect(screen.getByRole('button', { name: 'Copy node ID 812' })).toBeInTheDocument()
+    // The row without one shows the placeholder, not an empty cell.
+    expect(screen.getAllByRole('row')[2].querySelectorAll('td')[1]).toHaveTextContent('-')
+  })
+
+  test('copying a Node ID neither selects the row nor unmutes it', async () => {
+    fetchMock.mockReturnValue(reply({ total: 1, findings: [row({ node_id: '812' })] }))
+    const writeText = vi.fn(() => Promise.resolve())
+    Object.assign(navigator, { clipboard: { writeText } })
+    render(<MutedNodesTable projectId="p1" />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Copy node ID 812' }))
+    expect(writeText).toHaveBeenCalledWith('812')
+    expect((screen.getByLabelText('Select tech-detect:nginx') as HTMLInputElement).checked).toBe(false)
+    expect(fetchMock.mock.calls.some(c => c[1]?.method === 'POST')).toBe(false)
+  })
+
   test('pages forward', async () => {
     fetchMock.mockReturnValue(reply({ total: 120, findings: [row()] }))
     render(<MutedNodesTable projectId="p1" />)

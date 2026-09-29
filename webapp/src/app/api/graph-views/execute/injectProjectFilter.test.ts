@@ -5,7 +5,7 @@
  */
 
 import { describe, test, expect } from 'vitest'
-import { injectProjectFilter, findUnscopedNodePattern, namesMutedLabel } from './injectProjectFilter'
+import { injectProjectFilter, findUnscopedNodePattern, namesMutedLabel, hasVariableLengthPath, findDisallowedCall } from './injectProjectFilter'
 
 describe('injectProjectFilter', () => {
   test('injects project_id into bare node pattern', () => {
@@ -49,10 +49,12 @@ describe('injectProjectFilter', () => {
     expect(result).not.toContain('(cap:Capec {project_id')
   })
 
-  test('skips ExploitGvm nodes (global label)', () => {
+  test('SCOPES ExploitGvm nodes: they are per-tenant data, not reference data', () => {
+    // Regression: ExploitGvm was wrongly on the global-exempt list, leaving
+    // `MATCH (e:ExploitGvm)` unscoped and cross-tenant.
     const input = 'MATCH (e:ExploitGvm) RETURN e'
     const result = injectProjectFilter(input)
-    expect(result).toBe('MATCH (e:ExploitGvm) RETURN e')
+    expect(result).toBe('MATCH (e:ExploitGvm&!Muted {project_id: $projectId}) RETURN e')
   })
 
   test('preserves existing props on global labels', () => {
@@ -161,12 +163,71 @@ describe('findUnscopedNodePattern', () => {
     }
   })
 
-  test('exempts global reference labels', () => {
-    expect(findUnscopedNodePattern('MATCH (c:CVE) RETURN c')).toBeNull()
+  test('exempts a reference label ONLY when the query is anchored to tenant data', () => {
+    // Anchored: a scoped Technology pattern is present, so the CVE is exempt.
+    const anchored = injectProjectFilter('MATCH (t:Technology)-[:HAS_KNOWN_CVE]->(c:CVE) RETURN t, c')
+    expect(findUnscopedNodePattern(anchored)).toBeNull()
+  })
+
+  test('flags a lone reference query with no tenant anchor', () => {
+    // `MATCH (c:CVE) RETURN c` would dump every CVE in the database. Mirrors the
+    // Python filter's no-anchor refusal.
+    expect(findUnscopedNodePattern('MATCH (c:CVE) RETURN c')).toBe('c:CVE')
+    expect(findUnscopedNodePattern('MATCH (c:CVE)-[:HAS_CWE]->(m:MitreData) RETURN c, m')).not.toBeNull()
+  })
+
+  test('never exempts a label EXPRESSION that merely mentions a reference label', () => {
+    // The hole this closes: `(n:!CVE)` means all NON-CVE nodes (tenant data),
+    // and `(n:A|CVE)` is a union. Both must be scoped, not exempted.
+    expect(injectProjectFilter('MATCH (n:!CVE) RETURN n')).toContain('project_id: $projectId')
+    expect(injectProjectFilter('MATCH (n:Domain|CVE) RETURN n')).toContain('project_id: $projectId')
+    expect(findUnscopedNodePattern('MATCH (n:!CVE) RETURN n')).toBe('n:!CVE')
   })
 
   test('does not flag anonymous waypoint nodes (no var, no label)', () => {
     expect(findUnscopedNodePattern('MATCH (h:Host {project_id: $projectId})-[:R]->() RETURN h')).toBeNull()
+  })
+})
+
+describe('variable-length / quantified paths are refused', () => {
+  test('flags a variable-length relationship', () => {
+    expect(hasVariableLengthPath('MATCH (a:Host)-[*1..3]->(b:Host) RETURN a, b')).toBe(true)
+    expect(hasVariableLengthPath('MATCH p=(:CVE)-[*2]-(:CVE) RETURN p')).toBe(true)
+    expect(hasVariableLengthPath('MATCH (a)-[:R*]->(b) RETURN a')).toBe(true)
+  })
+
+  test('flags a quantified path/relationship', () => {
+    expect(hasVariableLengthPath('MATCH ((a)-[:R]->(b)){1,3} RETURN a')).toBe(true)
+    expect(hasVariableLengthPath('MATCH (a)-[:R]->{1,3}(b) RETURN a')).toBe(true)
+  })
+
+  test('does not flag ordinary fixed-hop paths, list slices or maps', () => {
+    expect(hasVariableLengthPath('MATCH (a:Host)-[:R]->(b:Svc) RETURN a, b')).toBe(false)
+    expect(hasVariableLengthPath('MATCH (n:Host) RETURN collect(n)[0..2]')).toBe(false)
+    expect(hasVariableLengthPath('MATCH (n:Host) RETURN n{.name, .port}')).toBe(false)
+    // A `*` inside a string literal is data, not a var-length hop.
+    expect(hasVariableLengthPath("MATCH (n:Host) WHERE n.note = '[*]' RETURN n")).toBe(false)
+  })
+})
+
+describe('namespaced function/procedure calls are refused', () => {
+  test('flags apoc function forms that need no CALL', () => {
+    expect(findDisallowedCall("RETURN apoc.cypher.runFirstColumnSingle('MATCH (n) RETURN n', {}) AS x")).toBe('apoc.cypher.runFirstColumnSingle')
+    expect(findDisallowedCall("RETURN apoc.load.json('http://x/') AS x")).toBe('apoc.load.json')
+  })
+
+  test('sees through backticks, spacing and comments', () => {
+    expect(findDisallowedCall('RETURN `apoc`.`cypher`.`runFirstColumnMany`("x", {}) AS x')).toBe('apoc.cypher.runFirstColumnMany')
+    expect(findDisallowedCall('RETURN apoc . cypher . runFirstColumnSingle("x", {}) AS x')).toBe('apoc.cypher.runFirstColumnSingle')
+    expect(findDisallowedCall('RETURN apoc/**/.cypher.runFirstColumnSingle("x", {}) AS x')).toBe('apoc.cypher.runFirstColumnSingle')
+  })
+
+  test('allows built-in temporal/spatial functions and plain reads', () => {
+    expect(findDisallowedCall('MATCH (n:Host) RETURN duration.between(n.a, n.b)')).toBeNull()
+    expect(findDisallowedCall('MATCH (n:Host) RETURN point.distance(n.p, n.q)')).toBeNull()
+    expect(findDisallowedCall('MATCH (n:Host) RETURN count(n), toString(id(n)), n.name')).toBeNull()
+    // A function name inside a string is data.
+    expect(findDisallowedCall("MATCH (n:Host) WHERE n.note = 'apoc.load.json(x)' RETURN n")).toBeNull()
   })
 })
 

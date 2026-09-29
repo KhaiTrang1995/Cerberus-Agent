@@ -11,6 +11,8 @@ import {
   UpdatedAtTh,
   useUpdatedAtSort,
 } from './updatedAt'
+import { NODE_ID_COLUMN, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton } from '../MuteNode'
 import {
   Mono,
   Truncated,
@@ -22,6 +24,7 @@ import {
 import rowStyles from './RedZoneTableRow.module.css'
 
 interface BlastRadiusRow {
+  nodeId: string | null
   techName: string
   techVersion: string | null
   cveCount: number
@@ -40,6 +43,7 @@ const PAGE_SIZE = 100
 /** Module-level: the filter profiles are keyed off these, and a fresh array
  *  literal per render would re-profile every row. */
 const COLUMNS: RedZoneFilterColumn[] = [
+  NODE_ID_COLUMN,
   { key: 'techName', header: 'Technology' },
   { key: 'techVersion', header: 'Version' },
   { key: 'cveCount', header: 'CVE Count' },
@@ -98,6 +102,7 @@ export const BlastRadiusTable = memo(function BlastRadiusTable({ projectId }: Pr
       <table className={rowStyles.table}>
         <thead>
           <tr>
+            <NodeIdTh />
             <th>Technology</th>
             <th>Version</th>
             <th>CVEs</th>
@@ -107,11 +112,13 @@ export const BlastRadiusTable = memo(function BlastRadiusTable({ projectId }: Pr
             <th>IPs</th>
             <th>Top CVEs</th>
             <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+            <th />
           </tr>
         </thead>
         <tbody>
           {sliced.map((r, i) => (
             <tr key={`${r.techName}-${r.techVersion || ''}-${i}`}>
+              <td><NodeIdCell value={r.nodeId} /></td>
               <td><Truncated text={r.techName} max={200} /></td>
               <td>{r.techVersion ? <Mono>{r.techVersion}</Mono> : <span className={rowStyles.nullCell}>-</span>}</td>
               <td><NumCell value={r.cveCount} /></td>
@@ -127,6 +134,7 @@ export const BlastRadiusTable = memo(function BlastRadiusTable({ projectId }: Pr
               <td><NumCell value={r.ipCount} /></td>
               <td><ListCell items={r.topCveIds} max={3} /></td>
               <td><UpdatedAtCell value={r.updatedAt} /></td>
+              <td><MuteNodeButton name={r.techName} graphId={r.nodeId} label="Technology" /></td>
             </tr>
           ))}
         </tbody>

@@ -25,6 +25,7 @@ import { useConversationRestoration } from './hooks/useConversationRestoration'
 import { clearProjectSession } from './sessionMemory'
 import { useSendHandlers } from './hooks/useSendHandlers'
 import { useDownloadMarkdown } from './hooks/useDownloadMarkdown'
+import { usePendingNodeQuery } from './hooks/usePendingNodeQuery'
 
 // External hooks
 import { useAgentWebSocket } from '@/hooks/useAgentWebSocket'
@@ -71,6 +72,8 @@ export function AIAssistantDrawer({
   requireToolConfirmation = true,
   graphViewCypher,
   onOpenFileSystem,
+  pendingNodeQuery,
+  onPendingNodeQueryConsumed,
 }: AIAssistantDrawerProps) {
   // ─── State hooks ─────────────────────────────────────────────────────────────
   const [activeSkill, setActiveSkill] = useState<ActiveSkill | null>(null)
@@ -259,6 +262,7 @@ export function AIAssistantDrawer({
   const {
     inputRef,
     handleSend,
+    sendNodeContextQuery,
     handleApproval,
     handleTimelineToolConfirmation,
     handleAnswer,
@@ -312,6 +316,17 @@ export function AIAssistantDrawer({
       }, 300)
     }
   }, [isOpen, awaitingApproval, scrollToBottom, inputRef])
+
+  // Node-scoped first message ("Ask agent" in the node drawer). Declared
+  // before the session-reset effect below, which clears the chat on the new
+  // sessionId before the fresh socket connects and this sends.
+  usePendingNodeQuery({
+    pendingNodeQuery,
+    isConnected,
+    send: sendNodeContextQuery,
+    onConsumed: onPendingNodeQueryConsumed,
+    onArmed: useCallback(() => setShowHistory(false), [setShowHistory]),
+  })
 
   // Reset state when session changes (skip when restoring a conversation)
   useEffect(() => {

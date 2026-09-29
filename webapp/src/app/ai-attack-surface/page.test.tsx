@@ -95,6 +95,21 @@ describe('AI Attack Surface page', () => {
     expect(screen.getByText('LLM01')).toBeTruthy()
   })
 
+  test('the findings table leads with the Node ID column', () => {
+    hookState.findings = [
+      { id: 'aiatk_1', nodeId: '4711', source: 'garak', owaspLlmId: 'LLM01', severity: 'high' },
+      { id: 'aiatk_2', source: 'pyrit', owaspLlmId: 'LLM02', severity: 'low' },
+    ]
+    render(<AiAttackSurfacePage />)
+    const table = screen.getByText('Findings (2)').parentElement!.querySelector('table')!
+    expect(table.querySelector('thead th')!.textContent).toBe('Node ID')
+    expect(screen.getByRole('button', { name: 'Copy node ID 4711' })).toBeTruthy()
+    // A row from a server older than the column shows the placeholder.
+    const rows = table.querySelectorAll('tbody tr')
+    const other = [...rows].find(r => r.textContent?.includes('pyrit'))!
+    expect(other.querySelector('td')!.textContent).toBe('-')
+  })
+
   test('running scan: spinner on its card, and Launch stays disabled (cannot relaunch)', () => {
     hookState.run = { run_id: 'r1', tool: 'garak', status: 'running' }
     hookState.targets = [{ baseUrl: 'http://h', path: '/c', method: 'POST', interfaceType: 'llm-chat' }]

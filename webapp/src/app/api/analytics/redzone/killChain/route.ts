@@ -36,7 +36,11 @@ export async function GET(request: NextRequest) {
          WHERE ${notMuted('ex')}
        WITH s, ip, p, svc, tech, c, m, cap,
             CASE WHEN ex IS NOT NULL THEN true ELSE false END AS isKev
-       RETURN s.name            AS subdomain,
+       // Not the CVE: CVE nodes are global and carry no tenant props, so an
+       // MCP query_graph lookup by id(n) could never match one. The Technology
+       // is the tenant-scoped node that holds the HAS_KNOWN_CVE edge.
+       RETURN toString(id(tech)) AS nodeId,
+              s.name            AS subdomain,
               ip.address        AS ipAddress,
               p.number          AS port,
               p.protocol        AS protocol,
@@ -61,6 +65,7 @@ export async function GET(request: NextRequest) {
     )
 
     const rows = result.records.map(r => ({
+      nodeId: (r.get('nodeId') as string | null) ?? null,
       subdomain: r.get('subdomain') as string | null,
       ipAddress: r.get('ipAddress') as string | null,
       port: r.get('port') != null ? toNum(r.get('port')) : null,

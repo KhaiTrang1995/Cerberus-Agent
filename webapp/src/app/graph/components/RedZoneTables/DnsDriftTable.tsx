@@ -11,6 +11,8 @@ import {
   UpdatedAtTh,
   useUpdatedAtSort,
 } from './updatedAt'
+import { NODE_ID_COLUMN, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton } from '../MuteNode'
 import {
   Truncated,
   ListCell,
@@ -39,6 +41,7 @@ interface ExternalDomainSighting {
 }
 
 interface DnsDriftRow {
+  nodeId: string | null
   domain: string
   historicIpCount: number
   historicResolutions: HistoricResolution[]
@@ -61,6 +64,7 @@ const PAGE_SIZE = 50
 /** Module-level: the filter profiles are keyed off these, and a fresh array
  *  literal per render would re-profile every row. */
 const COLUMNS: RedZoneFilterColumn[] = [
+  NODE_ID_COLUMN,
   { key: 'domain', header: 'Domain' },
   { key: 'historicIpCount', header: 'Historic IP Count' },
   { key: 'historicIps', header: 'Historic IPs' },
@@ -97,6 +101,7 @@ export const DnsDriftTable = memo(function DnsDriftTable({ projectId }: Props) {
   const exportConfig = useMemo<RedZoneExportConfig | undefined>(() => {
     if (rows.length === 0) return undefined
     const flat = sortedRows.map(r => ({
+      nodeId: r.nodeId,
       domain: r.domain,
       historicIpCount: r.historicIpCount,
       historicIps: r.historicResolutions.map(h => h.address).filter(Boolean).join(', '),
@@ -141,6 +146,7 @@ export const DnsDriftTable = memo(function DnsDriftTable({ projectId }: Props) {
       <table className={rowStyles.table}>
         <thead>
           <tr>
+            <NodeIdTh />
             <th>Domain</th>
             <th>Historic IPs</th>
             <th>Current IPs</th>
@@ -150,11 +156,13 @@ export const DnsDriftTable = memo(function DnsDriftTable({ projectId }: Props) {
             <th>External sightings</th>
             <th>Dangling subs</th>
             <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+            <th />
           </tr>
         </thead>
         <tbody>
           {sliced.map((r, i) => (
             <tr key={`${r.domain}-${i}`}>
+              <td><NodeIdCell value={r.nodeId} /></td>
               <td><HostCell host={r.domain} /></td>
               <td>
                 {r.historicIpCount > 0 ? (
@@ -185,6 +193,7 @@ export const DnsDriftTable = memo(function DnsDriftTable({ projectId }: Props) {
               </td>
               <td><NumCell value={r.danglingSubCount} /></td>
               <td><UpdatedAtCell value={r.updatedAt} /></td>
+              <td><MuteNodeButton name={r.domain} graphId={r.nodeId} label="Domain" /></td>
             </tr>
           ))}
         </tbody>

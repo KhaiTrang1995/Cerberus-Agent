@@ -194,6 +194,32 @@ describe('captureGraphSnapshot', () => {
     expect(snap.relationships.find(r => r.type === 'HAS_PORT')!.properties.seen).toBe(2)
   })
 
+  test('reports each node\'s live id beside the payload, never inside what is stored', async () => {
+    // The Recon Delta shows a live row's Node ID. A stored one would point at
+    // whatever node reuses that number after a rescan or an activation.
+    mockRun.mockReset()
+    mockRun
+      .mockResolvedValueOnce({
+        records: [
+          rec({ labels: ['IP'], props: { address: '10.0.0.1', project_id: 'p1' }, eid: '4:db:987654321', nid: '987654321' }),
+          rec({ labels: ['IP'], props: { address: '10.0.0.2', project_id: 'p1' }, eid: '4:db:987654322', nid: '987654322' }),
+        ],
+      })
+      .mockResolvedValueOnce({ records: [] })
+
+    const snap = await captureGraphSnapshot('p1')
+
+    expect(mockRun.mock.calls[0][0]).toContain('toString(id(n)) as nid')
+    const byAddress = Object.fromEntries(
+      snap.nodes.map(n => [n.properties.address, snap.liveNodeIds.get(n._exportId)]))
+    expect(byAddress).toEqual({ '10.0.0.1': '987654321', '10.0.0.2': '987654322' })
+
+    const stored = gunzipSync(serializeSnapshot(snap)).toString('utf8')
+    // Long enough that a random export UUID cannot contain it by chance.
+    expect(stored).not.toContain('98765432')
+    expect(stored).not.toContain('liveNodeIds')
+  })
+
   test('closes the Neo4j session even when the query throws', async () => {
     mockRun.mockReset()
     mockRun.mockRejectedValue(new Error('neo4j down'))
@@ -230,7 +256,7 @@ describe('snapshot serialization', () => {
 
   test('storeSnapshot persists bytes + counts + summary', async () => {
     prismaMock.scanVersion.update.mockResolvedValue({})
-    const res = await storeSnapshot('v1', { ...payload, nodeCount: 2, linkCount: 1, summary: { Subdomain: 1, IP: 1 } })
+    const res = await storeSnapshot('v1', { ...payload, nodeCount: 2, linkCount: 1, summary: { Subdomain: 1, IP: 1 }, liveNodeIds: new Map() })
     expect(res.bytes).toBeGreaterThan(0)
     const arg = prismaMock.scanVersion.update.mock.calls[0][0]
     expect(arg.where).toEqual({ id: 'v1' })
@@ -243,7 +269,7 @@ describe('snapshot serialization', () => {
   test('size guard refuses and does NOT persist an oversized snapshot', async () => {
     process.env.SCAN_SNAPSHOT_MAX_BYTES = '10'
     await expect(
-      storeSnapshot('v1', { ...payload, nodeCount: 2, linkCount: 1, summary: {} })
+      storeSnapshot('v1', { ...payload, nodeCount: 2, linkCount: 1, summary: {}, liveNodeIds: new Map() })
     ).rejects.toBeInstanceOf(SnapshotTooLargeError)
     expect(prismaMock.scanVersion.update).not.toHaveBeenCalled()
   })

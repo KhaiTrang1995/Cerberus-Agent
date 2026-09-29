@@ -11,6 +11,8 @@ import {
   UpdatedAtTh,
   useUpdatedAtSort,
 } from './updatedAt'
+import { NODE_ID_COLUMN, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton } from '../MuteNode'
 import {
   Mono,
   Truncated,
@@ -22,6 +24,7 @@ import {
 import rowStyles from './RedZoneTableRow.module.css'
 
 interface WebInitAccessRow {
+  nodeId: string | null
   baseUrl: string
   scheme: string | null
   statusCode: number | null
@@ -75,6 +78,7 @@ function HeaderCell({ present }: { present: boolean }) {
 /** Module-level: the filter profiles are keyed off these, and a fresh array
  *  literal per render would re-profile every row. */
 const COLUMNS: RedZoneFilterColumn[] = [
+  NODE_ID_COLUMN,
   { key: 'baseUrl', header: 'BaseURL' },
   { key: 'subdomain', header: 'Subdomain' },
   { key: 'scheme', header: 'Scheme' },
@@ -113,6 +117,7 @@ export const WebInitAccessTable = memo(function WebInitAccessTable({ projectId }
   const exportConfig = useMemo<RedZoneExportConfig | undefined>(() => {
     if (rows.length === 0) return undefined
     const flat = sortedRows.map(r => ({
+      nodeId: r.nodeId,
       baseUrl: r.baseUrl,
       subdomain: r.subdomain,
       scheme: r.scheme,
@@ -159,6 +164,7 @@ export const WebInitAccessTable = memo(function WebInitAccessTable({ projectId }
       <table className={rowStyles.table}>
         <thead>
           <tr>
+            <NodeIdTh />
             <th>BaseURL</th>
             <th>Subdomain</th>
             <th>Auth EPs</th>
@@ -167,11 +173,13 @@ export const WebInitAccessTable = memo(function WebInitAccessTable({ projectId }
             <th>Vuln Tags</th>
             <th>Server</th>
             <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+            <th />
           </tr>
         </thead>
         <tbody>
           {sliced.map((r, i) => (
             <tr key={`${r.baseUrl}-${i}`}>
+              <td><NodeIdCell value={r.nodeId} /></td>
               <td><UrlCell url={r.baseUrl} max={260} /></td>
               <td>{r.subdomain ? <HostCell host={r.subdomain} /> : <Truncated text={r.subdomain} max={160} />}</td>
               <td>
@@ -188,6 +196,7 @@ export const WebInitAccessTable = memo(function WebInitAccessTable({ projectId }
               <td><ListCell items={r.vulnTags} max={3} /></td>
               <td><Truncated text={r.server} max={120} /></td>
               <td><UpdatedAtCell value={r.updatedAt} /></td>
+              <td><MuteNodeButton name={r.baseUrl} graphId={r.nodeId} label="BaseURL" /></td>
             </tr>
           ))}
         </tbody>

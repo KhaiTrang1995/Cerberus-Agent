@@ -11,6 +11,8 @@ import {
   UpdatedAtTh,
   useUpdatedAtSort,
 } from './updatedAt'
+import { NODE_ID_COLUMN, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton } from '../MuteNode'
 import {
   SeverityBadge,
   Mono,
@@ -24,6 +26,7 @@ import { redactSecret } from './redact'
 import rowStyles from './RedZoneTableRow.module.css'
 
 interface SecretRow {
+  nodeId: string | null
   origin: 'Secret' | 'JsReconFinding' | 'MultiscannerFinding'
     | 'GithubSecret' | 'GithubSensitiveFile' | 'ChainFinding' | string
   id: string
@@ -48,6 +51,12 @@ interface SecretRow {
   location: string | null
   /** Graph `updated_at` of the node this row is built from. */
   updatedAt: unknown
+}
+
+/** The row node's label. A `JsReconFinding` origin is still a Secret node,
+ *  one the route reached through a JS file. */
+function secretNodeLabel(origin: string): string {
+  return origin === 'JsReconFinding' ? 'Secret' : origin
 }
 
 const PAGE_SIZE = 100
@@ -83,6 +92,7 @@ function ValidationChip({ status }: { status: string | null }) {
 /** Module-level: the filter profiles are keyed off these, and a fresh array
  *  literal per render would re-profile every row. */
 const COLUMNS: RedZoneFilterColumn[] = [
+  NODE_ID_COLUMN,
   { key: 'origin', header: 'Origin' },
   // TruffleHog scans 14 sources in parallel; without a per-source filter the
   // rows from a namespace-wide Docker scan bury everything else.
@@ -152,6 +162,7 @@ export const SecretsTable = memo(function SecretsTable({ projectId }: Props) {
       <table className={rowStyles.table}>
         <thead>
           <tr>
+            <NodeIdTh />
             <th>Type</th>
             <th>Category</th>
             <th>Redacted Sample</th>
@@ -166,11 +177,13 @@ export const SecretsTable = memo(function SecretsTable({ projectId }: Props) {
             <th>Source URL</th>
             <th>Subdomain</th>
             <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+            <th />
           </tr>
         </thead>
         <tbody>
           {sliced.map((r, i) => (
             <tr key={r.id || `${r.sourceUrl}-${i}`}>
+              <td><NodeIdCell value={r.nodeId} /></td>
               <td><Mono>{r.secretType}</Mono></td>
               <td>{r.keyType ? <span className={rowStyles.listChip}>{r.keyType}</span> : <span className={rowStyles.nullCell}>-</span>}</td>
               <td><Mono>{redactSecret(r.valueSample || r.matchedText)}</Mono></td>
@@ -187,6 +200,7 @@ export const SecretsTable = memo(function SecretsTable({ projectId }: Props) {
               <td><UrlCell url={r.sourceUrl} max={260} /></td>
               <td>{r.subdomain ? <HostCell host={r.subdomain} /> : <Truncated text={r.subdomain} max={180} />}</td>
               <td><UpdatedAtCell value={r.updatedAt} /></td>
+              <td><MuteNodeButton name={r.secretType} graphId={r.nodeId} nodeId={r.id} label={secretNodeLabel(r.origin)} /></td>
             </tr>
           ))}
         </tbody>

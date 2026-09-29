@@ -4,6 +4,8 @@ import { Fragment, memo, useCallback, useEffect, useMemo, useState } from 'react
 import { RedZoneTableShell } from './RedZoneTableShell'
 import { useRedZoneFilters } from './useRedZoneFilters'
 import { UPDATED_AT_COLUMN, UpdatedAtCell, UpdatedAtTh, useUpdatedAtSort } from './updatedAt'
+import { NODE_ID_COLUMN, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton, useMuteNodeContext } from '../MuteNode'
 import type { RedZoneExportConfig } from './exportCsv'
 import {
   SeverityBadge, Mono, Truncated, NumCell, ListCell, LinkedListCell, filterRowsByText,
@@ -24,6 +26,7 @@ import rowStyles from './RedZoneTableRow.module.css'
 type SheetKey = 'verdicts' | 'packages' | 'advisories'
 
 interface VerdictRow {
+  nodeId: string | null
   findingId: string
   verdict: string
   severity: string
@@ -61,6 +64,7 @@ interface VerdictRow {
 }
 
 interface PackageRow {
+  nodeId: string | null
   purl: string
   name: string | null
   version: string | null
@@ -81,6 +85,7 @@ interface PackageRow {
 }
 
 interface AdvisoryRow {
+  nodeId: string | null
   advisoryId: string
   severity: string
   cvss: string | null
@@ -189,7 +194,7 @@ function IncidentToggle({ row, open, onToggle }: {
 function IncidentDetailRow({ row }: { row: VerdictRow }) {
   return (
     <tr>
-      <td colSpan={12} style={{ padding: '8px 14px', fontSize: 12, opacity: 0.92 }}>
+      <td colSpan={15} style={{ padding: '8px 14px', fontSize: 12, opacity: 0.92 }}>
         {row.incidentSummary && <p style={{ margin: '0 0 6px' }}>{row.incidentSummary}</p>}
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 14, marginBottom: 6 }}>
           {row.incidentStatus && <span><strong>Status:</strong> {row.incidentStatus}</span>}
@@ -309,6 +314,7 @@ export function worstSeverity(list: string[]): Severity {
 
 const EXPORT_COLUMNS: Record<SheetKey, { key: string; header: string }[]> = {
   verdicts: [
+    NODE_ID_COLUMN,
     { key: 'verdict', header: 'Verdict' },
     { key: 'severity', header: 'Severity' },
     { key: 'advisoryId', header: 'Advisory / Rule' },
@@ -342,6 +348,7 @@ const EXPORT_COLUMNS: Record<SheetKey, { key: string; header: string }[]> = {
     UPDATED_AT_COLUMN,
   ],
   packages: [
+    NODE_ID_COLUMN,
     { key: 'name', header: 'Package' },
     { key: 'version', header: 'Version' },
     { key: 'ecosystem', header: 'Ecosystem' },
@@ -360,6 +367,7 @@ const EXPORT_COLUMNS: Record<SheetKey, { key: string; header: string }[]> = {
     UPDATED_AT_COLUMN,
   ],
   advisories: [
+    NODE_ID_COLUMN,
     { key: 'advisoryId', header: 'Advisory' },
     { key: 'severity', header: 'Severity' },
     { key: 'cvss', header: 'CVSS' },
@@ -433,7 +441,9 @@ export const SupplyChainScaTable = memo(function SupplyChainScaTable({ projectId
     } finally { setIsLoading(false) }
   }, [projectId])
 
-  useEffect(() => { fetchData() }, [fetchData])
+  // Muted rows are filtered server-side, so a mute anywhere means a refetch.
+  const { epoch: muteEpoch } = useMuteNodeContext()
+  useEffect(() => { fetchData() }, [fetchData, muteEpoch])
 
   // The three sheets have disjoint row shapes; the shell + text filter work on
   // plain records, and each table body narrows back to its own row type.
@@ -523,16 +533,19 @@ export const SupplyChainScaTable = memo(function SupplyChainScaTable({ projectId
         <table className={rowStyles.table}>
           <thead>
             <tr>
+              <NodeIdTh />
               <th>Verdict</th><th>Sev</th><th>Advisory / Rule</th><th>Package</th>
               <th>Version</th><th>Eco</th><th>Tool</th><th>Origin</th>
               <th>Anchor</th><th>Title</th><th>Detail</th><th>Incident</th>
               <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+              <th />
             </tr>
           </thead>
           <tbody>
             {(sliced as unknown as VerdictRow[]).map((r, i) => (
               <Fragment key={r.findingId || `${r.purl}-${i}`}>
                 <tr>
+                  <td><NodeIdCell value={r.nodeId} /></td>
                   <td><VerdictChip row={r} /></td>
                   <td><SeverityBadge severity={normalizeSeverity(r.severity)} /></td>
                   <td>
@@ -549,6 +562,7 @@ export const SupplyChainScaTable = memo(function SupplyChainScaTable({ projectId
                   <td><Truncated text={r.detail} max={240} /></td>
                   <td><IncidentToggle row={r} open={!!expanded[r.findingId]} onToggle={toggleIncident} /></td>
                   <td><UpdatedAtCell value={r.updatedAt} /></td>
+                  <td><MuteNodeButton name={r.name || r.purl} graphId={r.nodeId} nodeId={r.findingId} label="MalPackageFinding" /></td>
                 </tr>
                 {expanded[r.findingId] && <IncidentDetailRow row={r} />}
               </Fragment>
@@ -559,15 +573,18 @@ export const SupplyChainScaTable = memo(function SupplyChainScaTable({ projectId
         <table className={rowStyles.table}>
           <thead>
             <tr>
+              <NodeIdTh />
               <th>Status</th><th>Package</th><th>Version</th><th>Eco</th>
               <th>Harvest</th><th>Origin</th><th>Anchor</th>
               <th>Mal</th><th>Susp</th><th>Unchecked</th><th>Advisories</th><th>Worst</th>
               <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+              <th />
             </tr>
           </thead>
           <tbody>
             {(sliced as unknown as PackageRow[]).map((r, i) => (
               <tr key={r.purl || i}>
+                <td><NodeIdCell value={r.nodeId} /></td>
                 <td><StatusChip status={packageStatus(r)} /></td>
                 <td>{r.name ? <Mono>{r.name}</Mono> : <Truncated text={r.purl} max={200} />}</td>
                 <td><VersionCell version={r.version} /></td>
@@ -585,6 +602,7 @@ export const SupplyChainScaTable = memo(function SupplyChainScaTable({ projectId
                     : <span className={rowStyles.nullCell}>-</span>}
                 </td>
                 <td><UpdatedAtCell value={r.updatedAt} /></td>
+                <td><MuteNodeButton name={r.name || r.purl} graphId={r.nodeId} label="Package" /></td>
               </tr>
             ))}
           </tbody>
@@ -593,15 +611,18 @@ export const SupplyChainScaTable = memo(function SupplyChainScaTable({ projectId
         <table className={rowStyles.table}>
           <thead>
             <tr>
+              <NodeIdTh />
               <th>Advisory</th><th>Sev</th><th>CVSS</th><th>Package</th>
               <th>Version</th><th>Eco</th><th>Origin</th><th>Anchor</th>
               <th>Title</th><th>Description</th>
               <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+              <th />
             </tr>
           </thead>
           <tbody>
             {(sliced as unknown as AdvisoryRow[]).map((r, i) => (
               <tr key={`${r.advisoryId}-${r.purl}-${i}`}>
+                <td><NodeIdCell value={r.nodeId} /></td>
                 <td><Mono>{r.advisoryId}</Mono></td>
                 <td><SeverityBadge severity={normalizeSeverity(r.severity)} /></td>
                 <td>{r.cvss ? <Truncated text={r.cvss} max={200} /> : <span className={rowStyles.nullCell}>-</span>}</td>
@@ -613,6 +634,7 @@ export const SupplyChainScaTable = memo(function SupplyChainScaTable({ projectId
                 <td><Truncated text={r.title} max={240} /></td>
                 <td><Truncated text={r.description} max={280} /></td>
                 <td><UpdatedAtCell value={r.updatedAt} /></td>
+                <td><MuteNodeButton name={r.advisoryId} graphId={r.nodeId} nodeId={r.advisoryId} label="Vulnerability" /></td>
               </tr>
             ))}
           </tbody>

@@ -80,7 +80,8 @@ def find_disallowed_procedure(query: str) -> Optional[str]:
     """Return the name of the first CALLed procedure that is not allowlisted.
 
     Only code positions are inspected, so a procedure name appearing inside a
-    string literal is not a false positive.
+    string literal is not a false positive. This gates the `CALL <proc>` form;
+    `find_disallowed_call` is the broader gate that also covers FUNCTION calls.
     """
     is_code, _ = code_positions(query)
     for m in _CALL_RE.finditer(query):
@@ -95,6 +96,112 @@ def find_disallowed_procedure(query: str) -> Optional[str]:
         if name.lower() not in _ALLOWED_PROCEDURES:
             return name
     return None
+
+
+#: Built-in FUNCTION namespaces a legitimate read may call. `_ALLOWED_PROCEDURES`
+#: covers the fixed schema/introspection PROCEDURES; these are the namespaced
+#: functions (temporal, spatial, vector similarity) that appear in real queries.
+#: Everything else namespaced-and-called is refused - notably `apoc.*`, whose
+#: FUNCTION forms (`apoc.cypher.runFirstColumn*`, `apoc.load.*`) run unscoped
+#: Cypher or fetch URLs and are callable ANYWHERE an expression is, never after
+#: CALL, so `find_disallowed_procedure` alone never saw them.
+_SAFE_CALL_NAMESPACES = frozenset({
+    "point", "duration", "date", "time", "datetime", "localtime",
+    "localdatetime", "vector",
+})
+
+#: A namespaced call: a dotted identifier chain immediately followed by `(`.
+#: Matched against `_normalise_calls` output so backticks, whitespace and
+#: comments between the parts cannot hide the name.
+_NAMESPACED_CALL_RE = re.compile(r'([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)\s*\(')
+
+
+def _normalise_calls(cypher: str) -> str:
+    """A view of the query for call detection: comments removed, string literals
+    blanked, backtick-quoted identifiers unwrapped, and whitespace around `.`
+    removed. This defeats `` `apoc`.`cypher`.`run` ``, `apoc . cypher . run` and
+    `apoc/**/.cypher.run`, which resolve to the same call but read differently in
+    the raw text.
+    """
+    out: List[str] = []
+    n = len(cypher)
+    i = 0
+    while i < n:
+        ch = cypher[i]
+        if ch == '/' and i + 1 < n and cypher[i + 1] == '/':
+            nl = cypher.find('\n', i)
+            i = n if nl == -1 else nl + 1
+            out.append(' ')
+            continue
+        if ch == '/' and i + 1 < n and cypher[i + 1] == '*':
+            close = cypher.find('*/', i + 2)
+            i = n if close == -1 else close + 2
+            out.append(' ')
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            i += 1
+            while i < n:
+                if cypher[i] == '\\':
+                    i += 2
+                    continue
+                if cypher[i] == quote:
+                    i += 1
+                    break
+                i += 1
+            out.append(' ')  # a string literal is data, never a call
+            continue
+        if ch == '`':
+            close = cypher.find('`', i + 1)
+            close = n if close == -1 else close
+            out.append(cypher[i + 1:close])  # unwrap: the identifier itself
+            i = close + 1
+            continue
+        out.append(ch)
+        i += 1
+    return re.sub(r'\s*\.\s*', '.', ''.join(out))
+
+
+def find_disallowed_call(cypher: str) -> Optional[str]:
+    """Return the first namespaced procedure OR function call that is not
+    allowlisted, or None.
+
+    `find_disallowed_procedure` only gates `CALL <proc>`. APOC exposes the same
+    danger as FUNCTIONS, which need no CALL, so this gates every namespaced call
+    by the same positive allowlist, on a normalised view of the query.
+    """
+    for m in _NAMESPACED_CALL_RE.finditer(_normalise_calls(cypher)):
+        name = m.group(1)
+        root = name.split('.', 1)[0].lower()
+        if name.lower() in _ALLOWED_PROCEDURES or root in _SAFE_CALL_NAMESPACES:
+            continue
+        return name
+    return None
+
+
+#: A relationship carrying `*` (variable length), or a quantifier applied to a
+#: path/relationship group (`{n,m}`). Matched against a code-only projection.
+_VAR_LENGTH_REL_RE = re.compile(r'\[[^\[\]]*\*[^\[\]]*\]')
+_PATH_QUANTIFIER_RE = re.compile(r'[)\]]\s*(?:<?-+>?)?\s*\{\s*\d')
+
+
+def has_variable_length_path(cypher: str) -> bool:
+    """True when the query uses a variable-length relationship or a quantified
+    path pattern.
+
+    Both traverse nodes that are never written as `()` patterns, so
+    `inject_tenant_filter` cannot scope them and `find_unscoped_node_pattern`
+    cannot see them: a `[*]` hop from an exempt reference node (or between two of
+    the caller's own nodes) reaches other tenants' nodes. Refused rather than
+    run. Only code positions count, so the same characters inside a string
+    literal or comment are ignored.
+    """
+    is_code, _ = code_positions(cypher)
+    code_only = ''.join(c if is_code[i] else ' ' for i, c in enumerate(cypher))
+    return bool(
+        _VAR_LENGTH_REL_RE.search(code_only) or _PATH_QUANTIFIER_RE.search(code_only)
+    )
+
 
 TENANT_PARAMS = {"tenant_user_id", "tenant_project_id"}
 TENANT_PROPS = "user_id: $tenant_user_id, project_id: $tenant_project_id"
@@ -685,6 +792,27 @@ def scope_query(cypher: str, user_id: str, project_id: str) -> str:
             f"Query rejected: the procedure '{bad_proc}' is not permitted. Only "
             f"MATCH/RETURN over labelled node patterns can be proven scoped to "
             f"one project; a procedure that takes a query as an argument cannot."
+        )
+
+    # The same danger in FUNCTION form: `apoc.cypher.runFirstColumn*` and
+    # `apoc.load.*` are callable anywhere an expression is, with no CALL, so the
+    # procedure gate above never sees them.
+    bad_call = find_disallowed_call(cypher)
+    if bad_call:
+        raise TenantScopeError(
+            f"Query rejected: the function '{bad_call}' is not permitted. A "
+            f"function that takes a query as an argument, or fetches a URL, "
+            f"carries its work past tenant scoping."
+        )
+
+    # A variable-length or quantified path traverses nodes that are never written
+    # as `()` patterns, so they cannot be scoped: `(:CVE)-[*2]-(:CVE)` walks from
+    # the exempt reference nodes straight into other projects' data.
+    if has_variable_length_path(cypher):
+        raise TenantScopeError(
+            "Query rejected: variable-length and quantified path patterns "
+            "(`[*]`, `{n,m}`) traverse nodes that cannot be scoped to this "
+            "project. Use fixed-length hops: one explicit relationship per hop."
         )
 
     filtered = inject_tenant_filter(cypher, user_id, project_id)

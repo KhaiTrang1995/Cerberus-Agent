@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import type { RedZoneTableResponse, RedZoneTableSlug } from './types'
+import { useMuteNodeContext } from '../MuteNode'
 
 export function useRedZoneTable<T>(slug: RedZoneTableSlug, projectId: string | null) {
   const [data, setData] = useState<RedZoneTableResponse<T> | null>(null)
@@ -30,9 +31,12 @@ export function useRedZoneTable<T>(slug: RedZoneTableSlug, projectId: string | n
     }
   }, [slug, projectId])
 
+  // Every route filters muted nodes out, so refetching on a mute (from this
+  // table, another one or the node drawer) is what drops the muted row.
+  const { epoch: muteEpoch } = useMuteNodeContext()
   useEffect(() => {
     fetchData()
-  }, [fetchData])
+  }, [fetchData, muteEpoch])
 
   return { data, isLoading, error, refetch: fetchData }
 }

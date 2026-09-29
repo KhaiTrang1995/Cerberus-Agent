@@ -67,4 +67,11 @@ describe('the export', () => {
     expect(csv).toContain(`'@evil`)
     expect(csv).not.toMatch(/,=HYPERLINK/)
   })
+
+  test('the Node ID leads, as it does in the table, and is blank when the agent sent none', () => {
+    expect(EXPORT_COLUMNS[0]).toBe('node_id')
+    const [known, unknown] = exportRows([row({ node_id: '812' }), row({ id: 'v2' })], 'u1')
+    expect(known).toMatchObject({ node_id: '812', id: 'v1' })
+    expect(unknown.node_id).toBe('')
+  })
 })

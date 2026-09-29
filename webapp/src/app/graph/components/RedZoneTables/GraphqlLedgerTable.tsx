@@ -11,6 +11,8 @@ import {
   UpdatedAtTh,
   useUpdatedAtSort,
 } from './updatedAt'
+import { NODE_ID_COLUMN, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton } from '../MuteNode'
 import {
   Mono,
   Truncated,
@@ -23,6 +25,7 @@ import {
 import rowStyles from './RedZoneTableRow.module.css'
 
 interface GraphqlRow {
+  nodeId: string | null
   endpointUrl: string | null
   path: string | null
   baseUrl: string | null
@@ -52,6 +55,7 @@ const PAGE_SIZE = 100
 /** Module-level: the filter profiles are keyed off these, and a fresh array
  *  literal per render would re-profile every row. */
 const COLUMNS: RedZoneFilterColumn[] = [
+  NODE_ID_COLUMN,
   { key: 'endpointUrl', header: 'Endpoint' },
   { key: 'subdomain', header: 'Subdomain' },
   { key: 'introspection', header: 'Introspection' },
@@ -120,6 +124,7 @@ export const GraphqlLedgerTable = memo(function GraphqlLedgerTable({ projectId }
       <table className={rowStyles.table}>
         <thead>
           <tr>
+            <NodeIdTh />
             <th>Endpoint</th>
             <th>Introspect</th>
             <th>GraphiQL</th>
@@ -133,11 +138,13 @@ export const GraphqlLedgerTable = memo(function GraphqlLedgerTable({ projectId }
             <th>Vulns</th>
             <th>Sensitive fields</th>
             <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+            <th />
           </tr>
         </thead>
         <tbody>
           {sliced.map((r, i) => (
             <tr key={`${r.endpointUrl}-${i}`}>
+              <td><NodeIdCell value={r.nodeId} /></td>
               <td><UrlCell url={r.endpointUrl || r.path} max={280} /></td>
               <td><BoolChip value={r.introspection} /></td>
               <td><BoolChip value={r.graphiqlExposed} /></td>
@@ -151,6 +158,7 @@ export const GraphqlLedgerTable = memo(function GraphqlLedgerTable({ projectId }
               <td><ListCell items={r.vulnTypes} max={3} /></td>
               <td><Truncated text={r.sensitiveFieldsSample} max={260} /></td>
               <td><UpdatedAtCell value={r.updatedAt} /></td>
+              <td><MuteNodeButton name={r.endpointUrl || r.path || ''} graphId={r.nodeId} label="Endpoint" /></td>
             </tr>
           ))}
         </tbody>

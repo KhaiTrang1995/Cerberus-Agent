@@ -206,7 +206,7 @@ class TestScopingDoesNotBreakValidQueries(unittest.TestCase):
         "MATCH (p:Package) WHERE EXISTS { MATCH (p)-[:FLAGGED_AS]->(m:MalPackageFinding) } RETURN p",
         "MATCH (p:Package) WHERE COUNT { (p)-[:HAS_VULNERABILITY]->(v:Vulnerability) } > 2 RETURN p",
         "MATCH (p:Package) RETURN toLower(p.name) AS n, substring(p.version, 0, 3) AS v",
-        "MATCH path = (a:Domain)-[:HAS_SUBDOMAIN*1..3]->(b:Subdomain) RETURN path LIMIT 5",
+        "MATCH path = (a:Domain)-[:HAS_SUBDOMAIN]->(b:Subdomain)-[:HAS_SUBDOMAIN]->(c:Subdomain) RETURN path LIMIT 5",
         "MATCH (p:Package) WITH p, count(*) AS c WHERE c > 1 RETURN p.name, c",
         "MATCH (p:Package) RETURN (p) AS node",
     ]

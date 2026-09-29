@@ -31,7 +31,8 @@ export async function GET(request: NextRequest) {
        WITH p, ep, bu, sd, collect(DISTINCT v) AS vulns
        WHERE p.is_injectable = true OR size(vulns) > 0
        UNWIND (CASE WHEN size(vulns) = 0 THEN [null] ELSE vulns END) AS v
-       RETURN p.name                                  AS paramName,
+       RETURN toString(id(coalesce(v, p)))            AS nodeId,
+              p.name                                  AS paramName,
               p.position                              AS position,
               p.endpoint_path                         AS endpointPath,
               p.baseurl                               AS paramBaseUrl,
@@ -65,6 +66,7 @@ export async function GET(request: NextRequest) {
     )
 
     const rows = result.records.map(r => ({
+      nodeId: (r.get('nodeId') as string | null) ?? null,
       paramName: (r.get('paramName') as string) || '',
       position: (r.get('position') as string) || 'query',
       endpointPath: r.get('endpointPath') as string | null,

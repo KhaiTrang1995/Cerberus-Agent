@@ -57,6 +57,16 @@ export interface CapturedSnapshot extends SnapshotPayload {
   linkCount: number
   /** Per-primary-label node counts, for the Recon Delta scorecard. */
   summary: Record<string, number>
+  /**
+   * Each captured node's Neo4j internal id (`id(n)`), by `_exportId`: the Node
+   * ID the Recon Delta shows for a row on the live side.
+   *
+   * Kept OFF the nodes on purpose, so `serializeSnapshot` (nodes and
+   * relationships only) never stores it. An internal id is only true of the
+   * graph it was read from; after a rescan or an activation the number can
+   * belong to a different node, so a stored one would point at the wrong thing.
+   */
+  liveNodeIds: Map<string, string>
 }
 
 /** Hard ceiling on the stored (gzipped) snapshot. Refuse rather than bloat Postgres. */
@@ -152,17 +162,21 @@ export async function captureGraphSnapshot(projectId: string): Promise<CapturedS
       const nodesResult = await session.run(
         `MATCH (n) WHERE n.project_id = $pid
            AND NONE(l IN labels(n) WHERE l IN $sessionLabels)
-         RETURN labels(n) as labels, properties(n) as props, elementId(n) as eid`,
+         RETURN labels(n) as labels, properties(n) as props, elementId(n) as eid,
+                toString(id(n)) as nid`,
         { pid: projectId, sessionLabels: [...SESSION_LABELS] }
       )
 
       const elementIdToExportId = new Map<string, string>()
+      const liveNodeIds = new Map<string, string>()
       const summary: Record<string, number> = {}
 
       const nodes: SnapshotNode[] = nodesResult.records.map(record => {
         const eid = record.get('eid') as string
         const exportId = randomUUID()
         elementIdToExportId.set(eid, exportId)
+        const nid = record.get('nid')
+        if (typeof nid === 'string') liveNodeIds.set(exportId, nid)
         const labels = record.get('labels') as string[]
         const primary = functionalLabel(labels)
         summary[primary] = (summary[primary] || 0) + 1
@@ -199,6 +213,7 @@ export async function captureGraphSnapshot(projectId: string): Promise<CapturedS
         nodeCount: nodes.length,
         linkCount: relationships.length,
         summary,
+        liveNodeIds,
       }
     } finally {
       await session.close()

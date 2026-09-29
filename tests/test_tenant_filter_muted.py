@@ -83,7 +83,10 @@ class TestEveryPatternShapeExcludesMuted(unittest.TestCase):
         "second pattern unlabelled": "MATCH (v:Vulnerability) OPTIONAL MATCH (n) RETURN v, n",
         "label union": "MATCH (n:Secret|MultiscannerFinding) RETURN n",
         "negated label": "MATCH (n:!Package) RETURN n",
-        "path pattern": "MATCH (d:Domain)-[:HAS_VULNERABILITY*1..2]->(v:Vulnerability) RETURN v",
+        # Fixed-length: a `*1..2` hop is refused outright now (its intermediate
+        # nodes have no pattern to carry the mute exclusion), see
+        # test_tenant_filter_function_and_path_bypass.py.
+        "path pattern": "MATCH (d:Domain)-[:HAS_SUBDOMAIN]->(s:Subdomain)-[:HAS_VULNERABILITY]->(v:Vulnerability) RETURN v",
         "nested predicate": (
             "MATCH (p:Package) WHERE EXISTS { MATCH (p)-[:FLAGGED_AS]->(m:MalPackageFinding) } "
             "RETURN p"

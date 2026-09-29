@@ -81,4 +81,18 @@ describe('corroborateAttackFindings', () => {
     expect(out[0].sources).toEqual(['promptfoo'])
     expect(out[0].payloadClasses.sort()).toEqual(['promptfoo-beavertails', 'promptfoo-harmbench'])
   })
+
+  test('nodeId is the representative (worst-ASR) row, matching the evidence shown', () => {
+    // Input order puts the weaker row first, so a "first row wins" merge fails.
+    const out = corroborateAttackFindings([
+      row({ source: 'garak', asr: 0.2, evidence: 'weak', nodeId: '11' }),
+      row({ source: 'promptfoo', asr: 0.8, evidence: 'strong', nodeId: '42' }),
+    ])
+    expect(out[0].evidence).toBe('strong')
+    expect(out[0].nodeId).toBe('42')
+  })
+
+  test('a row without a nodeId yields null, not undefined', () => {
+    expect(corroborateAttackFindings([row({})])[0].nodeId).toBeNull()
+  })
 })

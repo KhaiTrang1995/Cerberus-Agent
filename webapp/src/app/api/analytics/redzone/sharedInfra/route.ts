@@ -33,7 +33,8 @@ export async function GET(request: NextRequest) {
        WITH cert, baseurlsClean,
             reduce(acc = [], x IN allHostsRaw | CASE WHEN x IN acc THEN acc ELSE acc + [x] END) AS allHosts
        WHERE size(allHosts) >= 2
-       RETURN 'certificate'                  AS clusterType,
+       RETURN toString(id(cert))             AS nodeId,
+              'certificate'                  AS clusterType,
               coalesce(cert.cert_key, toString(id(cert))) AS clusterKey,
               cert.subject_cn                AS certCn,
               cert.issuer                    AS certIssuer,
@@ -70,7 +71,10 @@ export async function GET(request: NextRequest) {
             [x IN ipAddrs WHERE x IS NOT NULL]   AS ipsClean,
             [x IN subs WHERE x IS NOT NULL]      AS subsClean
        WHERE size(subsClean) >= 2
-       RETURN 'asn'                           AS clusterType,
+       // An ASN is a property shared by many IP nodes, not a node of its own,
+       // so the cluster has no single node to point at.
+       RETURN null                            AS nodeId,
+              'asn'                           AS clusterType,
               asnKey                          AS clusterKey,
               null                            AS certCn,
               null                            AS certIssuer,
@@ -96,7 +100,8 @@ export async function GET(request: NextRequest) {
        WITH ip, collect(DISTINCT sd.name) AS subs
        WITH ip, [x IN subs WHERE x IS NOT NULL] AS subsClean
        WHERE size(subsClean) >= 2
-       RETURN 'ip'                            AS clusterType,
+       RETURN toString(id(ip))                AS nodeId,
+              'ip'                            AS clusterType,
               ip.address                      AS clusterKey,
               null                            AS certCn,
               null                            AS certIssuer,
@@ -116,6 +121,7 @@ export async function GET(request: NextRequest) {
     )
 
     const mapRow = (r: any) => ({
+      nodeId: (r.get('nodeId') as string | null) ?? null,
       clusterType: r.get('clusterType') as string,
       clusterKey: (r.get('clusterKey') as string) || '',
       certCn: r.get('certCn') as string | null,

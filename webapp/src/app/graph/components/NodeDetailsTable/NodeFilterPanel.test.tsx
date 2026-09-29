@@ -81,7 +81,8 @@ function bodyRowNames(container: HTMLElement): string[] {
   const rows = [...container.querySelectorAll('tbody tr')]
   return rows
     .filter(r => !r.className.includes('noMatchRow'))
-    .map(r => r.querySelector('td:nth-child(2)')?.textContent?.trim() ?? '')
+    // Columns are [expand, Node ID, Name, ...].
+    .map(r => r.querySelector('td:nth-child(3)')?.textContent?.trim() ?? '')
     .filter(Boolean)
 }
 

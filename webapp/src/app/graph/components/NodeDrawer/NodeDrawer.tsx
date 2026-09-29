@@ -1,15 +1,36 @@
 'use client'
 
 import { useState } from 'react'
-import { AlertTriangle, ArrowLeft } from 'lucide-react'
-import { Drawer, ExternalLink } from '@/components/ui'
+import { AlertTriangle, ArrowLeft, Bot, Check, Copy, Trash2 } from 'lucide-react'
+import { Drawer, ExternalLink, useToast } from '@/components/ui'
 import { trufflehogDisplayFields } from '@/lib/trufflehogDisplay'
-import { GraphNode } from '../../types'
-import { badgeColors, getNodeColor, getNodeUrl } from '../../utils'
+import { copyText } from '@/lib/copyText'
+import { GraphData, GraphNode } from '../../types'
+import { badgeColors, buildNodeContext, getNodeColor, getNodeUrl, nodeLabel } from '../../utils'
 import { renderPropertyValue } from '../../utils/renderPropertyValue'
 import { ClusterNodeList } from './ClusterNodeList'
+import { NodeAgentModal } from './NodeAgentModal'
+import { GraphNodeMuteButton, useMuteNodeContext } from '../MuteNode'
 import styles from './NodeDrawer.module.css'
 import clusterStyles from './ClusterNodeList.module.css'
+
+// The shared Drawer's <h2> is the box that clips the title with an ellipsis.
+// Show the full name as a tooltip only when it is actually clipped, checked at
+// hover time so it stays right after a resize. A native title is used because
+// the shared Tooltip wraps its trigger in a block that would defeat the ellipsis.
+function DrawerTitle({ text }: { text: string }) {
+  return (
+    <span
+      className={styles.drawerTitleText}
+      onMouseEnter={(e) => {
+        const box = e.currentTarget.parentElement
+        e.currentTarget.title = box && box.scrollWidth > box.clientWidth ? text : ''
+      }}
+    >
+      {text}
+    </span>
+  )
+}
 
 interface NodeDrawerProps {
   node: GraphNode | null
@@ -19,6 +40,13 @@ interface NodeDrawerProps {
   expandedChild?: GraphNode | null
   onExpandChild?: (child: GraphNode) => void
   onCollapseChild?: () => void
+  // Full (unfiltered) graph, used to describe the node's relationships when
+  // building the LLM context. Omitted when unavailable (relationships elided).
+  graphData?: GraphData | null
+  projectName?: string
+  targetDomain?: string
+  // Start a fresh agent session seeded with the node context + the request.
+  onStartAgentSession?: (request: string, context: string, nodeLabel: string) => void
 }
 
 export function NodeDrawer({
@@ -29,9 +57,17 @@ export function NodeDrawer({
   expandedChild,
   onExpandChild,
   onCollapseChild,
+  graphData,
+  projectName,
+  targetDomain,
+  onStartAgentSession,
 }: NodeDrawerProps) {
+  const toast = useToast()
   const [isDeleting, setIsDeleting] = useState(false)
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false)
+  const [copied, setCopied] = useState(false)
+  const [showAgentModal, setShowAgentModal] = useState(false)
+  const { readOnly: muteReadOnly } = useMuteNodeContext()
 
   const handleDeleteClick = () => {
     setShowDeleteConfirm(true)
@@ -91,13 +127,33 @@ export function NodeDrawer({
         : undefined
     : undefined
 
+  const handleCopyContext = async () => {
+    if (!displayNode) return
+    const context = buildNodeContext(displayNode, graphData, { projectName, targetDomain })
+    try {
+      await copyText(context)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+      toast.success('Node context copied for an external agent')
+    } catch {
+      toast.error('Could not access the clipboard')
+    }
+  }
+
+  const handleAgentSubmit = (request: string) => {
+    if (!displayNode) return
+    const context = buildNodeContext(displayNode, graphData, { projectName, targetDomain })
+    setShowAgentModal(false)
+    onStartAgentSession?.(request, context, nodeLabel(displayNode))
+  }
+
   return (
     <Drawer
       isOpen={isOpen}
       onClose={onClose}
       position="left"
       mode="overlay"
-      title={drawerTitle}
+      title={drawerTitle ? <DrawerTitle text={drawerTitle} /> : undefined}
     >
       {showList && listCluster && (
         <>
@@ -132,16 +188,39 @@ export function NodeDrawer({
           <div className={styles.section}>
             <div className={styles.sectionHeader}>
               <h3 className={styles.sectionTitleBasicInfo}>Basic Info</h3>
-              {displayNode.type !== 'Domain' && displayNode.type !== 'Subdomain' && onDeleteNode && (
+              <div className={styles.basicInfoActions}>
                 <button
-                  className={styles.deleteButton}
-                  onClick={handleDeleteClick}
-                  disabled={isDeleting}
-                  title="Delete node"
+                  className={styles.iconBtn}
+                  onClick={handleCopyContext}
+                  title="Copy LLM-ready context (node + relationships) for an external agent"
+                  aria-label="Copy node context"
                 >
-                  {isDeleting ? '...' : '\uD83D\uDDD1'}
+                  {copied ? <Check size={14} /> : <Copy size={14} />}
                 </button>
-              )}
+                {onStartAgentSession && (
+                  <button
+                    className={`${styles.iconBtn} ${styles.iconBtnPrimary}`}
+                    onClick={() => setShowAgentModal(true)}
+                    title="Start a new agent session from this node"
+                    aria-label="Ask agent about this node"
+                  >
+                    <Bot size={14} />
+                  </button>
+                )}
+                {/* Hidden on a saved version, like delete: a snapshot is read-only. */}
+                {!muteReadOnly && <GraphNodeMuteButton node={displayNode} onMuted={onClose} />}
+                {displayNode.type !== 'Domain' && displayNode.type !== 'Subdomain' && onDeleteNode && (
+                  <button
+                    className={`${styles.iconBtn} ${styles.iconBtnDanger}`}
+                    onClick={handleDeleteClick}
+                    disabled={isDeleting}
+                    title="Delete node"
+                    aria-label="Delete node"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                )}
+              </div>
             </div>
             <div className={styles.propertyRow}>
               <span className={styles.propertyKey}>Type</span>
@@ -241,6 +320,15 @@ export function NodeDrawer({
             </div>
           )}
         </>
+      )}
+
+      {displayNode && (
+        <NodeAgentModal
+          isOpen={showAgentModal}
+          nodeLabel={nodeLabel(displayNode)}
+          onClose={() => setShowAgentModal(false)}
+          onSubmit={handleAgentSubmit}
+        />
       )}
     </Drawer>
   )

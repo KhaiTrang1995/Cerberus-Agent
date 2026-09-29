@@ -134,7 +134,8 @@ export async function GET(request: NextRequest) {
       `MATCH (f:ChainFinding {project_id: $pid})
        OPTIONAL MATCH (f)-[:FOUND_ON]->(target)
        WITH f, COALESCE(target.address, target.name) AS targetHost
-       RETURN f.title AS title, f.severity AS severity, f.finding_type AS findingType,
+       RETURN toString(id(f)) AS nodeId,
+              f.title AS title, f.severity AS severity, f.finding_type AS findingType,
               f.evidence AS evidence, f.confidence AS confidence, f.phase AS phase,
               targetHost,
               // ChainFinding gained updated_at with the universal-stamp
@@ -145,6 +146,7 @@ export async function GET(request: NextRequest) {
       { pid: projectId }
     )
     const topFindings = topResult.records.map(r => ({
+      nodeId: (r.get('nodeId') as string | null) ?? null,
       title: (r.get('title') as string) || 'Untitled',
       severity: (r.get('severity') as string) || 'unknown',
       findingType: (r.get('findingType') as string) || 'unknown',

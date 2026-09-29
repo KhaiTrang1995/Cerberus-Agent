@@ -11,8 +11,8 @@
  * node-filter rule can mute thousands of findings, and this board used to load
  * every muted row on each visit.
  *
- * Mute is deliberately a two-step action with a confirm: it changes what the AI
- * agent can see for the whole project, so it is not a click to make by accident.
+ * The mute itself is `useMuteNode`, shared with the node drawer and the graph
+ * tables so every Mute button behaves the same.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -22,10 +22,15 @@ import { useProject } from '@/providers/ProjectProvider'
 import { useCypherFixTriageWS } from '@/hooks/useCypherFixTriageWS'
 import { TriageProgress, PHASE_LABELS } from '../CypherFixTab/TriageProgress/TriageProgress'
 import { TriageRunButton } from '@/components/triage/TriageRunButton'
+import { MuteButton, useMuteNode } from '../MuteNode'
+import { NodeIdCell, NodeIdTh } from '../RedZoneTables/nodeId'
 import styles from './TriageTable.module.css'
 
 export interface TriageFinding {
   id: string
+  /** Neo4j's internal id, for the Node ID column only. `id` stays the key every
+   *  verdict and mute is written against. */
+  node_id?: string | null
   label: string
   name: string
   severity: string
@@ -253,7 +258,7 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
   const startedHereRef = useRef(false)
 
   const { userId } = useProject()
-  const { alertError, dangerConfirm } = useAlertModal()
+  const { alertError } = useAlertModal()
   const toast = useToast()
 
   const load = useCallback(async () => {
@@ -344,54 +349,18 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
     if (triage.status === 'completed') void load()
   }, [triage, load])
 
+  const { mute: muteNode, mutingKey } = useMuteNode(projectId, onViewMuted)
   const mute = useCallback(
-    async (finding: TriageFinding) => {
-      if (!projectId) return
-      const ok = await dangerConfirm(
-        `Mute "${finding.name || finding.id}"?\n\n` +
-          'It will be hidden from the graph, from reports, and from the AI agent, ' +
-          'which will no longer be able to see or reason about it. You can restore ' +
-          'it from Muted Nodes (in the All Nodes menu) at any time.',
-        'Mute finding',
-        { confirmLabel: 'Mute' },
-      )
-      if (!ok) return
-
-      setBusyId(finding.id)
-      try {
-        const res = await fetch('/api/triage/mute', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ projectId, nodeId: finding.id }),
-        })
-        const body = await res.json().catch(() => ({}))
-        if (res.status === 409) {
-          // A rescan or a version activation replaced the node this tab is
-          // holding an id for. Silently doing nothing looked like success.
-          await load()
-          throw new Error(
-            'This finding changed while the page was open, so it was not muted. ' +
-            'The list has been reloaded; try again.'
-          )
-        }
-        if (!res.ok || !body.muted) {
-          throw new Error(body.error || 'The finding could not be muted.')
-        }
+    (finding: TriageFinding) => muteNode(
+      { name: finding.name || finding.id, nodeId: finding.id },
+      {
         // Drop it locally rather than refetching: the graph write already
         // succeeded, and a round trip here just makes it feel slow.
-        setFindings(prev => prev.filter(f => f.id !== finding.id))
-        toast.addToast({
-          type: 'success',
-          message: 'Finding muted. It is now hidden from the agent.',
-          ...(onViewMuted ? { action: { label: 'View muted', onClick: onViewMuted } } : {}),
-        })
-      } catch (e) {
-        await alertError(e instanceof Error ? e.message : 'Mute failed', 'Mute finding')
-      } finally {
-        setBusyId(null)
-      }
-    },
-    [projectId, dangerConfirm, alertError, toast, load, onViewMuted],
+        onMuted: () => setFindings(prev => prev.filter(f => f.id !== finding.id)),
+        onStale: load,
+      },
+    ),
+    [muteNode, load],
   )
 
   /**
@@ -605,6 +574,7 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
                 <table className={styles.table}>
                   <thead>
                     <tr>
+                      <NodeIdTh />
                       <th>#</th>
                       <th>Finding</th>
                       <th>Type</th>
@@ -636,6 +606,7 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
 
                       return (
                         <tr key={f.id}>
+                          <td><NodeIdCell value={f.node_id} /></td>
                           <td className={styles.rank}>{i + 1}</td>
                           <td className={styles.name}>
                             {f.name || f.id}
@@ -718,7 +689,7 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
                           <td className={styles.rowActions}>
                             <button
                               className={styles.verdictButton}
-                              disabled={busyId === f.id}
+                              disabled={busyId === f.id || mutingKey === f.id}
                               onClick={() => void setVerdict(f, 'confirmed')}
                               title="Mark this real. Triage will not change it again."
                             >
@@ -726,23 +697,16 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
                             </button>
                             <button
                               className={styles.verdictButton}
-                              disabled={busyId === f.id}
+                              disabled={busyId === f.id || mutingKey === f.id}
                               onClick={() => void setVerdict(f, 'likely_noise')}
                               title="Mark this a false positive. It is not muted."
                             >
                               <X size={13} /> False
                             </button>
-                            <button
-                              className={styles.muteButton}
-                              disabled={busyId === f.id}
+                            <MuteButton
+                              busy={busyId === f.id || mutingKey === f.id}
                               onClick={() => void mute(f)}
-                              title="Hide this finding from the graph, reports and the AI agent"
-                            >
-                              {busyId === f.id
-                                ? <Loader2 className={styles.spin} size={13} />
-                                : <EyeOff size={13} />}
-                              Mute
-                            </button>
+                            />
                           </td>
                         </tr>
                       )

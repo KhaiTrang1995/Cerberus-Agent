@@ -61,11 +61,11 @@ function makeWrapper() {
 }
 
 /** Mirrors how the page builds rows, so the accessor is tested against real ones. */
-function Harness() {
-  const rows = useTableData(DATA)
+function Harness({ data = DATA }: { data?: GraphData }) {
+  const rows = useTableData(data)
   return (
     <DataTable
-      data={DATA}
+      data={data}
       isLoading={false}
       error={null}
       rows={rows}
@@ -76,13 +76,16 @@ function Harness() {
   )
 }
 
-function renderTable() {
-  return render(<Harness />, { wrapper: makeWrapper() })
+function renderTable(data?: GraphData) {
+  return render(<Harness data={data} />, { wrapper: makeWrapper() })
 }
+
+/** Columns are [expand, Node ID, Type, Name, ...]. */
+const NAME_TD = 3
 
 function names(container: HTMLElement): string[] {
   return [...container.querySelectorAll('tbody tr')]
-    .map(r => r.querySelectorAll('td')[2]?.textContent?.trim() ?? '')
+    .map(r => r.querySelectorAll('td')[NAME_TD]?.textContent?.trim() ?? '')
     .filter(Boolean)
 }
 
@@ -104,9 +107,33 @@ describe('All Nodes column filters', () => {
     installFetch()
     renderTable()
     await openFilters()
-    for (const label of ['Type', 'Name', 'Props', 'In', 'Out', 'Conns']) {
+    for (const label of ['Node ID', 'Type', 'Name', 'Props', 'In', 'Out', 'Conns']) {
       expect(screen.getByRole('button', { name: new RegExp(`^Filter by ${label}`) })).toBeTruthy()
     }
+  })
+
+  test('Node ID leads after the expand toggle and sorts numerically', async () => {
+    installFetch()
+    // Graph ids as /api/graph builds them: numeric strings. Text order would
+    // put "100" before "9".
+    const data = {
+      nodes: [
+        { id: '100', name: 'c.example.com', type: 'Domain', properties: {} },
+        { id: '9', name: 'a.example.com', type: 'Domain', properties: {} },
+        { id: '10', name: 'b.example.com', type: 'Domain', properties: {} },
+      ],
+      links: [],
+    } as unknown as GraphData
+    const { container } = renderTable(data)
+    await waitFor(() => expect(names(container)).toHaveLength(3))
+
+    const headers = [...container.querySelectorAll('thead th')].map(th => th.textContent?.trim() ?? '')
+    expect(headers.slice(0, 3)).toEqual(['', 'Node ID', 'Type'])
+
+    const nodeIds = () => [...container.querySelectorAll('tbody tr')]
+      .map(r => r.querySelectorAll('td')[1]?.querySelector('[data-node-id]')?.getAttribute('data-node-id'))
+    fireEvent.click(container.querySelectorAll('thead th')[1])
+    await waitFor(() => expect(nodeIds()).toEqual(['9', '10', '100']))
   })
 
   test('filtering by node type narrows the rows', async () => {

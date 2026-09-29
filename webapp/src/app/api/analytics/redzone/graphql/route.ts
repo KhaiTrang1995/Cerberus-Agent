@@ -27,7 +27,8 @@ export async function GET(request: NextRequest) {
        OPTIONAL MATCH (ep)-[:HAS_VULNERABILITY]->(v:Vulnerability)
          WHERE v.source IN ['graphql_scan','graphql_cop']
            AND ${notMuted('v')}
-       RETURN ep.full_url                             AS endpointUrl,
+       RETURN toString(id(ep))                        AS nodeId,
+              ep.full_url                             AS endpointUrl,
               ep.path                                 AS path,
               bu.url                                  AS baseUrl,
               sd.name                                 AS subdomain,
@@ -57,6 +58,7 @@ export async function GET(request: NextRequest) {
     )
 
     const rows = result.records.map(r => ({
+      nodeId: (r.get('nodeId') as string | null) ?? null,
       endpointUrl: r.get('endpointUrl') as string | null,
       path: r.get('path') as string | null,
       baseUrl: r.get('baseUrl') as string | null,

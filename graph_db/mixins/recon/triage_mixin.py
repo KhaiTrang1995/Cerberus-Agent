@@ -50,6 +50,17 @@ _MUTEABLE = "|".join(MUTEABLE_LABELS)
 #: node that is otherwise the same finding.
 _BY_ID = "(n.id = $node_id OR n.finding_id = $node_id)"
 
+#: Neo4j's internal id, projected for DISPLAY only: the Node ID column the
+#: tables show and the `WHERE id(n) = <id>` an external agent passes to MCP
+#: `query_graph`. It is never a key: rows stay keyed on the stored `id`
+#: property, for the reason `_BY_ID` gives. A string, so it never reaches JS as
+#: a lossy float.
+#:
+#: Read from the tail of `elementId(n)` ("4:<db-uuid>:<id>" on Neo4j 5), the
+#: same value as `id(n)`: `id()` makes 5.26 send a DEPRECATION notification,
+#: which the Python driver logs as a WARNING on every board load.
+_NODE_ID = "last(split(elementId(n), ':'))"
+
 #: The functional label of a muted node. A muted finding is dual-labelled and
 #: Neo4j does not order labels, so `labels(n)[0]` may be 'Muted' and would
 #: mis-type the row. Everything reporting "what kind of finding is this" uses
@@ -277,6 +288,7 @@ class TriageMixin:
         MATCH (n:Muted)
         WHERE n.user_id = $user_id AND n.project_id = $project_id{where}
         RETURN coalesce(n.id, n.finding_id)        AS id,
+               {_NODE_ID}                          AS node_id,
                {_FUNCTIONAL_LABEL}                 AS label,
                coalesce(n.name, n.title, n.detector_name, n.secret_type, n.type, '') AS name,
                coalesce(n.severity, '')            AS severity,
@@ -414,6 +426,7 @@ class TriageMixin:
                ELSE {SECTION_RANKED}
              END AS section
         RETURN coalesce(n.id, n.finding_id)        AS id,
+               {_NODE_ID}                          AS node_id,
                // NOT labels(n)[0]: a muted finding is dual-labelled and Neo4j
                // does not order labels, so that could return 'Muted' and
                // mis-type the row (X14).

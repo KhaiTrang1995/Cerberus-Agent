@@ -11,6 +11,8 @@ import {
   UpdatedAtTh,
   useUpdatedAtSort,
 } from './updatedAt'
+import { NODE_ID_COLUMN, NodeIdCell, NodeIdTh } from './nodeId'
+import { MuteNodeButton } from '../MuteNode'
 import {
   SeverityBadge,
   Mono,
@@ -24,6 +26,7 @@ import { normalizeSeverity } from './types'
 import rowStyles from './RedZoneTableRow.module.css'
 
 interface TakeoverRow {
+  nodeId: string | null
   id: string
   hostname: string
   parentType: string
@@ -47,6 +50,7 @@ const PAGE_SIZE = 100
 
 /** Module-level so the filter profiles are not rebuilt on every render. */
 const COLUMNS: RedZoneFilterColumn[] = [
+  NODE_ID_COLUMN,
   { key: 'hostname', header: 'Hostname' },
   { key: 'cnameTarget', header: 'CNAME Target' },
   { key: 'provider', header: 'Provider' },
@@ -124,6 +128,7 @@ export const TakeoverTable = memo(function TakeoverTable({ projectId }: Props) {
       <table className={rowStyles.table}>
         <thead>
           <tr>
+            <NodeIdTh />
             <th>Hostname</th>
             <th>CNAME Target</th>
             <th>Provider</th>
@@ -135,11 +140,13 @@ export const TakeoverTable = memo(function TakeoverTable({ projectId }: Props) {
             <th>#</th>
             <th>Evidence</th>
             <UpdatedAtTh dir={sortDir} onToggle={toggleSort} />
+            <th />
           </tr>
         </thead>
         <tbody>
           {sliced.map((r, i) => (
             <tr key={r.id || `${r.hostname}-${i}`}>
+              <td><NodeIdCell value={r.nodeId} /></td>
               <td>{r.hostname ? <HostCell host={r.hostname} /> : <Truncated text={r.hostname} max={220} />}</td>
               <td>{r.cnameTarget ? <HostCell host={r.cnameTarget} /> : <Truncated text={r.cnameTarget} max={220} />}</td>
               <td><Mono>{r.provider}</Mono></td>
@@ -151,6 +158,7 @@ export const TakeoverTable = memo(function TakeoverTable({ projectId }: Props) {
               <td><NumCell value={r.confirmationCount} /></td>
               <td><Truncated text={r.evidence} max={260} /></td>
               <td><UpdatedAtCell value={r.updatedAt} /></td>
+              <td><MuteNodeButton name={r.hostname} graphId={r.nodeId} nodeId={r.id} label="Vulnerability" /></td>
             </tr>
           ))}
         </tbody>

@@ -3166,6 +3166,22 @@ def _graph_exec_payload(records: list, truncated: bool) -> dict:
     return payload
 
 
+def _graph_exec_node_id(node) -> int | None:
+    """The node's `id(n)`: the Node ID the webapp tables and node drawer show.
+
+    Read from the tail of `element_id` ("4:<db-uuid>:<id>" on Neo4j 5) rather
+    than the driver's `Node.id`, which driver 6 deprecates and warns on for
+    every node returned. None when the id is not in that form, never a guess:
+    a wrong id would point the caller at a different node.
+    """
+    element_id = getattr(node, "element_id", None)
+    if isinstance(element_id, str):
+        tail = element_id.rsplit(":", 1)[-1]
+        if tail.isdigit():
+            return int(tail)
+    return None
+
+
 def _graph_exec_coerce(v):
     """Neo4j driver value -> JSON-serialisable primitive (mirrors redagraph)."""
     if v is None or isinstance(v, (bool, int, float, str)):
@@ -3176,7 +3192,10 @@ def _graph_exec_coerce(v):
         return {k: _graph_exec_coerce(x) for k, x in v.items()}
     labels = getattr(v, "labels", None)
     if labels is not None and hasattr(v, "items"):
+        # `nodeId` sits beside `properties`, not in it: many labels carry their
+        # own `id` property (CVE ids, finding ids) that means something else.
         return {"_kind": "node",
+                "nodeId": _graph_exec_node_id(v),
                 "labels": sorted(labels) if hasattr(labels, "__iter__") else [str(labels)],
                 "properties": {k: _graph_exec_coerce(x) for k, x in v.items()}}
     rel_type = getattr(v, "type", None)
