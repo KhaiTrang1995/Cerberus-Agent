@@ -33,7 +33,7 @@ const TOKENS = [
   },
   {
     id: 'doc-token-3', name: 'triage assistant (old)', tokenPrefix: 'rdmn_mcp_09e6d4b1',
-    scopes: ['recon:read', 'triage:read', 'triage:write'],
+    scopes: ['recon:read', 'triage:read', 'triage:write', 'triage:mute'],
     lastUsedAt: iso(-12), expiresAt: iso(30), revokedAt: iso(-10), createdAt: iso(-60),
   },
 ]
@@ -126,7 +126,7 @@ test('New token form with its permissions', async ({ page }) => {
   await page.getByRole('button', { name: 'New token' }).click()
   await page.getByLabel('Name').fill('CI nightly rescan')
   await page.getByLabel('Expires').selectOption('365')
-  for (const scope of ['recon:scan', 'recon:settings', 'triage:read']) {
+  for (const scope of ['recon:scan', 'recon:settings', 'triage:read', 'triage:mute']) {
     await page.locator('label', { hasText: scope }).locator('input[type="checkbox"]').check()
   }
   const form = page.getByRole('heading', { name: 'New access token' })
