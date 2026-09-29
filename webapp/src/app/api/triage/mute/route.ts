@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireProjectOwner, callGraphTriage } from '@/lib/triageClient'
 import { readJsonBody } from '@/lib/jsonBody'
 import { invalidateCache } from '@/app/api/graph/cache'
+import { activationBusy, activationBusyResponse } from '@/lib/activationLock'
 
 /**
  * POST /api/triage/mute - suppress one finding as noise.
@@ -19,6 +20,11 @@ import { invalidateCache } from '@/app/api/graph/cache'
  * exclude `status = 'dismissed'`. Linking the two properly needs a
  * `findingIds String[]` on Remediation plus attribution from the generator,
  * which is a schema change and is written up as a follow-up.
+ *
+ * Never overwrites: an already-muted finding is left exactly as it was (a
+ * rule's or an agent's mute keeps its attribution) and the answer carries
+ * `already: true`. Refused with 409 while a version activation holds the graph,
+ * which would otherwise swallow the mute after reporting success.
  */
 export async function POST(request: NextRequest) {
   // A plain HTML form cannot send JSON, so a cross-site page cannot drive this.
@@ -33,6 +39,7 @@ export async function POST(request: NextRequest) {
   if (!nodeId || typeof nodeId !== 'string') {
     return NextResponse.json({ error: 'nodeId is required' }, { status: 400 })
   }
+  if (await activationBusy(caller.projectId)) return activationBusyResponse()
 
   const res = await callGraphTriage('mute', caller, {
     node_id: nodeId,

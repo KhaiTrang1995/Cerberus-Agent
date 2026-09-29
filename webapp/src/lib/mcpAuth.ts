@@ -45,9 +45,14 @@ export const MCP_SCOPES = [
   // JobQueue carries no token id, and revoking a token writes only revokedAt.
   // That is a materially different grant from starting a scan now.
   'recon:queue',
-  // The only WRITE to a finding on this surface. It is durable, it suppresses
-  // future AI review of that finding, and it is not reversible from here.
+  // A verdict on a finding. It is durable and suppresses future AI review of
+  // that finding, but it only RANKS: the finding stays visible everywhere.
   'triage:write',
+  // Split from triage:write because a verdict ranks and a mute HIDES: a muted
+  // finding vanishes from every read on this surface, the graph, reports and
+  // the in-app agent. An agent misled by target text could hide a real issue,
+  // so this is opt-in, never auto-ticked, and bounded in code (see muteTools).
+  'triage:mute',
   'graph:cypher',
   // The act that binds the platform to a target. It gets its own checkbox so an
   // operator can mint a token that tunes existing engagements without being able
@@ -555,4 +560,78 @@ export function checkLlmBudget(tokenId: string): BudgetDecision {
 /** Test seam: the budget map is process-global by design. */
 export function __resetLlmBudget(): void {
   llmBudget.clear()
+}
+
+// --- per-token daily mute budget ---------------------------------------------
+//
+// The one code-level bound on how much an agent holding `triage:mute` can
+// hide. The per-call cap and the write bucket bound the RATE; this bounds the
+// TOTAL, so an injected agent looping on "mute this too" stops at a number a
+// person can review in Muted Nodes. Counted in findings, not calls: a call that
+// mutes 25 spends 25. Unmutes are not budgeted: they make findings visible.
+//
+// In-memory and per process, like the LLM budget above: a webapp restart resets
+// it. That is the documented degrade-to-allow; the audit trail is durable.
+
+const globalForMuteBudget = globalThis as unknown as { __mcpMuteBudget?: Map<string, Hits> }
+const muteBudget: Map<string, Hits> = globalForMuteBudget.__mcpMuteBudget ?? new Map()
+globalForMuteBudget.__mcpMuteBudget = muteBudget
+
+/** The daily cap, read without spending any of it. */
+export function muteBudgetLimit(): number {
+  return envInt('MCP_MUTE_DAILY_BUDGET', 200)
+}
+
+function evictMuteBudget(now: number): void {
+  if (muteBudget.size < MAX_BUDGET_ENTRIES) return
+  for (const [k, h] of muteBudget) {
+    if (now - h.firstAt >= DAY_MS) muteBudget.delete(k)
+  }
+  if (muteBudget.size >= MAX_BUDGET_ENTRIES) {
+    const oldest = [...muteBudget.entries()].sort((a, b) => a[1].firstAt - b[1].firstAt)
+    for (const [k] of oldest.slice(0, Math.floor(oldest.length / 2))) muteBudget.delete(k)
+  }
+}
+
+/**
+ * Reserve `n` mutes BEFORE the write, all or nothing.
+ *
+ * Reserved up front rather than counted afterwards so two concurrent calls
+ * cannot both pass a check against the same remaining budget. The caller
+ * refunds what was not muted (`refundMuteBudget`), and keeps the reservation
+ * when the outcome is unknown: a mute that may have landed counts.
+ */
+export function reserveMuteBudget(tokenId: string, n: number): BudgetDecision {
+  const limit = muteBudgetLimit()
+  const now = Date.now()
+  const want = Math.max(0, Math.floor(n))
+  evictMuteBudget(now)
+
+  let hit = muteBudget.get(tokenId)
+  if (!hit || now - hit.firstAt >= DAY_MS) {
+    hit = { count: 0, firstAt: now }
+    muteBudget.set(tokenId, hit)
+  }
+  const resetsAt = new Date(hit.firstAt + DAY_MS).toISOString()
+  if (hit.count + want > limit) {
+    return { allowed: false, used: hit.count, limit, resetsAt }
+  }
+  hit.count += want
+  return { allowed: true, used: hit.count, limit, resetsAt }
+}
+
+/** Give back `n` of a reservation. Never below zero, never into a new window. */
+export function refundMuteBudget(tokenId: string, n: number): BudgetDecision | null {
+  const hit = muteBudget.get(tokenId)
+  if (!hit) return null
+  const limit = muteBudgetLimit()
+  if (Date.now() - hit.firstAt < DAY_MS) {
+    hit.count = Math.max(0, hit.count - Math.max(0, Math.floor(n)))
+  }
+  return { allowed: true, used: hit.count, limit, resetsAt: new Date(hit.firstAt + DAY_MS).toISOString() }
+}
+
+/** Test seam: the budget map is process-global by design. */
+export function __resetMuteBudget(): void {
+  muteBudget.clear()
 }

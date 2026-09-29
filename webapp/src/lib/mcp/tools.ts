@@ -502,12 +502,11 @@ async function summaryCounts(ctx: McpContext, projectId: string) {
  * the counts themselves are still true, so the tool degrades by omitting an
  * explanatory field rather than by refusing to answer.
  *
- * No muted count. There is no counting query for the `Muted` label anywhere in
- * the product: `list_muted` is uncapped and returns every suppressed finding in
- * full, and Cypher cannot reach them at all. Sourcing one here would make the
- * most-called tool on the surface fetch every muted finding on every call, over
- * the one dependency with no record cap. `list_muted_findings` is where that
- * number lives.
+ * No muted count, deliberately. The agent does have one (`count_muted`, the
+ * exact total behind the muted list and `search_muted_findings`), but it is a
+ * separate round trip under the MCP graph ceiling on the most-called tool on
+ * the surface, and Cypher cannot reach muted findings at all.
+ * `list_muted_findings` and `search_muted_findings` are where that number lives.
  */
 async function staleFindingCount(ctx: McpContext, projectId: string): Promise<number | null> {
   try {

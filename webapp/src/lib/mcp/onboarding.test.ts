@@ -221,6 +221,25 @@ describe('the scope filter', () => {
     expect(withTriage).toContain('list_muted_findings')
   })
 
+  test('a pack without triage:mute never presents the mute tools as something to call', () => {
+    for (const scopes of [READ_ONLY, ['recon:read', 'triage:read', 'triage:write'] as McpScope[]]) {
+      const text = packText(scopes, 'triage')
+      expect(text, `${scopes.join('+')}`).not.toContain('### Suppress noise')
+      expect(text).not.toContain('### Restore muted findings')
+      expect(text).not.toContain('Muting has its own daily budget')
+      // Named only in the "you cannot call these" tail, with the permission it needs.
+      expect(text).toContain('`mute_findings` - needs `triage:mute`')
+    }
+  })
+
+  test('a triage:mute pack teaches the procedure and the daily budget', () => {
+    const text = packText(['recon:read', 'triage:read', 'triage:write', 'triage:mute'], 'triage')
+    expect(text).toContain('### Suppress noise')
+    expect(text).toContain('### Restore muted findings')
+    expect(text).toMatch(/Muting has its own daily budget: at most \d+ findings a day per token/)
+    expect(text).toContain('a mute or unmute outcome is unknown')
+  })
+
   test('a withdrawn tool is absent from the pack, because the pack reads tools/list', () => {
     // MCP_DISABLED_TOOLS filters at registration inside buildMcpServer, so a
     // withdrawn tool never reaches tools/list and therefore never reaches here.
@@ -568,6 +587,19 @@ describe('the inline onboarding (the MCP instructions string)', () => {
         expect(new RegExp(`\\b${t.name}\\b`).test(text), `${id} inline names ${t.name}`).toBe(false)
       }
     }
+  })
+
+  test('the durable-write sentence follows the token\'s write permissions', () => {
+    const verdictOnly = renderInlineOnboarding(tools, ['recon:read', 'triage:write'], 'triage')
+    expect(verdictOnly).toContain('The only durable write you have is a verdict of')
+    expect(verdictOnly).not.toContain('mute_findings')
+
+    const both = renderInlineOnboarding(tools, ['recon:read', 'triage:write', 'triage:mute'], 'triage')
+    expect(both).toContain('Your durable writes to a finding are a verdict of')
+    expect(both).toContain('A mute (mute_findings) hides a finding from everyone.')
+
+    const muteOnly = renderInlineOnboarding(tools, ['recon:read', 'triage:mute'], 'custom')
+    expect(muteOnly).toContain('Your durable write to a finding is a mute.')
   })
 
   test('a null profile still produces usable instructions', () => {

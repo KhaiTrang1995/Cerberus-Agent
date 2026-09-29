@@ -110,7 +110,37 @@ export const MCP_SCOPE_COPY: Record<McpScope, ScopeCopy> = {
   'triage:write': {
     label: 'Record a verdict on a finding',
     access: 'write',
-    blurb: 'Let an agent mark a finding confirmed, likely noise, or back to unreviewed, as if you had clicked it yourself. The verdict is DURABLE: it survives re-scans and stops later AI triage runs from overruling it, and the node records that it arrived over MCP. It cannot mute or unmute anything, so it is refused on a muted finding: on one a Mute Rule muted, a verdict would release the mute. Nothing on this surface can undo a verdict except another verdict.',
+    blurb: 'Let an agent mark a finding confirmed, likely noise, or back to unreviewed, as if you had clicked it yourself. The verdict is DURABLE: it survives re-scans and stops later AI triage runs from overruling it, and the node records that it arrived over MCP. A verdict only ranks a finding, it never hides one, and it is refused on a muted finding: on one a Mute Rule muted, a verdict would release the mute. Muting is a separate permission. Nothing on this surface can undo a verdict except another verdict.',
+  },
+  'triage:mute': {
+    label: 'Mute and unmute findings',
+    access: 'write',
+    blurb: 'Let an agent hide a finding as noise, or bring a muted one back, as if you had pressed Mute or Unmute yourself. A muted finding disappears from the graph, reports, the in-app agent and every other tool here, so an agent misled by target text could hide a real issue: every agent mute needs a reason, counts against a daily limit, is marked as the agent\'s in Muted Nodes, and can be undone there. It never hides a confirmed finding or one a person brought back.',
+    detail:
+      'A verdict ranks a finding; a mute HIDES it, from every read on this surface, the graph ' +
+      'views, the reports and RedAmon\'s own agent. That is why this is its own permission, never ' +
+      'ticked for you, and why it is bounded in code rather than by the tool\'s wording.\n\n' +
+      'What is refused whatever the agent asks: a finding a person or the agent CONFIRMED, one ' +
+      'carrying a proof or confirmed by an attack chain ("proven"); a finding a person brought back ' +
+      'by unmuting it ("kept visible"); and changing a mute that already exists, whoever made it. A ' +
+      'finding a Mute Rule muted is unmuted only when the agent explicitly asks for rule mutes, and ' +
+      'never while a recon scan is running; each such unmute becomes a standing exception on the Mute ' +
+      'Rules page. Anything refused because the project is busy (a version activation, a rules apply, ' +
+      'a scan) is refused cleanly, with nothing half-written.\n\n' +
+      'Every agent mute needs a reason, and one token may mute at most a set number of findings a ' +
+      'day (MCP_MUTE_DAILY_BUDGET, 200 by default). If the answer to a mute or unmute is lost in ' +
+      'transit, the agent is told the outcome is UNKNOWN and to check before retrying, never that the ' +
+      'service was unavailable.\n\n' +
+      'Pair it with Read suppressed findings: an agent cannot find the id of a muted finding, and so ' +
+      'cannot unmute one, without it. In Muted Nodes every agent mute is badged with the token that ' +
+      'made it, and the Muted by and Token filters list one token\'s mutes together so you can ' +
+      'review and unmute them in one go.',
+    learnMore: [
+      {
+        text: 'Hiding and revealing findings over MCP',
+        href: `${WIKI}/MCP-Server#mute_findings-and-unmute_findings-hiding-and-revealing-findings`,
+      },
+    ],
   },
   'graph:cypher': {
     label: 'Run raw Cypher',
@@ -227,7 +257,7 @@ export const SCOPE_GROUPS: ScopeGroup[] = [
     label: 'Change settings and findings',
     hint: 'Writes that are not scans.',
     tone: 'action',
-    scopes: ['recon:settings', 'triage:write'],
+    scopes: ['recon:settings', 'triage:write', 'triage:mute'],
   },
   {
     id: 'engagement',

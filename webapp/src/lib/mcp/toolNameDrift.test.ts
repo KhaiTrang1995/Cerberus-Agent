@@ -66,6 +66,15 @@ const AGENT_FACING = [
   'instructions.ts',
   'writeTools.ts',
   'engagementTools.ts',
+  // The tool descriptions and the result notes: server.ts carries every
+  // description an agent reads in tools/list, and profiles.ts the job-specific
+  // traps the pack renders. Both were outside the sweep while claiming "nothing
+  // here can mute".
+  'server.ts',
+  'profiles.ts',
+  'muteTools.ts',
+  'verdictTools.ts',
+  'findingTools.ts',
 ]
 
 /**
@@ -76,7 +85,7 @@ const AGENT_FACING = [
  * Python settings keys and SQL columns, and a test that cries wolf is one
  * people switch off.
  */
-const TOOL_SHAPED = /\b((?:get|list|start|stop|update|create|query|run|set|cancel|queue|compare|describe|attach|preflight|tighten|kali|graph)_[a-z][a-z0-9_]{2,})\b/g
+const TOOL_SHAPED = /\b((?:get|list|start|stop|update|create|query|run|set|cancel|queue|compare|describe|attach|preflight|tighten|kali|graph|mute|unmute|search)_[a-z][a-z0-9_]{2,})\b/g
 
 /**
  * Comments are stripped, deliberately.
@@ -117,6 +126,9 @@ const NOT_TOOLS = new Set([
   'create_only',
   // Outcome codes on an audit row, never spoken to an agent.
   'start_outcome_unknown', 'start_refused_', 'stop_failed',
+  // Error codes an agent does see, on purpose: each names the check-then-retry
+  // contract in the tool description, and none is a tool.
+  'mute_outcome_unknown', 'unmute_outcome_unknown',
   // Audit actions written without the `mcp.` prefix on their own line.
   'attach_authorization',
 ])
@@ -158,6 +170,10 @@ describe('P8: every tool named in an agent-facing string exists', () => {
       /may fall and never rise/i,
       /may grow and never shrink/i,
       /tighten[- ]only/i,
+      // Mute and unmute went from "cannot" to "can, with triage:mute".
+      /nothing (on this surface|here) can (mute|unmute)/i,
+      /no mute here/i,
+      /cannot mute or unmute/i,
     ]
     const problems: string[] = []
     for (const file of AGENT_FACING) {

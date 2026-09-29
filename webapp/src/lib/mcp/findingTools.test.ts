@@ -435,14 +435,34 @@ describe('list_muted_findings: people and filter rules', () => {
   test('people and rules are grouped and counted apart', async () => {
     agentReturns({ findings: [muted(), ruleMuted(), ruleMuted({ id: 'r2' })], total: 3 })
     const r = await listMuted(ctx(), 'p1')
-    expect(r.mutedVia).toEqual({ person: 1, rule: 2 })
+    expect(r.mutedVia).toEqual({ person: 1, rule: 2, mcp: 0 })
     expect(r.groups[0]).toMatchObject({ muted_via: 'rule', count: 2, reasons: ['Filter rule: Informational templates'] })
     expect(r.groups[1]).toMatchObject({ muted_via: 'person', count: 1 })
   })
 
   test('a rule mute is recognised by its muted_by even from an older agent', async () => {
     agentReturns({ findings: [muted({ muted_by: 'rule:secret/p81c0d' })] })
-    expect((await listMuted(ctx(), 'p1')).mutedVia).toEqual({ person: 0, rule: 1 })
+    expect((await listMuted(ctx(), 'p1')).mutedVia).toEqual({ person: 0, rule: 1, mcp: 0 })
+  })
+
+  test('an agent\'s (MCP) mute is counted apart from a person\'s, with its token', async () => {
+    // It keeps its owner's user id in muted_by, so without the channel it would
+    // read as that person's own judgement.
+    const agentMute = muted({
+      id: 'a1', muted_via: 'mcp', muted_channel: 'mcp', muted_token: 'rdmn_mcp_ab12cd34',
+    })
+    agentReturns({ findings: [muted(), agentMute], total: 2 })
+    const r = await listMuted(ctx(), 'p1', { detail: true })
+    expect(r.mutedVia).toEqual({ person: 1, rule: 0, mcp: 1 })
+    expect(r.groups.map(g => g.muted_via).sort()).toEqual(['mcp', 'person'])
+    const row = r.findings!.find(f => f.id === 'a1')!
+    expect(row).toMatchObject({ muted_via: 'mcp', mutedByToken: 'rdmn_mcp_ab12cd34' })
+    expect(r.findings!.find(f => f.id !== 'a1')).not.toHaveProperty('mutedByToken')
+  })
+
+  test('an older agent\'s row with only the channel is still an agent mute', async () => {
+    agentReturns({ findings: [muted({ muted_channel: 'mcp' })], total: 1 })
+    expect((await listMuted(ctx(), 'p1')).mutedVia).toEqual({ person: 0, rule: 0, mcp: 1 })
   })
 
   test('rows name their rule, or say it was deleted', async () => {

@@ -23,7 +23,8 @@ import { assertMcpProjectAccess } from '@/lib/mcpAuth'
 import { McpToolError } from '@/lib/mcp/errors'
 import { listMutedFindings, listTriageFindings, type TriageFinding } from '@/lib/mcp/triageGraph'
 import { enforceRate, type McpContext } from '@/lib/mcp/tools'
-import { coerceDoc, describeMutedBy, isRuleMute } from '@/lib/nodeFilters/model'
+import { describeMutedBy } from '@/lib/nodeFilters/model'
+import { loadMutedRuleDoc, mutedViaOf, MUTED_TOKEN_PATTERN, type MutedVia } from '@/lib/nodeFilters/mutedAnnotate'
 
 export const FINDINGS_DEFAULT_LIMIT = 25
 export const FINDINGS_MAX_LIMIT = 100
@@ -241,23 +242,16 @@ export async function listFindings(
 // --- the suppressed half --------------------------------------------------------
 
 interface MutedGroup {
-  /** A person's mute is a judgement of the finding; a rule's is project policy. */
-  muted_via: 'person' | 'rule'
+  /**
+   * A person's mute is a judgement of the finding; an agent's (MCP) was made on
+   * a person's token and is NOT one; a rule's is project policy.
+   */
+  muted_via: MutedVia
   label: string
   severity: string
   count: number
   /** Distinct reasons, capped: the point is why, not who said it how often. */
   reasons: string[]
-}
-
-async function loadRuleDoc(projectId: string) {
-  try {
-    const row = await prisma.projectNodeFilter.findUnique({ where: { projectId }, select: { rules: true } })
-    return coerceDoc(row?.rules)
-  } catch {
-    // Rule names are an annotation; the mutes themselves are still reported.
-    return coerceDoc(null)
-  }
 }
 
 /**
@@ -286,7 +280,7 @@ export async function listMuted(
 
   const { findings: all, total: exactTotal } =
     await listMutedFindings(ctx.token.userId, projectId, MUTED_FETCH_CEILING)
-  const doc = await loadRuleDoc(projectId)
+  const doc = await loadMutedRuleDoc(projectId)
   // With the agent's uncapped count the total is exact; without it (an older
   // agent), a full window can only say "at least". Saying "42 muted" when
   // there are 4000 is the same false negative as reporting a clean project,
@@ -296,11 +290,10 @@ export async function listMuted(
   const floorOnly = typeof exactTotal !== 'number' && windowFull
   const groupsPartial = typeof exactTotal === 'number' && exactTotal > all.length
 
-  const via = (f: TriageFinding): 'person' | 'rule' =>
-    (f as { muted_via?: string }).muted_via === 'rule' || isRuleMute(String(f.muted_by ?? '')) ? 'rule' : 'person'
+  const via = (f: TriageFinding): MutedVia => mutedViaOf(f as Record<string, unknown>)
 
   const groups = new Map<string, MutedGroup>()
-  const byVia = { person: 0, rule: 0 }
+  const byVia: Record<MutedVia, number> = { person: 0, rule: 0, mcp: 0 }
   for (const f of all) {
     const v = via(f)
     byVia[v] += 1
@@ -344,6 +337,8 @@ export async function listMuted(
           findings: all.slice(0, MUTED_MAX_ROWS).map(f => {
             const state = describeMutedBy(doc, String(f.muted_by ?? ''))
             const nodeId = graphNodeId(f.node_id)
+            const token = typeof f.muted_token === 'string' && MUTED_TOKEN_PATTERN.test(f.muted_token)
+              ? f.muted_token : null
             return {
               id: f.id,
               ...(nodeId ? { nodeId } : {}),
@@ -354,6 +349,7 @@ export async function listMuted(
               muted_at: f.muted_at,
               muted_by: f.muted_by,
               muted_via: via(f),
+              ...(via(f) === 'mcp' && token ? { mutedByToken: token } : {}),
               rule_name: state.via === 'rule' ? state.ruleName : null,
               ...(state.via === 'rule' && state.deleted ? { rule_deleted: true } : {}),
               muted_reason: f.muted_reason,

@@ -19,22 +19,18 @@
  * token is the operator's own delegated credential carrying their authority -
  * and the CHANNEL is recorded separately, on a property that no branch reads.
  *
- * MUTE AND UNMUTE ARE NOT HERE, in either direction. Mute is the one action
- * that makes a finding invisible to every other read on this surface, and
- * "this is a false positive, mute it" is an entirely plausible injection
- * against an agent whose context is full of target-controlled text. Unmute is
- * out for a less obvious reason: the triage subsystem's stated invariant is
- * that only a person mutes, which is precisely what bounds a prompt injection
- * in scanner output to "mislabel a verdict a human can overrule". Handing
- * unmute to an unattended token removes that bound, and reversing a
- * suppression is the same control operated in the direction that makes hidden
- * findings visible again.
+ * MUTE AND UNMUTE ARE NOT HERE. A verdict ranks a finding; a mute hides it
+ * from every read on this surface, so hiding and revealing live behind their
+ * own opt-in permission, `triage:mute`, in muteTools.ts, bounded in code by
+ * evidence guards, a daily budget and read-back provenance.
  *
- * Which is also why a verdict on a MUTED finding is refused. A human verdict is
+ * A verdict on a MUTED finding is still refused, and that refusal now exists so
+ * that `triage:write` ALONE can never release a rule mute. A human verdict is
  * one of the Mute Rules guards, so on a rule-muted finding it releases the mute
- * at the next apply or scan: the same unmute, one step removed. The agent keys
- * the refusal on the MCP channel and checks it under the node's write lock, in
- * the same statement as the write.
+ * at the next apply or scan: an unmute by another name, reachable without the
+ * mute permission or its flag for rule mutes. The agent keys the refusal on the
+ * MCP channel and checks it under the node's write lock, in the same statement
+ * as the write. A person who wants a muted finding judged unmutes it first.
  */
 import { requireScope } from '@/lib/mcpAuth'
 import { assertMcpProjectAccess } from '@/lib/mcpAuth'
@@ -103,9 +99,10 @@ export async function setFindingVerdict(
 
   if (body.updated !== true && body.reason === 'muted') {
     throw new McpToolError(
-      'The verdict was NOT recorded: this finding is muted, and judging a muted finding is left ' +
-      'to a person, in RedAmon. On a finding a Mute Rule muted, a verdict would release the mute. ' +
-      'Nothing was written.',
+      'The verdict was NOT recorded: a verdict is refused on a muted finding. If a person wants ' +
+      'it judged, unmute it first with unmute_findings (needs the triage:mute permission), then ' +
+      'record the verdict. On a finding a Mute Rule muted, a verdict alone would release the ' +
+      'mute. Nothing was written.',
       'muted'
     )
   }
@@ -158,8 +155,8 @@ export async function setFindingVerdict(
         'overwrite it.',
       'It is recorded as a human verdict, because it carries the authority of the operator whose ' +
         'token this is. The node separately records that it arrived over MCP.',
-      'Nothing on this surface can undo it except another verdict, and nothing here can mute or ' +
-        'unmute a finding.',
+      'Nothing on this surface can undo it except another verdict. A verdict never hides a ' +
+        'finding: hiding one is a mute, a separate permission.',
     ],
   }
 }

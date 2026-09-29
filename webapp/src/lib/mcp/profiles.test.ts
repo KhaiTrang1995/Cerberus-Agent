@@ -116,10 +116,19 @@ describe('the registry', () => {
     }
   })
 
-  test('the never-auto-ticked list is exactly recon:overwrite', () => {
+  test('the never-auto-ticked list is exactly recon:overwrite and triage:mute', () => {
     // Guards against the list being quietly emptied, which would turn the
     // assertion above into a tautology.
-    expect([...NEVER_AUTO_TICKED]).toEqual(['recon:overwrite'])
+    expect([...NEVER_AUTO_TICKED]).toEqual(['recon:overwrite', 'triage:mute'])
+  })
+
+  test('triage:mute is an opt-in on the Triage profile only, and recommended by none', () => {
+    // A mute hides a finding from every read. It may be offered, never ticked.
+    for (const p of PROFILE_LIST) {
+      expect(p.recommendedScopes, `${p.id} recommends triage:mute`).not.toContain('triage:mute')
+      if (p.id !== 'triage') expect(p.optInScopes, `${p.id} offers triage:mute`).not.toContain('triage:mute')
+    }
+    expect(PROFILES.triage.optInScopes).toContain('triage:mute')
   })
 
   test('EVERY profile auto-ticks kali:exec, and none offers it as opt-in', () => {
@@ -159,7 +168,7 @@ describe('the registry', () => {
     // Read-only by default wherever the job allows it. These seven jobs never
     // need to change anything, so a write scope appearing here is a regression.
     // kali:exec is not counted: every profile carries it by design (see above).
-    const WRITES: McpScope[] = ['recon:scan', 'recon:queue', 'recon:overwrite', 'recon:settings', 'triage:write']
+    const WRITES: McpScope[] = ['recon:scan', 'recon:queue', 'recon:overwrite', 'recon:settings', 'triage:write', 'triage:mute']
     for (const id of ['vuln_mgmt', 'inventory', 'compliance', 'reporting', 'threat_intel', 'soc', 'custom'] as const) {
       const granted = PROFILES[id].recommendedScopes.filter(s => WRITES.includes(s))
       expect(granted, `${id} should be read-only but grants ${granted.join(', ')}`).toEqual([])

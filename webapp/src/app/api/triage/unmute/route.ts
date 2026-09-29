@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
-import prisma from '@/lib/prisma'
-import { writeAudit } from '@/lib/audit'
 import { readJsonBody } from '@/lib/jsonBody'
 import { requireProjectOwner, graphTriage, realActorUserId } from '@/lib/triageClient'
 import { describeNodeFilterWriter } from '@/lib/nodeFilterRun'
+import { activationBusy, activationBusyResponse } from '@/lib/activationLock'
+import { auditUnmute, ensureExemptions } from '@/lib/unmuteExemptions'
 import { invalidateCache } from '@/app/api/graph/cache'
 
 /**
@@ -21,6 +21,10 @@ import { invalidateCache } from '@/app/api/graph/cache'
  * exemption is a Postgres row rather than a graph property because the prune,
  * the recon asset clear, version activation and import would each delete a
  * property.
+ *
+ * The order is graph first, exemptions second: a person watching the table can
+ * see a failed exemption and act on it (`exemptionError`). MCP `unmute_findings`
+ * uses the same helpers in the opposite order, for an unattended caller.
  */
 const MAX_KEYS = 500
 
@@ -44,6 +48,8 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: `at most ${MAX_KEYS} keys per request` }, { status: 400 })
   }
 
+  if (await activationBusy(caller.projectId)) return activationBusyResponse()
+
   // A running apply read the exemptions when it started, so a finding unmuted
   // now would be muted again when its page comes up. Refused until it ends.
   const applying = await describeNodeFilterWriter(caller.projectId)
@@ -66,22 +72,12 @@ export async function POST(request: NextRequest) {
   let exempted = 0
   let exemptionError: string | null = null
   try {
-    for (const item of items) {
-      if (!item?.key || !item?.label) continue
-      await prisma.nodeFilterExemption.upsert({
-        where: {
-          projectId_label_nodeKey: {
-            projectId: caller.projectId, label: item.label, nodeKey: item.key,
-          },
-        },
-        create: {
-          projectId: caller.projectId, label: item.label, nodeKey: item.key,
-          createdBy: caller.userId, realActorUserId: realActor,
-        },
-        update: {},
-      })
-      exempted += 1
-    }
+    const result = await ensureExemptions(
+      caller.projectId,
+      items.map(i => ({ label: i?.label, key: i?.key })),
+      { createdBy: caller.userId, realActorUserId: realActor },
+    )
+    exempted = result.total
   } catch (e) {
     // The graph unmute already happened and is not rolled back: the finding is
     // visible, which is what the operator asked for. What is lost is only the
@@ -91,19 +87,13 @@ export async function POST(request: NextRequest) {
   }
 
   if (items.length > 0) {
-    await writeAudit({
+    await auditUnmute({
       actorId: caller.userId,
-      action: 'muted_nodes.unmuted',
-      targetType: 'project',
-      targetId: caller.projectId,
-      after: {
-        realActorUserId: realActor,
-        count: items.length,
-        exempted,
-        // Keys and what had muted each: rule ids and user ids, never finding text.
-        items: items.slice(0, 100).map(i => ({ key: i.key, label: i.label, mutedBy: i.muted_by })),
-      },
+      projectId: caller.projectId,
       source: 'ui',
+      realActorUserId: realActor,
+      exempted,
+      items: items.map(i => ({ key: i.key, label: i.label, mutedBy: i.muted_by })),
     })
   }
 

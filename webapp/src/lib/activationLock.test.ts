@@ -14,6 +14,7 @@ vi.mock('@/lib/prisma', () => ({ default: prismaMock }))
 import {
   isActivationInProgress,
   assertGraphNotActivating,
+  activationBusy,
   acquireActivationLock,
   releaseActivationLock,
   activationLockTtlMs,
@@ -80,6 +81,24 @@ describe('assertGraphNotActivating', () => {
   test('a failed lock read allows the operation rather than blocking all work', async () => {
     prismaMock.project.findUnique.mockRejectedValue(new Error('db down'))
     expect(await assertGraphNotActivating('p1')).toBeNull()
+  })
+})
+
+describe('activationBusy (the fail-closed form, for mutes and unmutes)', () => {
+  test('false when the graph is free, true while activating', async () => {
+    prismaMock.project.findUnique.mockResolvedValue({ activationState: ACTIVATION_STATE_IDLE, activationStartedAt: null })
+    expect(await activationBusy('p1')).toBe(false)
+    prismaMock.project.findUnique.mockResolvedValue({
+      activationState: ACTIVATION_STATE_ACTIVATING, activationStartedAt: new Date(),
+    })
+    expect(await activationBusy('p1')).toBe(true)
+  })
+
+  test('a failed lock read is BUSY: activation would swallow a mute written now', async () => {
+    // The opposite of assertGraphNotActivating, deliberately.
+    vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    prismaMock.project.findUnique.mockRejectedValue(new Error('db down'))
+    expect(await activationBusy('p1')).toBe(true)
   })
 })
 

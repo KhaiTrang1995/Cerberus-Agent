@@ -158,13 +158,15 @@ describe('a failed write is never reported as success', () => {
       .rejects.toBeInstanceOf(McpToolError)
   })
 
-  test('a muted finding is refused by name, and the message says whose call it is', async () => {
+  test('a muted finding is refused by name, and the message says how a person gets it judged', async () => {
     agentReturns({ updated: false, reason: 'muted', label: 'Vulnerability' })
     const err = await setFindingVerdict(ctx(), 'p1', 'm1', 'likely_noise')
       .then(() => null, (e: McpToolError) => e)
     expect(err).toMatchObject({ code: 'muted' })
-    expect(err?.message).toMatch(/NOT recorded: this finding is muted/)
-    expect(err?.message).toMatch(/left to a person/)
+    expect(err?.message).toMatch(/NOT recorded: a verdict is refused on a muted finding/)
+    // The path is unmute-then-judge, behind its own permission: triage:write
+    // alone must never be a way to release a rule mute.
+    expect(err?.message).toMatch(/unmute it first with unmute_findings \(needs the triage:mute permission\)/)
     expect(h.writeAudit).not.toHaveBeenCalled()
   })
 

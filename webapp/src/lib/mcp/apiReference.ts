@@ -145,6 +145,10 @@ const EXAMPLE_EXTRA_ARGS: Record<string, Record<string, unknown>> = {
     },
     idempotencyKey: 'YOUR_PROGRAM_HANDLE-0000000000000000',
   },
+  // Both refuse a call that names no finding, and `placeholderFor` has no array
+  // branch, so a required-only example would name none.
+  mute_findings: { findingIds: ['YOUR_FINDING_ID'] },
+  unmute_findings: { findingIds: ['YOUR_FINDING_ID'] },
   // The digest must be 64 hex and issuedAt a real timestamp, neither of which a
   // YOUR_* placeholder satisfies.
   attach_engagement_authorization: {

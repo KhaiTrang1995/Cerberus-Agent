@@ -4,6 +4,7 @@ import { readJsonBody } from '@/lib/jsonBody'
 import { invalidateCache } from '@/app/api/graph/cache'
 import { getGraphSession } from '@/app/api/graph/neo4j'
 import { muteableLabel, muteKey } from '@/lib/muteTarget'
+import { activationBusy, activationBusyResponse } from '@/lib/activationLock'
 
 /**
  * POST /api/triage/mute-by-graph-id - `/api/triage/mute` for a node known only
@@ -21,7 +22,8 @@ import { muteableLabel, muteKey } from '@/lib/muteTarget'
  * activation can point at a different node now. What still holds: the lookup
  * is tenant-scoped, only finding labels resolve, and the result is one
  * reversible mute. A node that is gone answers 409, the same "changed while the
- * page was open" the Priority Board handles.
+ * page was open" the Priority Board handles. An already-muted node is left as it
+ * was (`already: true`), and a version activation in progress answers 409 too.
  */
 export async function POST(request: NextRequest) {
   const parsed = await readJsonBody(request)
@@ -33,6 +35,7 @@ export async function POST(request: NextRequest) {
   if (typeof graphId !== 'string' || !/^\d{1,18}$/.test(graphId)) {
     return NextResponse.json({ error: 'graphId must be a graph node id' }, { status: 400 })
   }
+  if (await activationBusy(caller.projectId)) return activationBusyResponse()
 
   const session = getGraphSession()
   let labels: string[]

@@ -88,6 +88,35 @@ export async function assertGraphNotActivating(projectId: string): Promise<NextR
   )
 }
 
+/**
+ * The FAIL-CLOSED form, for writes that an activation would silently lose.
+ *
+ * `assertGraphNotActivating` allows the operation when the lock cannot be read,
+ * which is right for starting work. A mute or unmute is different: activation
+ * freezes, clears and restores the graph, so one landing in between returns
+ * success and is then gone. When the lock cannot be read, that is "busy".
+ */
+export async function activationBusy(projectId: string): Promise<boolean> {
+  try {
+    return await isActivationInProgress(projectId)
+  } catch (err) {
+    console.error('[activationLock] state check failed (treating as busy):', err)
+    return true
+  }
+}
+
+/** The 409 a mute or unmute route returns while an activation holds the graph. */
+export function activationBusyResponse(): NextResponse {
+  return NextResponse.json(
+    {
+      error: 'A version activation is in progress for this project (or its state could not be ' +
+        'read), and a mute or unmute written now could be lost. Try again once it finishes.',
+      activationInProgress: true,
+    },
+    { status: 409 }
+  )
+}
+
 export interface LockHandle {
   acquired: boolean
   /** Set when the lock could not be taken. */
