@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { requireProjectOwner, realActorUserId } from '@/lib/triageClient'
 import { readJsonBody } from '@/lib/jsonBody'
 import { writeAudit } from '@/lib/audit'
-import { recordVerdict, VERDICT_STATUSES, type VerdictStatus } from '@/lib/triage/actions'
+import { FINDING_ID_RE, recordVerdict, VERDICT_STATUSES, type VerdictStatus } from '@/lib/triage/actions'
 import { actionErrorResponse, parseFindingRef } from '@/lib/triage/http'
 
 /**
@@ -29,7 +29,11 @@ export async function POST(request: NextRequest) {
   if (caller instanceof NextResponse) return caller
   const ref = parseFindingRef(nodeId, label)
   if (ref instanceof NextResponse) {
-    return NextResponse.json({ error: 'nodeId is required' }, { status: 400 })
+    // This route names the id `nodeId`; a bad label keeps its own message.
+    if (typeof nodeId !== 'string' || !FINDING_ID_RE.test(nodeId)) {
+      return NextResponse.json({ error: 'nodeId is required' }, { status: 400 })
+    }
+    return ref
   }
   if (typeof status !== 'string' || !(VERDICT_STATUSES as readonly string[]).includes(status)) {
     return NextResponse.json(

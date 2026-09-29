@@ -27,7 +27,6 @@ import { createHash } from 'crypto'
 import { agentBaseUrl } from '@/lib/agentFetch'
 import { internalKeyHeaders } from '@/lib/agentAuth'
 import { isActivationInProgress } from '@/lib/activationLock'
-import { findLiveTriageRun } from '@/lib/triageRun'
 import { writeAudit } from '@/lib/audit'
 import { invalidateCache } from '@/app/api/graph/cache'
 
@@ -192,20 +191,22 @@ async function confirmNoActivationStarted(projectId: string): Promise<void> {
 }
 
 /**
- * During a live run, an MCP write needs an agent that honours it at publish.
- * The probe is an op only such an agent knows, so an older one cannot pass.
+ * Every MCP write needs an agent that enforces the layered rules: one that
+ * refuses to change a decision made in the app (`decided_in_app`) and honours
+ * a write made during a run at publish. An older agent does neither, and the
+ * webapp alone cannot tell, so the probe is an op only such an agent knows.
+ * A confirmation is trusted for a few minutes, so a rollback is caught soon.
  */
-async function requireLayeredDuringRun(tenant: TriageTenant, findingId: string): Promise<void> {
-  let live
-  try {
-    live = await findLiveTriageRun(tenant.projectId)
-  } catch (err) {
-    console.error('[triage] run state unreadable:', err)
-    throw new TriageActionError(
-      'Whether a triage run is in progress could not be determined, so nothing was written.',
-      'busy', 503)
-  }
-  if (!live) return
+const LAYERED_CONFIRM_TTL_MS = 5 * 60 * 1000
+let layeredConfirmedAt = 0
+
+/** Test seam: start with the agent confirmed, or not. */
+export function __setLayeredAgentConfirmed(confirmed: boolean): void {
+  layeredConfirmedAt = confirmed ? Date.now() : 0
+}
+
+async function requireLayeredAgent(tenant: TriageTenant, findingId: string): Promise<void> {
+  if (Date.now() - layeredConfirmedAt < LAYERED_CONFIRM_TTL_MS) return
   let body: Record<string, unknown> | null = null
   try {
     body = await agentTriage('finding_detail', tenant, { node_id: findingId }, { channel: 'mcp' })
@@ -214,10 +215,12 @@ async function requireLayeredDuringRun(tenant: TriageTenant, findingId: string):
   }
   if (body?.layered_publish !== true) {
     throw new TriageActionError(
-      `A triage run is ${live.status} on this project and the findings service cannot confirm it ` +
-        'will honour a write made now. Retry once the run has finished.',
-      'busy', 409)
+      'The findings service could not confirm it enforces the rules an agent\'s write needs ' +
+        '(it may be older than this RedAmon build), so nothing was written. The operator ' +
+        'must rebuild the agent image.',
+      'agent_outdated', 502)
   }
+  layeredConfirmedAt = Date.now()
 }
 
 function filterArgs(filters: BoardFilters): Record<string, string> {
@@ -313,7 +316,7 @@ export interface WriteResult {
 /** A person's decision (Real / False positive / Reset), rescored at once. */
 export async function recordVerdict(tenant: TriageTenant, input: VerdictInput): Promise<WriteResult> {
   await refuseDuringActivation(tenant.projectId)
-  if (input.channel === 'mcp') await requireLayeredDuringRun(tenant, input.findingId)
+  if (input.channel === 'mcp') await requireLayeredAgent(tenant, input.findingId)
 
   const body = await agentTriage('human_verdict', tenant, {
     node_id: input.findingId,
@@ -389,7 +392,7 @@ const REVIEW_REFUSALS: Record<string, string> = {
 /** An external agent's review (MCP only). */
 export async function submitReview(tenant: TriageTenant, input: ReviewInput) {
   await refuseDuringActivation(tenant.projectId)
-  await requireLayeredDuringRun(tenant, input.findingId)
+  await requireLayeredAgent(tenant, input.findingId)
 
   const review = {
     verdict: input.verdict,

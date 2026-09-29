@@ -64,8 +64,8 @@ const FINDING_FIELDS = [
   'triage_state', 'triage_status', 'triage_priority_score', 'triage_tier',
   'triage_ai_verdict', 'triage_group_key', 'triage_run_id', 'triaged_at',
   // The layers behind the score: the rules-only score, the rule that tiered
-  // it, which layer set the final value, and the review's fix lever.
-  'triage_math_score', 'triage_tier_rule', 'triage_decided_by', 'triage_fix_lever',
+  // it, and which layer set the final value.
+  'triage_math_score', 'triage_tier_rule', 'triage_decided_by',
 ] as const
 
 const SECTION_NAMES: Record<number, string> = {
@@ -97,7 +97,10 @@ function projectFinding(raw: TriageFinding, includeQuote: boolean): Record<strin
   if (nodeId) out.nodeId = nodeId
   const section = typeof raw.section === 'number' ? raw.section : null
   if (section !== null) out.sectionName = SECTION_NAMES[section] ?? 'unknown'
+  // Reviewer text, which an external agent may have written: only on request,
+  // like the quote.
   if (includeQuote && raw.triage_ai_quote) out.triage_ai_quote = raw.triage_ai_quote
+  if (includeQuote && raw.triage_fix_lever) out.triage_fix_lever = raw.triage_fix_lever
   // Who reviewed it, whether that review still describes the evidence, and
   // how a person's decision arrived. Absent when there is none of each.
   if (raw.reviewed_via === 'builtin' || raw.reviewed_via === 'mcp') {

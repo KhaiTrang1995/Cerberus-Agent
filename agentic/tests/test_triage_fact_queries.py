@@ -95,6 +95,31 @@ class TestQueryInvariants(unittest.TestCase):
         joined = " ".join(q["query"] for q in PROJECT_FACT_QUERIES)
         self.assertIn("HAS_BASE_URL|HAS_BASEURL", joined)
 
+    @staticmethod
+    def _aliases(label):
+        query = next(q["query"] for q in FINDING_QUERIES if q["label"] == label)
+        return set(re.findall(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)", query))
+
+    def test_the_vulnerability_query_selects_the_request(self):
+        """Without it the reviewer never saw what nuclei sent, and the request's
+        redaction never ran on live data."""
+        self.assertIn("raw_request", self._aliases("Vulnerability"))
+
+    def test_bundle_fields_the_query_never_selects(self):
+        """Every field the evidence bundle prints for a nuclei or GVM finding
+        must be selected: a field the query omits is a line that is always
+        empty, so neither the built-in reviewer nor an agent ever sees it."""
+        wanted = {
+            "Vulnerability": {"template_id", "matched_at", "matcher_name", "fuzzing_parameter",
+                              "extracted_results", "raw_request", "raw_response",
+                              "description", "qod", "qod_type", "cve_ids",
+                              "target_port", "solution_type"},
+            "ExploitGvm": {"description", "qod", "qod_type", "cve_ids", "target_port"},
+        }
+        for label, fields in wanted.items():
+            with self.subTest(label=label):
+                self.assertEqual(fields - self._aliases(label), set())
+
     def test_no_finding_query_uses_optional_match(self):
         """The row-multiplication this layer exists to fix."""
         for query_def in FINDING_QUERIES:

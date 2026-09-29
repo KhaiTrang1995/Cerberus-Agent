@@ -151,9 +151,9 @@ export async function getFindingTriage(
             disputedFacts: disputes.map((d) => d.fact),
             impactMultiplier: num(corrections.impact_multiplier) ?? 1,
           },
-          fixLever: str(row.triage_fix_lever) || null,
           ...(includeQuotes
             ? {
+                fixLever: str(row.triage_fix_lever) || null,
                 why: str(row.triage_ai_why) || null,
                 evidenceQuote: str(row.triage_ai_quote) || null,
                 impactQuote: str(corrections.impact_quote) || null,
@@ -179,8 +179,10 @@ export async function getFindingTriage(
       key: str(row.triage_group_key) || null,
       members: Array.isArray(detail.group) ? detail.group : [],
     },
-    proof: { count: proofTypes.length + (row.triage_proof ? 1 : 0), labels: proofTypes,
-             provenNow: row.proven_now === true },
+    // `count` is proof of THIS finding. `triage_proof` records proof on its
+    // host, which says the host is compromised, not that this finding is real.
+    proof: { count: proofTypes.length, labels: proofTypes,
+             provenNow: row.proven_now === true, onProvenHost: Boolean(row.triage_proof) },
     run: {
       runId: str(row.triage_run_id) || null,
       triagedAt: row.triaged_at ?? null,
@@ -222,6 +224,7 @@ export async function getFindingEvidence(
     matchesLastRun: body.matches_last_run === true,
     reviewable: body.reviewable === true,
     notReviewableBecause: body.not_reviewable_because ?? null,
+    proven: body.proven === true,
     reviewSurvivesRescan: body.review_survives_rescan !== false,
     currentReview: body.current_review ?? null,
     contract: body.contract,
@@ -359,20 +362,25 @@ export async function getTriageStatus(ctx: McpContext, projectId: string) {
 export async function startTriageRun(ctx: McpContext, projectId: string) {
   requireScope(ctx.token, 'triage:run')
   // Access before the rate limit, as start_recon does: a stranger must not be
-  // able to consume a project's window.
+  // able to consume a project's window. The cheap refusals (a live run, the
+  // spacing and the daily cap) come before the rate token and cost nothing;
+  // the preflight, which reads the graph, only after it, so a caller looping
+  // on a refusal cannot run it unmetered.
   await assertMcpProjectAccess(ctx.token.userId, projectId)
   const tenant: TriageTenant = { userId: ctx.token.userId, projectId }
 
-  const preflight = await computePreflight(tenant, 'mcp')
-  if (!preflight) throw new McpToolError('Project not found', 'not_found')
-  if (preflight.liveRun) {
-    throw new McpToolError(
-      `Refused (busy): a triage run started ${preflight.liveRun.trigger === 'mcp' ? 'over MCP' : 'in the app'} ` +
-        `is already ${preflight.liveRun.status} on this project. Poll get_triage_status until it ` +
-        'finishes; do not start another.', 'busy', { runId: preflight.liveRun.id })
+  let live
+  try {
+    live = await findLiveTriageRun(projectId)
+  } catch (err) {
+    console.error('[mcp] triage run state unreadable:', err)
+    throw new McpToolError('Refused (busy): the run state could not be read.', 'busy')
   }
-  if (preflight.blockedReason) {
-    throw new McpToolError(`Refused (busy): ${preflight.blockedReason} Retry once it has finished.`, 'busy')
+  if (live) {
+    throw new McpToolError(
+      `Refused (busy): a triage run started ${live.trigger === 'mcp' ? 'over MCP' : 'in the app'} ` +
+        `is already ${live.status} on this project. Poll get_triage_status until it ` +
+        'finishes; do not start another.', 'busy', { runId: live.id })
   }
 
   let budget
@@ -395,6 +403,18 @@ export async function startTriageRun(ctx: McpContext, projectId: string) {
   }
 
   enforceRate(ctx, 'write')
+
+  const preflight = await computePreflight(tenant, 'mcp')
+  if (!preflight) throw new McpToolError('Project not found', 'not_found')
+  if (preflight.liveRun) {
+    throw new McpToolError(
+      `Refused (busy): a triage run started ${preflight.liveRun.trigger === 'mcp' ? 'over MCP' : 'in the app'} ` +
+        `is already ${preflight.liveRun.status} on this project. Poll get_triage_status until it ` +
+        'finishes; do not start another.', 'busy', { runId: preflight.liveRun.id })
+  }
+  if (preflight.blockedReason) {
+    throw new McpToolError(`Refused (busy): ${preflight.blockedReason} Retry once it has finished.`, 'busy')
+  }
 
   // No model: the run ranks on the rules alone rather than being refused.
   const maxReviewBudget = preflight.model ? MAX_REVIEW_BUDGET : 0

@@ -133,6 +133,9 @@ class TriageRun:
         elif msg_type == "error":
             self.status = "error"
             self.terminal = (msg_type, payload)
+        elif msg_type == "stopped":
+            self.status = "stopped"
+            self.terminal = (msg_type, payload)
 
     async def send(self, msg_type: str, payload: dict) -> None:
         """Forward to the attached socket, if any. Never raises.
@@ -216,6 +219,9 @@ class TriageRunCallback:
             "message": message, "recoverable": recoverable, "code": code,
         })
 
+    async def on_stopped(self):
+        await self._send("stopped", {})
+
     async def _send(self, msg_type: str, payload: dict):
         self.run.record(msg_type, payload)
         await self.run.send(msg_type, payload)
@@ -282,10 +288,26 @@ def stop_project_run(project_id: str) -> dict:
         return {"stopped": False, "reason": "no run in progress"}
     if run.is_publishing:
         return {"stopped": False, "reason": "publishing", "runId": run.run_id}
+    refusal = _stop_refusal(run)
+    if refusal is not None:
+        return refusal
     run.status = "stopped"
     if run.task is not None:
         run.task.cancel()
     return {"stopped": True, "runId": run.run_id}
+
+
+def _stop_refusal(run: TriageRun) -> dict | None:
+    """A Stop for a run that is already ending: answered, never cancelled again.
+
+    A second cancel lands in the run's `finally`, inside the `finish` call,
+    and leaves the row `running` until its heartbeat expires.
+    """
+    if run.status == "stopped":
+        return {"stopped": True, "runId": run.run_id}
+    if run.status != "running":
+        return {"stopped": False, "reason": "finishing", "runId": run.run_id}
+    return None
 
 
 def _new_state(user_id: str, project_id: str, session_id: str = "") -> TriageState:
@@ -348,6 +370,9 @@ def start_detached_run(user_id: str, project_id: str,
             await orchestrator.run(state)
         except asyncio.CancelledError:
             run.status = "stopped"
+            # Every tab attached to the run, not only one that pressed Stop: an
+            # MCP stop has no socket of its own to answer.
+            await TriageRunCallback(run).on_stopped()
             raise
         except Exception:
             logger.exception("Triage failed")
@@ -369,6 +394,9 @@ def start_detached_run(user_id: str, project_id: str,
                 logger.debug("Triage orchestrator cleanup failed", exc_info=True)
 
     run.task = asyncio.create_task(run_triage())
+    # A task cancelled before its first step never runs its `finally`, so the
+    # slot is also released when the task ends, however it ends.
+    run.task.add_done_callback(lambda _task: _release_triage_slot(project_id))
     return run, False, None
 
 
@@ -478,13 +506,18 @@ async def handle_triage_websocket(websocket: WebSocket):
                             PUBLISHING_REFUSAL[:1].upper() + PUBLISHING_REFUSAL[1:] + ".",
                             recoverable=True, code="publishing")
                         continue
+                    if _stop_refusal(stopping) is not None:
+                        continue
                     stopping.status = "stopped"
                     stopping.task.cancel()
                     # The slot stays held until the run's own `finally` has
                     # recorded the outcome; releasing it here let a new start
                     # race the old run's finish.
                     _RUNS.pop(stopping.project_id, None)
-                    await websocket.send_json({"type": "stopped"})
+                    # An attached tab hears it from the run as it ends; a tab
+                    # that stopped a run it was not attached to hears it here.
+                    if stopping.socket is not websocket:
+                        await websocket.send_json({"type": "stopped"})
 
     except WebSocketDisconnect:
         logger.info("Triage WebSocket disconnected")

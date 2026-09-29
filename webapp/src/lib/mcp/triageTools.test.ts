@@ -188,6 +188,19 @@ describe('get_finding_triage', () => {
     expect(quoted.notes).toContain(UNTRUSTED_NOTE)
   })
 
+  test('the fix lever is reviewer text too: only behind includeQuotes', async () => {
+    // It went out to every triage:read token with no untrusted note.
+    expect(JSON.stringify(await read(false))).not.toContain('rotate it')
+    expect((await read(true)).review).toMatchObject({ fixLever: 'rotate it' })
+  })
+
+  test('proof on the finding\'s host is not counted as proof of the finding', async () => {
+    h.readFinding.mockResolvedValue({ found: true, row: { ...ROW, triage_proof: 'cf-on-host' },
+                                      group: [], detector: {} })
+    const out = await read()
+    expect(out.proof).toMatchObject({ count: 0, provenNow: false, onProvenHost: true })
+  })
+
   test('a person\'s decision is its own layer', async () => {
     h.readFinding.mockResolvedValue({ found: true, row: { ...ROW, triage_status: 'confirmed',
       triage_source: 'human', decided_via: 'mcp', triage_verdict_token: 'rdmn_mcp_0a1b2c3d',
@@ -286,10 +299,29 @@ describe('get_triage_status', () => {
 describe('start_triage_run', () => {
   const start = () => startTriageRun(ctx(['triage:read', 'triage:run']), 'p1')
 
-  test('access, preflight and the cooldown come before the write bucket, then the start', async () => {
+  beforeEach(() => {
+    h.liveRun.mockResolvedValue(null)
+  })
+
+  test('access and the cheap refusals come before the write bucket; the preflight after it', async () => {
     await start()
-    expect(h.order).toEqual(['access', 'preflight', 'budget', 'rate:write', 'start'])
+    expect(h.order).toEqual(['access', 'budget', 'rate:write', 'preflight', 'start'])
     expect(h.rate).not.toHaveBeenCalledWith('start')
+  })
+
+  test('a start refused by the cooldown never runs the graph preflight', async () => {
+    // A caller looping on the cooldown ran the heaviest read with no rate limit.
+    h.budget.mockResolvedValue({ runsToday: 2, nextAllowedAt: new Date(), reason: 'cooldown' })
+    await expect(start()).rejects.toMatchObject({ code: 'cooldown' })
+    expect(h.preflight).not.toHaveBeenCalled()
+  })
+
+  test('a live run is refused as busy before any rate or preflight', async () => {
+    h.liveRun.mockResolvedValue({ id: 'r2', status: 'running', trigger: 'mcp' })
+    await expect(start()).rejects.toMatchObject({
+      code: 'busy', message: expect.stringMatching(/^Refused \(busy\): a triage run started over MCP/) })
+    expect(h.rate).not.toHaveBeenCalled()
+    expect(h.preflight).not.toHaveBeenCalled()
   })
 
   test('it starts as an MCP run with the token and the 1000 clamp', async () => {

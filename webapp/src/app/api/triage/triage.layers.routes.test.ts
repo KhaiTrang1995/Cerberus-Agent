@@ -182,6 +182,16 @@ describe('the verdict', () => {
     expect(sentBody().status).toBe('unreviewed')
   })
 
+  test('a bad label is named as the label, not as a missing nodeId', async () => {
+    const res = await postVerdict(post({ projectId: PROJECT, nodeId: 'v1', status: 'confirmed',
+                                         label: 'Host' }))
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toMatch(/^label must be one of/)
+    const missing = await postVerdict(post({ projectId: PROJECT, status: 'confirmed' }))
+    expect((await missing.json()).error).toBe('nodeId is required')
+    expect(h.fetch).not.toHaveBeenCalled()
+  })
+
   test('is refused during a version switch, with no write', async () => {
     h.activation.mockResolvedValue(true)
     const res = await postVerdict(post({ projectId: PROJECT, nodeId: 'v1', status: 'confirmed' }))

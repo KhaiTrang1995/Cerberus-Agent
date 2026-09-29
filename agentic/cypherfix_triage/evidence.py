@@ -120,12 +120,28 @@ _BEARER_RE = re.compile(r"(\b(?:Bearer|Basic|Token)\s+)([A-Za-z0-9._~+/=-]{8,})"
 # name says nothing about whether its value is a secret, so every value goes.
 _COOKIE_HEADER_RE = re.compile(r"^([ \t]*cookie[ \t]*:)(.*)$", re.IGNORECASE | re.MULTILINE)
 _COOKIE_VALUE_RE = re.compile(r"(=)([^;\s]{6,})")
+# A scan's auth profile can send a raw token with no scheme (`Authorization:
+# 7f3a...`) or in a header of its own (`X-Session:`), which no value shape
+# recognises; the header's NAME is what marks it. WWW-Authenticate is kept: its
+# realm is evidence of what the server asked for.
+_CREDENTIAL_HEADER_RE = re.compile(
+    r"^([ \t]*(?!www-authenticate\b)[\w-]*(?:auth|api-?key|apikey|token|session|secret"
+    r"|signature|credential|password|csrf|xsrf)[\w-]*[ \t]*:[ \t]*)(\S.{5,})$",
+    re.IGNORECASE | re.MULTILINE,
+)
 _ASSIGNED_SECRET_RE = re.compile(
     r"(\b[A-Za-z_]*(?:password|passwd|pwd|secret|api[_-]?key|access[_-]?token"
     r"|auth[_-]?token|client[_-]?secret)[A-Za-z_]*\b[\"']?\s*[:=]\s*[\"']?)"
     r"([^\s\"'&,;<>]{6,})",
     re.IGNORECASE,
 )
+
+
+def _mask_header_value(value: str) -> str:
+    if "[REDACTED" in value:
+        return value
+    body = value.rstrip("\r")
+    return _keep4(body) + value[len(body):]
 
 
 def redact_secret_shapes(text) -> str:
@@ -140,6 +156,7 @@ def redact_secret_shapes(text) -> str:
         lambda m: m.group(1) + _COOKIE_VALUE_RE.sub(
             lambda v: v.group(1) + (v.group(2) if "[REDACTED" in v.group(2) else _keep4(v.group(2))),
             m.group(2)), out)
+    out = _CREDENTIAL_HEADER_RE.sub(lambda m: m.group(1) + _mask_header_value(m.group(2)), out)
     out = _ASSIGNED_SECRET_RE.sub(
         lambda m: m.group(1) + (m.group(2) if "[REDACTED" in m.group(2)
                                 else _keep4(m.group(2))), out)
@@ -202,17 +219,19 @@ def _build(finding: dict, clean: bool) -> str:
     if source == "nuclei":
         parts.append(_line("Template", finding.get("template_id")))
         parts.append(_line("Matched at", finding.get("matched_at")))
-        parts.append(_line("Matcher", finding.get("matcher_name")))
-        parts.append(_line("Fuzzed parameter", finding.get("fuzzing_parameter")))
+        # review-v1 bundles never had the matcher, fuzzed-parameter, request,
+        # port or solution-type lines filled: the finding queries did not select
+        # them. The legacy bundle must stay byte-identical to those, or no v1
+        # review could be adopted.
+        if clean:
+            parts.append(_line("Matcher", finding.get("matcher_name")))
+            parts.append(_line("Fuzzed parameter", finding.get("fuzzing_parameter")))
         extracted = finding.get("extracted_results") or []
         if extracted:
             joined = "; ".join(str(x) for x in extracted)
             if clean:
                 joined = redact_secret_shapes(joined)
             parts.append(_line("Extracted", joined[:CAP_SHORT]))
-        # review-v1 bundles never had a request: the finding query did not
-        # select it. The legacy bundle must stay byte-identical to those, or no
-        # v1 review could be adopted.
         if clean:
             parts.append(_line("Request", _clip(finding.get("raw_request"), CAP_SHORT, http=True, clean=True)))
         parts.append(_line("Response", _clip(finding.get("raw_response"), CAP_RESPONSE, http=True, clean=clean)))
@@ -222,8 +241,9 @@ def _build(finding: dict, clean: bool) -> str:
         parts.append(_line("Quality of detection",
                            f"{finding.get('qod')} ({finding.get('qod_type')})"))
         parts.append(_line("CVEs", ", ".join(finding.get("cve_ids") or [])))
-        parts.append(_line("Port", finding.get("target_port")))
-        parts.append(_line("Solution type", finding.get("solution_type")))
+        if clean:
+            parts.append(_line("Port", finding.get("target_port")))
+            parts.append(_line("Solution type", finding.get("solution_type")))
 
     elif source in ("takeover_scan", "cache_poisoning", "graphql_scan",
                     "graphql_cop", "ai_surface_recon", "ai_attack"):

@@ -25,7 +25,7 @@ vi.mock('@/lib/triageRun', () => ({ findLiveTriageRun: (...a: unknown[]) => h.li
 vi.mock('@/app/api/graph/cache', () => ({ invalidateCache: (...a: unknown[]) => h.invalidate(...a) }))
 vi.mock('@/lib/audit', () => ({ writeAudit: (...a: unknown[]) => h.audit(...a) }))
 
-import {
+import { __setLayeredAgentConfirmed,
   recordVerdict, submitReview, listFindings, readFinding, startRun, stopRun,
   TriageActionError,
 } from './actions'
@@ -45,6 +45,7 @@ const VERDICT_OK = { updated: true, label: 'Vulnerability', rescored: true,
 
 beforeEach(() => {
   vi.clearAllMocks()
+  __setLayeredAgentConfirmed(true)
   globalThis.fetch = h.fetch as unknown as typeof fetch
   h.activation.mockResolvedValue(false)
   h.liveRun.mockResolvedValue(null)
@@ -107,19 +108,25 @@ describe('recordVerdict', () => {
     expect(sent().body.token_prefix).toBeUndefined()
   })
 
-  test('during a live run, an MCP verdict needs the layered-publish acknowledgement', async () => {
-    h.liveRun.mockResolvedValue({ id: 'r1', status: 'running' })
+  test('an older agent cannot let an MCP verdict overwrite an app decision, run or no run', async () => {
+    // With no run live, the ack was not asked for, and an agent that predates
+    // the `decided_in_app` rule overwrote a person's in-app decision.
+    __setLayeredAgentConfirmed(false)
     h.fetch.mockResolvedValueOnce(answer({ error: "unknown op 'finding_detail'" }, 400))
     const err = await refusal(recordVerdict(T, { findingId: 'v1', status: 'confirmed', channel: 'mcp' }))
-    expect(err.code).toBe('busy')
+    expect(err.code).toBe('agent_outdated')
     expect(h.fetch).toHaveBeenCalledOnce()           // the probe, and no write
+    expect(sent(0).body.op).toBe('finding_detail')
   })
 
-  test('during a live run, an acknowledged MCP verdict is written', async () => {
-    h.liveRun.mockResolvedValue({ id: 'r1', status: 'running' })
+  test('an acknowledged agent takes the MCP verdict, and is not asked again', async () => {
+    __setLayeredAgentConfirmed(false)
     h.fetch.mockResolvedValueOnce(answer({ found: true, layered_publish: true }))
+      .mockResolvedValueOnce(answer(VERDICT_OK)).mockResolvedValueOnce(answer(VERDICT_OK))
     await recordVerdict(T, { findingId: 'v1', status: 'confirmed', channel: 'mcp' })
     expect(sent(1).body.op).toBe('human_verdict')
+    await recordVerdict(T, { findingId: 'v1', status: 'confirmed', channel: 'mcp' })
+    expect(h.fetch).toHaveBeenCalledTimes(3)         // probe, write, write
   })
 
   test('a person\'s verdict never waits on a run: the publish honours it', async () => {

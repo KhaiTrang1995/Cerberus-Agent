@@ -164,10 +164,23 @@ describe('list_findings carries the layers', () => {
     })], total: 1 })
     const [row] = (await listFindings(ctx(), 'p1')).findings as Array<Record<string, unknown>>
     expect(row).toMatchObject({ triage_math_score: 62.5, triage_tier_rule: 'likely real',
-                                triage_decided_by: 'review', triage_fix_lever: 'remove the file',
+                                triage_decided_by: 'review',
                                 reviewedBy: 'mcp', reviewCurrent: false })
     expect(row.decidedVia).toBeUndefined()
     expect(JSON.stringify(row)).not.toMatch(/AGENT-WHY|triage_base_factors/)
+  })
+
+  test('an agent\'s fix lever reaches another agent only on request', async () => {
+    // It is reviewer text an external agent may have written, and it went out
+    // to every recon:read token by default.
+    const review = { triage_fix_lever: 'AGENT-LEVER', reviewed_via: 'mcp', review_state: 'current' }
+    agentReturns({ findings: [finding(review)], total: 1 })
+    const [plain] = (await listFindings(ctx(), 'p1')).findings as Array<Record<string, unknown>>
+    expect(JSON.stringify(plain)).not.toMatch(/AGENT-LEVER/)
+    agentReturns({ findings: [finding(review)], total: 1 })
+    const [asked] = (await listFindings(ctx(), 'p1', { includeQuotes: true }))
+      .findings as Array<Record<string, unknown>>
+    expect(asked.triage_fix_lever).toBe('AGENT-LEVER')
   })
 
   test('a person\'s decision says how it arrived', async () => {

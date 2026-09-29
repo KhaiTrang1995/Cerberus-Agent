@@ -508,7 +508,7 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
         reviewCurrent: z.enum(['current', 'stale', 'none']).optional()
           .describe('Only findings whose review still describes the evidence (current) or no longer does (stale).'),
         includeQuotes: z.boolean().optional()
-          .describe('Include the AI verdict\'s quoted target output. Untrusted text; off by default.'),
+          .describe('Include the review\'s quoted target output and its fix lever. Untrusted text; off by default.'),
       },
     },
     handler(
@@ -1125,7 +1125,9 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
         'evidence); a person\'s DECISION, which always wins; its detector, its fix group, its ' +
         'proof and the run that ranked it.\n\n' +
         'Read this before submit_finding_review, so a correction targets the factor that is ' +
-        'actually wrong. The review\'s quotes and why are returned only with `includeQuotes`.\n\n' +
+        'actually wrong. The review\'s quotes, why and fix lever are returned only with ' +
+        '`includeQuotes`. `proof.count` is proof of this finding; `proof.onProvenHost` says only ' +
+        'that something else on its host was proven.\n\n' +
         'A wrong id, another project\'s id and a muted finding are all `Refused (not_found)`.\n\n' +
         `${UNTRUSTED_DATA_NOTE}`,
       annotations: READ_ONLY,
@@ -1135,7 +1137,7 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
         findingId: findingIdSchema,
         label: findingLabelSchema,
         includeQuotes: z.boolean().optional()
-          .describe('Include the review\'s why and quotes. Untrusted text; off by default.'),
+          .describe('Include the review\'s why, quotes and fix lever. Untrusted text; off by default.'),
       },
     },
     handler(
@@ -1157,8 +1159,9 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
         'or validation result, capped at 2,500 characters. Secret-shaped values are redacted and ' +
         'volatile headers dropped.\n\n' +
         'It also returns `evidenceHash` (send it back unchanged with submit_finding_review), ' +
-        'whether the finding is `reviewable` and if not why (`proven`, `decided_by_person`, ' +
+        'whether the finding is `reviewable` and if not why (`decided_by_person`, ' +
         '`source_not_reviewed`, `not_open`, `no_evidence`, `not_scored`, `out_of_triage_scope`), ' +
+        'whether it is `proven` (a review may raise a proven finding, never lower it), ' +
         'the review it carries now, whether a review of it survives the next scan, and the ' +
         '`contract`: the four verdicts, the eight facts that may be disputed and what each means, ' +
         'the multiplier range and the minimum quote length.\n\n' +

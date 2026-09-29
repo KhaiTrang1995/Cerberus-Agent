@@ -624,13 +624,36 @@ class TestNormaliseAndRedact(unittest.TestCase):
         self.assertIn("session=abcd[REDACTED 16 chars]", bundle)
         self.assertIn("theme=dark", bundle)
 
+    def test_credential_headers_without_a_scheme_are_redacted(self):
+        """An auth profile can send a raw token, or a header of its own, that no
+        value shape recognises; get_finding_evidence promised them redacted."""
+        request = ("GET / HTTP/1.1\r\nHost: a.example.com\r\n"
+                   "Authorization: 7f3a9c2e41b8d6f0aa12\r\n"
+                   "X-Session: s3cr3tSessionValue99\r\n"
+                   "X-Api-Key: abcdef123456\r\n"
+                   "Content-Type: text/html\r\n"
+                   "WWW-Authenticate: Basic realm=\"admin\"\r\n")
+        out = evidence.redact_secret_shapes(request)
+        for secret in ("7f3a9c2e41b8d6f0aa12", "s3cr3tSessionValue99", "abcdef123456"):
+            with self.subTest(secret=secret):
+                self.assertNotIn(secret, out)
+        self.assertIn("X-Session: s3cr[REDACTED 20 chars]\r\n", out)
+        self.assertIn("Content-Type: text/html", out)
+        self.assertIn('WWW-Authenticate: Basic realm="admin"', out)
+
     def test_the_legacy_bundle_never_had_a_request(self):
-        """v3.1 queries did not select raw_request, so its bundles had no Request line."""
+        """v3.1 queries selected none of these, so its bundles had none of the lines."""
         row = {"id": "n1", "source": "nuclei", "name": "x", "raw_response": RESPONSE}
-        with_request = dict(row, raw_request="GET / HTTP/1.1\r\nHost: a.example.com\r\n")
-        self.assertEqual(evidence.build_bundle_legacy(row),
-                         evidence.build_bundle_legacy(with_request))
-        self.assertNotIn("Request:", evidence.build_bundle_legacy(with_request))
+        richer = dict(row, raw_request="GET / HTTP/1.1\r\nHost: a.example.com\r\n",
+                      matcher_name="word-match", fuzzing_parameter="q")
+        self.assertEqual(evidence.build_bundle_legacy(row), evidence.build_bundle_legacy(richer))
+        for line in ("Request:", "Matcher:", "Fuzzed parameter:"):
+            with self.subTest(line=line):
+                self.assertIn(line, evidence.build_bundle(richer))
+        gvm = {"id": "g1", "source": "gvm", "name": "x", "description": "weak cipher"}
+        gvm_richer = dict(gvm, target_port=443, solution_type="VendorFix")
+        self.assertEqual(evidence.build_bundle_legacy(gvm), evidence.build_bundle_legacy(gvm_richer))
+        self.assertIn("Port: 443", evidence.build_bundle(gvm_richer))
 
     def test_the_bundle_hash_has_no_model_or_prompt_in_it(self):
         self.assertEqual(evidence.bundle_hash("body"), evidence.bundle_hash("body"))

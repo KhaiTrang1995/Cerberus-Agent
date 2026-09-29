@@ -60,15 +60,19 @@ def _current_review(props: dict) -> Optional[dict]:
     }
 
 
-def reviewability(props: dict, row: Optional[dict], proven_now: bool,
-                  bundle: str) -> Optional[str]:
-    """Why a review may not be written now, or None. `row` None = out of scope."""
+def reviewability(props: dict, row: Optional[dict], bundle: str) -> Optional[str]:
+    """Why an EXTERNAL review may not be written now, or None. `row` None = out of scope.
+
+    Proof is not a reason here: a proven finding takes a review that raises it
+    and refuses one that lowers it, which only `validate_external_review` can
+    tell apart.
+    """
     base = layers.base_from_props(props)
     return evidence.not_reviewable_reason(
         in_scope=row is not None,
         scored=base is not None,
         decided=evidence.person_decided(props.get("triage_status"), props.get("triage_source")),
-        proven=bool(proven_now or (base and base.inputs.proven)),
+        proven=False,
         state=(base.state if base else props.get("triage_state") or "open"),
         source=(row or {}).get("source"),
         bundle=bundle,
@@ -101,7 +105,7 @@ def finding_evidence(client, user_id: str, project_id: str, finding_id: str,
     finding = read_finding_row(client.driver, user_id, project_id, finding_id, row["label"])
     bundle = evidence.build_bundle(finding) if finding else ""
     digest = evidence.bundle_hash(bundle)
-    reason = reviewability(props, finding, bool(row.get("proven_now")), bundle)
+    reason = reviewability(props, finding, bundle)
     return {
         "found": True,
         "finding_id": row.get("id"),
@@ -111,6 +115,8 @@ def finding_evidence(client, user_id: str, project_id: str, finding_id: str,
         "matches_last_run": bool(digest) and digest == (props.get("triage_evidence_hash") or ""),
         "reviewable": reason is None,
         "not_reviewable_because": reason,
+        # A review may raise a proven finding, never lower it.
+        "proven": bool(row.get("proven_now")) or _proven_at_base(props),
         "review_survives_rescan": evidence.review_survives_rescan(
             row.get("label"), (finding or {}).get("source") or row.get("source")),
         "current_review": _current_review(props),
@@ -141,9 +147,7 @@ def submit_review(client, user_id: str, project_id: str, finding_id: str,
     def decide(props, proven_now, updated_at, _label):
         if finding is not None and updated_at != seen:
             return {"refused": "evidence_changed"}
-        # Proof is judged by validate_external_review: only a review that
-        # would LOWER a proven finding is refused.
-        reason = reviewability(props, finding, False, bundle)
+        reason = reviewability(props, finding, bundle)
         if reason:
             return {"refused": reason}
         if not evidence_hash or evidence_hash != digest \

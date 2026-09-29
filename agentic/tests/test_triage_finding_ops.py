@@ -130,6 +130,16 @@ class TestSubmitReviewRefusals(unittest.TestCase):
         result = submit(client, {"verdict": "real", "evidence_quote": "Welcome to Example"})
         self.assertTrue(result["written"])
 
+    def test_a_finding_proven_at_the_last_run_takes_a_review_that_only_raises(self):
+        """Proof at the base used to refuse EVERY review as `proven`; only a
+        review that would lower the finding is refused."""
+        proven = base_props(triage_tier_inputs=json.dumps({"proven": True, "kev": False}))
+        result = submit(FakeClient(proven),
+                        {"verdict": "real", "evidence_quote": "Welcome to Example"})
+        self.assertTrue(result["written"])
+        lowering = submit(FakeClient(proven))
+        self.assertEqual(lowering["reason"], "proven")
+
     def test_not_found_and_ambiguous(self):
         self.assertEqual(submit(FakeClient({}, found=False))["reason"], "not_found")
         result = submit(FakeClient({}, ambiguous=["Secret", "Vulnerability"]))
@@ -200,6 +210,12 @@ class TestFindingEvidence(unittest.TestCase):
         self.assertEqual(set(contract["verdicts"]), set(sm.REVIEW_VERDICTS))
         self.assertEqual(len(contract["disputable_facts"]), 8)
         self.assertEqual(contract["min_quote_length"], 8)
+
+    def test_a_proven_finding_is_reviewable_and_says_it_is_proven(self):
+        """It takes a raising review, so `reviewable` must not say otherwise."""
+        out = self._evidence(FakeClient(base_props(), proven_now=True))
+        self.assertTrue(out["reviewable"])
+        self.assertTrue(out["proven"])
 
     def test_a_decided_finding_is_not_reviewable(self):
         out = self._evidence(FakeClient(base_props(triage_status="confirmed",

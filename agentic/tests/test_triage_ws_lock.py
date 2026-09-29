@@ -275,6 +275,75 @@ class TestStartDetachedRun(unittest.IsolatedAsyncioTestCase):
         _, _, refusal = self.wh.start_detached_run("u1", P1)
         self.assertIsNone(refusal)
 
+    async def test_an_mcp_stop_tells_every_attached_tab(self):
+        """A stop from outside the socket answered no tab: an attached tab stayed
+        `running` for ever, and one that attached later replayed no end."""
+        import asyncio
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+
+            async def send_json(self, message):
+                self.sent.append(message)
+
+        self.gate = asyncio.Event()
+        tab = FakeSocket()
+        run, _, _ = self.wh.start_detached_run("u1", P1, socket=tab)
+        await asyncio.wait_for(run.authorized.wait(), 2)
+        self.assertTrue(self.wh.stop_project_run(P1)["stopped"])
+        with self.assertRaises(asyncio.CancelledError):
+            await run.task
+        self.assertEqual(tab.sent[-1]["type"], "stopped")
+        late = FakeSocket()
+        await run.replay(late)
+        self.assertEqual(late.sent[-1]["type"], "stopped")
+
+    async def test_a_run_cancelled_before_it_starts_frees_the_slot(self):
+        """A task cancelled before its first step never runs its `finally`."""
+        import asyncio
+        run, _, _ = self.wh.start_detached_run("u1", P1)
+        run.task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await run.task
+        await asyncio.sleep(0)
+        self.assertNotIn(P1, _TRIAGE_IN_FLIGHT)
+
+    async def test_a_second_stop_does_not_cancel_the_finish(self):
+        """The first Stop's cancel lands; a second one landed inside `finish`
+        and left the row `running` until its heartbeat expired."""
+        import asyncio
+        test = self
+        test.finishing = asyncio.Event()
+        test.finished = False
+
+        class FinishingOrchestrator:
+            def __init__(self, **kwargs):
+                self.callback = kwargs["callback"]
+
+            async def run(self, state):
+                await self.callback.on_authorized("run-1")
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    await test.finishing.wait()           # the finish POST
+                    test.finished = True
+
+            async def cleanup(self):
+                pass
+
+        import unittest.mock as mock
+        with mock.patch.object(self.wh, "TriageOrchestrator", FinishingOrchestrator):
+            run, _, _ = self.wh.start_detached_run("u1", P1)
+        await asyncio.wait_for(run.authorized.wait(), 2)
+        self.assertTrue(self.wh.stop_project_run(P1)["stopped"])
+        await asyncio.sleep(0)
+        self.assertTrue(self.wh.stop_project_run(P1)["stopped"])
+        test.finishing.set()
+        with self.assertRaises(asyncio.CancelledError):
+            await run.task
+        self.assertTrue(test.finished)
+
     async def test_a_stop_while_publishing_is_refused(self):
         import asyncio
         self.gate = asyncio.Event()

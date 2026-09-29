@@ -38,6 +38,7 @@ vi.mock('@/lib/audit', () => ({ writeAudit: (...a: unknown[]) => h.writeAudit(..
 import { McpScopeError, McpAccessDenied, __resetRateLimiter } from '@/lib/mcpAuth'
 import { McpToolError } from './errors'
 import { setFindingVerdict } from './verdictTools'
+import { __setLayeredAgentConfirmed } from '@/lib/triage/actions'
 import type { McpContext } from './tools'
 
 const ctx = (scopes: string[] = ['triage:write']): McpContext => ({
@@ -55,6 +56,7 @@ const sentBody = () => JSON.parse(h.fetch.mock.calls[0][1].body)
 beforeEach(() => {
   vi.clearAllMocks()
   __resetRateLimiter()
+  __setLayeredAgentConfirmed(true)
   vi.stubGlobal('fetch', h.fetch)
   h.findProject.mockResolvedValue({ id: 'p1', userId: 'owner' })
   h.liveTriageRun.mockResolvedValue(null)
@@ -227,35 +229,39 @@ describe('a failed write is never reported as success', () => {
 // re-file a finding decided meanwhile. A LAYERED agent re-reads the decision
 // under the node lock at publish, so during a live run a verdict is written only
 // when the agent acknowledges that (`layered_publish`). Version skew fails closed.
-describe('REGRESSION: a live run is safe only with a layered agent', () => {
-  test('an agent that cannot acknowledge refuses the write, and nothing is written', async () => {
-    h.liveTriageRun.mockResolvedValue({ id: 'r1', status: 'running' })
+describe('REGRESSION: an MCP verdict needs a layered agent, run or no run', () => {
+  test('with no run live, an older agent still cannot take it (it would overwrite an app decision)', async () => {
+    __setLayeredAgentConfirmed(false)
     h.fetch.mockResolvedValueOnce({ ok: false, status: 400,
                                     json: async () => ({ error: "unknown op 'finding_detail'" }) })
     await expect(setFindingVerdict(ctx(), 'p1', 'v1', 'confirmed'))
-      .rejects.toMatchObject({ code: 'busy' })
+      .rejects.toMatchObject({ code: 'agent_outdated' })
     expect(h.fetch).toHaveBeenCalledOnce()
+    expect(JSON.parse(h.fetch.mock.calls[0][1].body).op).toBe('finding_detail')
   })
 
-  test('a publishing run with an older agent says to retry once it has finished', async () => {
+  test('an agent that answers without the acknowledgement is refused too', async () => {
+    __setLayeredAgentConfirmed(false)
     h.liveTriageRun.mockResolvedValue({ id: 'r1', status: 'publishing' })
     h.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ found: true }) })
     await expect(setFindingVerdict(ctx(), 'p1', 'v1', 'confirmed'))
-      .rejects.toThrow(/Retry once the run has finished/)
+      .rejects.toThrow(/rebuild the agent image/)
   })
 
   test('a layered agent takes the verdict during the run', async () => {
+    __setLayeredAgentConfirmed(false)
     h.liveTriageRun.mockResolvedValue({ id: 'r1', status: 'running' })
     h.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ found: true, layered_publish: true }) })
     await expect(setFindingVerdict(ctx(), 'p1', 'v1', 'confirmed')).resolves.toMatchObject({ recorded: true })
     expect(JSON.parse(h.fetch.mock.calls[1][1].body).op).toBe('human_verdict')
   })
 
-  test('an unreadable run state FAILS CLOSED', async () => {
-    h.liveTriageRun.mockRejectedValue(new Error('db down'))
+  test('an agent that cannot be reached FAILS CLOSED', async () => {
+    __setLayeredAgentConfirmed(false)
+    h.fetch.mockRejectedValueOnce(new TypeError('fetch failed'))
     await expect(setFindingVerdict(ctx(), 'p1', 'v1', 'confirmed'))
-      .rejects.toMatchObject({ code: 'busy' })
-    expect(h.fetch).not.toHaveBeenCalled()
+      .rejects.toMatchObject({ code: 'agent_outdated' })
+    expect(h.fetch).toHaveBeenCalledOnce()
   })
 })
 

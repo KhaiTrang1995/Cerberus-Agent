@@ -146,10 +146,20 @@ class TriageOrchestrator:
             # [R] AUTHORIZE. Before any read: a run that is not allowed to
             # publish must not spend minutes and LLM budget discovering that.
             await self._phase("authorizing", "Checking the project...", 2)
+            authorizing = asyncio.ensure_future(self.run_client.authorize(
+                model, score_model.SCORE_MODEL_VERSION, trigger=self.trigger,
+                token_id=self.token_id, review_budget=self.review_budget))
             try:
-                await self.run_client.authorize(
-                    model, score_model.SCORE_MODEL_VERSION, trigger=self.trigger,
-                    token_id=self.token_id, review_budget=self.review_budget)
+                await asyncio.shield(authorizing)
+            except asyncio.CancelledError:
+                # A Stop mid-authorize: the webapp may already have created the
+                # row. Learn its id so the `finally` records it stopped, instead
+                # of leaving it `running` for ten minutes.
+                try:
+                    await authorizing
+                except Exception:                                 # noqa: BLE001
+                    pass
+                raise
             except TriageRunAborted as refused:
                 await self._notify("on_start_refused", refused.reason)
                 raise
@@ -203,6 +213,9 @@ class TriageOrchestrator:
             # [D] REMEDIATE.
             analysis = await self._remediate(state, scored)
             state["analysis_result"] = analysis
+            # A heartbeat lost during the fix items must stop the run here: a
+            # publish without one can be declared lost mid-write.
+            self.run_client.check_abort()
 
             # [E] PUBLISH. Claim first: a run that lost its claim writes nothing.
             await self._phase("publishing", "Publishing results...", 92)

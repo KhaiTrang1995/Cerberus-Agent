@@ -608,7 +608,8 @@ class TestAPersonsDecision(unittest.TestCase):
     def test_a_false_positive_without_a_base_still_leaves_the_ranking(self):
         client = self._client(props={})
         client.set_human_verdict(UID, PID, "v1", "likely_noise")
-        self.assertIn("SET n.triage_state = 'false_positive'", client.queries[2])
+        self.assertIn("WHEN $status = 'likely_noise' THEN 'false_positive'", client.queries[2])
+        self.assertEqual(client.params[2]["status"], "likely_noise")
 
     def test_an_injected_reason_is_a_parameter(self):
         client = self._client()
@@ -627,6 +628,28 @@ class TestAnExternalReview(unittest.TestCase):
 
     REVIEW = {"triage_ai_verdict": "doubtful", "triage_ai_channel": "mcp",
               "triage_ai_by": "rdmn_mcp_0a1b2c3d", "triage_ai_evidence_hash": "a" * 40}
+
+    def test_long_review_corrections_keep_their_disputes(self):
+        """Cut at 4000 characters mid-JSON, the corrections no longer parsed, and
+        the reader dropped every dispute and the multiplier: the stored review
+        silently stopped counting while the reply said it had been accepted."""
+        import json
+        from cypherfix_triage import layers
+        corrections = {
+            "verdict": "doubtful", "impact_multiplier": 0.6,
+            "impact_quote": "q" * 900,
+            "disputed_facts": [{"fact": fact, "quote": "\"x\"\n" * 220}
+                               for fact in ("reachable", "tool_confirmed", "extracted_proof",
+                                            "dast_confirmed", "authenticated")],
+        }
+        self.assertGreater(len(json.dumps(corrections)), 4000)
+        stored = TriageMixin._clean_review({**self.REVIEW, "triage_ai_corrections": corrections})
+        text = stored["triage_ai_corrections"]
+        self.assertLessEqual(len(text), 4000)
+        review = layers.review_from_props({**self.REVIEW, "triage_ai_corrections": text})
+        self.assertEqual(len(review.disputed_facts), 5)
+        self.assertEqual(review.impact_multiplier, 0.6)
+        self.assertTrue(review.impact_quote)
 
     def test_decide_runs_after_the_lock_with_the_live_state(self):
         seen = []

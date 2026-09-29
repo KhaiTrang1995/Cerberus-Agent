@@ -93,9 +93,13 @@ def fence_node_context(message):
     marker_at = message.rfind(_USER_QUERY_MARKER)
     if header_end == -1 or marker_at == -1 or marker_at < header_end:
         return message
-    header = message[:header_end + 1]
+    # The label is the node's name, built from its properties, so it is as
+    # untrusted as the context: it goes inside the fence, and the header that
+    # stays outside says only what the section is.
+    label = message[len(_NODE_CONTEXT_PREFIX):header_end]
     context = message[header_end + 2:marker_at]
-    return f"{header}\n{wrap_untrusted(context, 'GRAPH_NODE_CONTEXT')}{message[marker_at:]}"
+    fenced = wrap_untrusted(f"Node: {label}\n{context}", "GRAPH_NODE_CONTEXT")
+    return f"[Graph Node Context]\n{fenced}{message[marker_at:]}"
 
 
 # One standing instruction, added once to the agent's system prompt, that tells the

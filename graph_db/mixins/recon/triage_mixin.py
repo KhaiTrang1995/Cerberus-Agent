@@ -1153,9 +1153,14 @@ class TriageMixin:
                max(toString(n.triaged_at)) AS last_triaged_at,
                // What the review would actually cost: facts and advisories are
                // skipped, and they are the bulk of a real project.
-               count(CASE WHEN run_id = ''
+               // No still-valid review, and nothing that settles it already: a
+               // person's decision or proof. A builtin review a model switch
+               // retires is not counted, so this is a floor.
+               count(CASE WHEN review_state <> 'current'
                             AND NOT coalesce(n.source, '') IN ['security_check', 'osv', 'retirejs']
                             AND state = 'open'
+                            AND NOT {_PERSON_DECIDED}
+                            AND NOT {_LIVE_PROOF}
                           THEN 1 END) AS reviewable,
                // Reviews a run keeps rather than pays for again, while their
                // evidence is unchanged.
@@ -1464,12 +1469,44 @@ class TriageMixin:
             if value is None or value == "":
                 out[key] = None if key != "triage_ai_by" else ""
                 continue
+            if key == "triage_ai_corrections":
+                out[key] = cls._fit_corrections(str(value), caps[key])
+                continue
             out[key] = str(value)[:caps.get(key, 200)]
         if out.get("triage_ai_verdict") not in VALID_AI_VERDICT:
             raise ValueError("a review needs a valid verdict")
         if out.get("triage_ai_channel") not in ("builtin", "mcp"):
             raise ValueError("a review needs a channel")
         return out
+
+    @staticmethod
+    def _fit_corrections(text: str, cap: int) -> str | None:
+        """The corrections JSON within `cap`, still parseable.
+
+        Cutting the string mid-JSON made it unreadable, and a reader that cannot
+        parse it drops every dispute and the multiplier. Quotes are shortened
+        instead: combine reads the fact names and whether an impact quote
+        exists, never the quote's words. Unparseable input is dropped.
+        """
+        import json as _json
+        if len(text) <= cap:
+            return text
+        try:
+            data = _json.loads(text)
+        except ValueError:
+            return None
+        if not isinstance(data, dict):
+            return None
+        for limit in (300, 120, 40):
+            if isinstance(data.get("impact_quote"), str):
+                data["impact_quote"] = data["impact_quote"][:limit]
+            for dispute in data.get("disputed_facts") or []:
+                if isinstance(dispute, dict) and isinstance(dispute.get("quote"), str):
+                    dispute["quote"] = dispute["quote"][:limit]
+            shorter = _json.dumps(data, default=str)
+            if len(shorter) <= cap:
+                return shorter
+        return None
 
     @staticmethod
     def _write_tx(driver, work, timeout: float):
@@ -1534,9 +1571,10 @@ class TriageMixin:
         WHERE (n.id = k.id OR n.finding_id = k.id)
           AND (k.label = '' OR k.label IN labels(n))
           AND n.user_id = $user_id AND n.project_id = $project_id
-          AND NOT n:Muted
         SET n._triage_lock = true
         REMOVE n._triage_lock
+        // After the lock: a mute that committed while this waited is seen.
+        WITH k, n WHERE NOT n:Muted
         RETURN k.id AS id, k.label AS label, elementId(n) AS eid,
                toString(n.updated_at) AS updated_at, {_LIVE_PROOF} AS proven_now,
                {self._layer_map()} AS props
@@ -1594,12 +1632,14 @@ class TriageMixin:
           SET n.triage_proof = row.proof)
         FOREACH (_ IN CASE WHEN row.intel_date IS NOT NULL THEN [1] ELSE [] END |
           SET n.triage_intel_date = row.intel_date)
+        // Before the new review: the cleanup moves a v3.1 reason into
+        // triage_ai_why, which a review written after it then replaces.
+        {_legacy_cleanup()}
         FOREACH (_ IN CASE WHEN row.review IS NOT NULL THEN [1] ELSE [] END |
           SET n += row.review, n.triage_ai_at = datetime())
         FOREACH (_ IN CASE WHEN row.review IS NULL AND row.mark_not_reviewed
                              AND n.triage_ai_verdict IS NULL THEN [1] ELSE [] END |
           SET n.triage_ai_verdict = 'not_reviewed')
-        {_legacy_cleanup()}
         """, rows=writes)
             return local
 
@@ -1764,20 +1804,23 @@ class TriageMixin:
                 tx.run(f"MATCH (n) WHERE elementId(n) = $eid SET {self._FINAL_SET}",
                        eid=rec.get("eid"), final=final)
                 rescored = True
-            elif status == "likely_noise":
-                # No base to recompute from, but the section moves at once.
+            else:
+                # No base to recompute from. The section still follows the
+                # decision at once, and who decided is the decision's own: a
+                # Reset on a finding no run ever scored leaves it unscored.
                 tx.run("""
         MATCH (n) WHERE elementId(n) = $eid
-        SET n.triage_state = 'false_positive', n.triage_priority_score = 0.0,
-            n.triage_decided_by = 'person', n.triage_rescored_at = datetime()
-        """, eid=rec.get("eid"))
-            elif props.get("triage_state") == "false_positive":
-                # A legacy false positive released: back to its rules-only score.
-                tx.run("""
-        MATCH (n) WHERE elementId(n) = $eid
-        SET n.triage_state = 'open',
-            n.triage_priority_score = coalesce(n.triage_math_score, n.triage_priority_score),
-            n.triage_decided_by = CASE WHEN $status = 'confirmed' THEN 'person' ELSE 'rules' END,
+        WITH n, n.triage_state AS was_state, n.triage_priority_score AS was_score
+        SET n.triage_state = CASE WHEN $status = 'likely_noise' THEN 'false_positive'
+                                  WHEN was_state = 'false_positive' THEN 'open'
+                                  ELSE was_state END,
+            n.triage_priority_score = CASE
+                WHEN $status = 'likely_noise' THEN 0.0
+                WHEN was_state = 'false_positive' THEN coalesce(n.triage_math_score,
+                     CASE WHEN n.triage_run_id IS NULL THEN NULL ELSE was_score END)
+                ELSE was_score END,
+            n.triage_decided_by = CASE WHEN $status IN ['confirmed', 'likely_noise'] THEN 'person'
+                                       WHEN n.triage_run_id IS NULL THEN NULL ELSE 'rules' END,
             n.triage_rescored_at = datetime()
         """, eid=rec.get("eid"), status=status)
 

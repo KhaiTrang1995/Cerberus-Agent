@@ -329,6 +329,72 @@ class LiveLayersCase(unittest.TestCase):
         self.assertEqual(out["reason"], "proven")
         self.assertNotIn("triage_ai_verdict", self.props("mid"))
 
+    def test_a_reset_on_a_finding_no_run_scored_leaves_it_unscored(self):
+        """False positive then Reset gave a never-scored finding a 0.0 score, and
+        False positive, Real, Reset left `decided_by = person` with no decision."""
+        from cypherfix_triage.layers import combine_props
+        with self.driver.session() as s:
+            s.run("CREATE (v:Vulnerability {id: 'fresh', name: 'New', severity: 'high', "
+                  "source: 'nuclei', user_id: $u, project_id: $p})", u=self.uid, p=self.pid)
+        for status in ("likely_noise", "confirmed", "unreviewed"):
+            self.client.set_human_verdict(self.uid, self.pid, "fresh", status, combine=combine_props)
+        p = self.props("fresh")
+        self.assertNotIn("triage_priority_score", p)
+        self.assertNotIn("triage_decided_by", p)
+        self.assertEqual(p["triage_status"], "unreviewed")
+
+    def test_a_mute_that_lands_while_the_publish_waits_is_respected(self):
+        """The publish read `NOT n:Muted` before taking the lock, so a mute that
+        committed while it waited was published over."""
+        self.publish(self.row(MID))
+        held = threading.Event()
+
+        def mute_and_hold():
+            with self.driver.session() as s:
+                tx = s.begin_transaction()
+                tx.run("MATCH (v:Vulnerability {id: 'mid', user_id: $u, project_id: $p}) "
+                       "SET v:Muted, v.muted = true, v.muted_by = $u", u=self.uid, p=self.pid)
+                held.set()
+                time.sleep(2)
+                tx.commit()
+
+        holder = threading.Thread(target=mute_and_hold)
+        holder.start()
+        self.assertTrue(held.wait(10))
+        result = self.publish(self.row(MID, run_id="run-after-mute"))
+        holder.join()
+        self.assertEqual(result["updated"], 0)
+        self.assertEqual(self.props("mid")["triage_run_id"], "run-live")
+
+    def test_preflight_counts_what_a_run_would_review(self):
+        """It counted only never-triaged findings, so from the second run on it
+        promised no review work at all."""
+        self.publish(self.row(TOP), self.row(MID))
+        self.assertEqual(self.client.triage_preflight(self.uid, self.pid)["reviewable"], 2)
+        with self.driver.session() as s:
+            s.run("MATCH (v:Vulnerability {id:'mid', user_id:$u, project_id:$p}) SET v += $r",
+                  u=self.uid, p=self.pid, r=self.mcp_review(MID))
+        self.assertEqual(self.client.triage_preflight(self.uid, self.pid)["reviewable"], 1)
+        self.client.set_human_verdict(self.uid, self.pid, "top", "confirmed", "seen it")
+        self.assertEqual(self.client.triage_preflight(self.uid, self.pid)["reviewable"], 0)
+
+    def test_a_new_review_never_inherits_a_v31_rationale(self):
+        """The cleanup ran after the review was written, and copied the old AI
+        reason into the new review's empty `why`."""
+        from cypherfix_triage import evidence, layers
+        with self.driver.session() as s:
+            s.run("MATCH (v:Vulnerability {id:'mid', user_id:$u, project_id:$p}) "
+                  "SET v.triage_reason = 'v3.1 AI said so'", u=self.uid, p=self.pid)
+        review = layers.review_props(
+            {"verdict": "unclear", "evidence_quote": "Finding: Old banner"},
+            channel="builtin", by="", model="m", prompt_version="review-v2",
+            evidence_hash=evidence.bundle_hash(evidence.build_bundle(MID)))
+        self.publish(self.row(MID, review=review))
+        p = self.props("mid")
+        self.assertEqual(p["triage_ai_verdict"], "unclear")
+        self.assertNotIn("triage_ai_why", p)
+        self.assertNotIn("triage_reason", p)
+
     def test_proof_on_the_host_is_not_proof_of_the_finding(self):
         """`triage_proof` records proof on the HOST; a rescore must not read it as T1."""
         from cypherfix_triage.layers import combine_props

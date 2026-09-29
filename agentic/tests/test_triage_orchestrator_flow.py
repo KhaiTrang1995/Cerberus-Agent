@@ -829,6 +829,71 @@ class TestStopAndBudget(unittest.TestCase):
         self.assertEqual(h.client.finished["status"], "stopped")
         self.assertEqual(h.graph.batches, [])
 
+    def test_a_run_that_lost_its_heartbeat_during_the_fix_items_does_not_publish(self):
+        """Two failed heartbeats set the abort; nothing checked it again before
+        the publish, which then ran with no heartbeat and could be declared lost
+        mid-write."""
+        client = FakeRunClient()
+        lost = {"now": False}
+
+        def check_abort():
+            if lost["now"]:
+                raise TriageRunAborted("the webapp could not be reached", "stopped")
+
+        client.check_abort = check_abort
+        h = Harness(run_client=client)
+        remediate = h.orch._remediate
+
+        async def remediate_then_lose(state, scored):
+            out = await remediate(state, scored)
+            lost["now"] = True
+            return out
+
+        h.orch._remediate = remediate_then_lose
+        h.run(dict(NO_MODEL))
+        self.assertFalse(client.published)
+        self.assertEqual(h.graph.batches, [])
+        self.assertEqual(client.finished["status"], "stopped")
+
+    def test_a_stop_during_authorize_still_closes_the_row(self):
+        """The webapp creates the row inside `authorize`; a cancel that cut the
+        call short left the run without its id, so `finish` never closed the row
+        and it blocked the project for ten minutes."""
+        import unittest.mock as mock
+        from cypherfix_triage import orchestrator as module
+
+        class SlowAuthorize(FakeRunClient):
+            async def authorize(self, model, version, **kwargs):
+                self.started.set()
+                await self.gate.wait()
+                self.run_id = "run-1"
+                return self.run_id
+
+            async def finish(self, status, summary=None, error_class="", intel_date=""):
+                self.finished = {"status": status, "run_id": self.run_id}
+
+        client = SlowAuthorize()
+        client.run_id = None
+        h = Harness(run_client=client)
+
+        async def fake_settings(project_id):
+            return dict(NO_MODEL)
+
+        async def scenario():
+            client.started, client.gate = asyncio.Event(), asyncio.Event()
+            task = asyncio.ensure_future(h.orch.run(state(dict(NO_MODEL))))
+            await client.started.wait()
+            task.cancel()
+            await asyncio.sleep(0)
+            client.gate.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+        with mock.patch.object(module, "load_cypherfix_settings", fake_settings), \
+             mock.patch.object(module, "TriageRunClient", lambda *a, **k: client):
+            run(scenario())
+        self.assertEqual(client.finished, {"status": "stopped", "run_id": "run-1"})
+
     def test_a_cancel_during_the_publish_lets_it_finish(self):
         """B17: half the batches and no fix list is worse than either."""
         h = Harness()
