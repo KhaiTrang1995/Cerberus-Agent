@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.23.0] - 2026-09-29
+
+### Fixed
+
+- **An MCP mute or unmute answered with a server error was reported as not done**, even when it had been written: the unmute removed its exemptions and the mute refunded its budget. It is now `mute_outcome_unknown` / `unmute_outcome_unknown`.
+- **An agent's mute could re-hide a finding you unmuted while its call was running.** The finding is unmuted again and reported as `kept_visible`.
+- **The error codes the MCP mute tools document never reached the agent** (`busy`, `budget_exhausted`, `*_outcome_unknown`); they are now in the message. A mute budget refund no longer lands in the next day's budget.
+- **The Mute button said "this finding changed" during a version activation**, and announced an already-muted finding as your mute.
+
 ## [6.22.0] - 2026-09-29
 
 ### Added
