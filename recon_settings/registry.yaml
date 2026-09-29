@@ -2154,6 +2154,7 @@ fields:
     traffic: none
     roe_capped: false
     mcp: create_only
+    rescope: true
     validator: free_text
     group: scope
     meaning: >-
@@ -2161,8 +2162,9 @@ fields:
       entry may carry a wildcard marker - "*.example.com" or "*example.com" -
       which makes that one domain be fully enumerated instead of scanned as
       listed; every other entry stays literal. Editable after creation from the
-      project form only: it stays create_only over MCP, so a parsed Rules of
-      Engagement document can never re-point the platform's targets.
+      project form, and over MCP only by update_project_scope under its own
+      permission: update_recon_settings and a parsed Rules of Engagement document
+      can never re-point the platform's targets.
   domainBatchMode:
     tool: targeting
     runtime_key: "DOMAIN_BATCH_MODE"
@@ -3003,12 +3005,14 @@ fields:
     traffic: passive
     roe_capped: false
     mcp: create_only
-    validator: free_text
+    rescope: true
+    validator: github_name
     group: othertarget
     meaning: >-
       The GitHub organisation the secret hunt scans. It points a scanner at
-      someone else's assets, so it is scope by another name: settable when the
-      project is created and immutable afterwards.
+      someone else's assets, so it is scope by another name: set when the project
+      is created, and afterwards changed only by the project form or by
+      update_project_scope under its own permission.
   githubTargetRepos:
     tool: github
     runtime_key: null
@@ -3017,7 +3021,8 @@ fields:
     traffic: passive
     roe_capped: false
     mcp: create_only
-    validator: free_text
+    rescope: true
+    validator: github_repo_list
     group: othertarget
     meaning: >-
       Comma-separated list. Leave empty to scan all repositories.
@@ -3442,11 +3447,13 @@ fields:
     traffic: active
     roe_capped: false
     mcp: create_only
-    validator: free_text
+    rescope: true
+    values: [both, ips_only, hostnames_only]
     group: othertarget
     meaning: >-
-      Which targets from recon data to scan. &ldquo;Both&rdquo; provides the most
-      thorough coverage.
+      Which targets from recon data to scan: both, ips_only or hostnames_only.
+      Both provides the most thorough coverage. An unknown value makes the GVM
+      scan select nothing, so the value set is closed.
   gvmTaskTimeout:
     tool: gvm
     runtime_key: null
@@ -7322,7 +7329,7 @@ fields:
       The IANA timezone the scanning window's times are read in.
     form_section: "TargetSection"
   scaIntelCorrelationEnabled:
-    tool: supply_chain
+    tool: supply_chain_recon
     runtime_key: "SCA_INTEL_CORRELATION_ENABLED"
     unit: none
     phase: standalone
@@ -8397,11 +8404,13 @@ fields:
     traffic: passive
     roe_capped: false
     mcp: create_only
+    rescope: true
     validator: free_text
     group: othertarget
     meaning: >-
       The GitHub organisation whose repositories the supply-chain scan walks.
-      Points the scanner at someone else's assets, so it is write-once.
+      Points the scanner at someone else's assets, so after creation only the
+      project form or update_project_scope changes it.
   supplyChainOrgRef:
     tool: supply_chain
     runtime_key: null
@@ -8463,11 +8472,12 @@ fields:
     traffic: passive
     roe_capped: false
     mcp: create_only
+    rescope: true
     validator: free_text
     group: othertarget
     meaning: >-
-      The git ref checked out in the scanned repository. Write-once with the
-      repository it belongs to.
+      The git ref checked out in the scanned repository. Changed together with
+      the repository it belongs to.
   supplyChainRepoScope:
     tool: supply_chain
     runtime_key: null
@@ -8476,11 +8486,12 @@ fields:
     traffic: passive
     roe_capped: false
     mcp: create_only
+    rescope: true
     validator: free_text
     group: othertarget
     meaning: >-
-      Which parts of the repository the scan reads. Write-once with the repository
-      it belongs to.
+      Which parts of the repository the scan reads. Changed together with the
+      repository it belongs to.
   supplyChainRepoUrl:
     tool: supply_chain
     runtime_key: null
@@ -8489,11 +8500,13 @@ fields:
     traffic: passive
     roe_capped: false
     mcp: create_only
+    rescope: true
     validator: free_text
     group: othertarget
     meaning: >-
       The repository the supply-chain scan clones. It becomes a git clone argument
-      against a third party's infrastructure, so it is write-once like the scope.
+      against a third party's infrastructure, so like the scope it is changed after
+      creation only by the project form or by update_project_scope.
   supplyChainSbomFile:
     tool: supply_chain
     runtime_key: null

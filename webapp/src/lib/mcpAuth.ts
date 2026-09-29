@@ -65,6 +65,20 @@ export const MCP_SCOPES = [
   // assertion outlives the token and appears in an audit. Writing the audit
   // trail is a different act from configuring the work.
   'engagement:authorize',
+  // A preset is applied by a PERSON later, often without reading it, so writing
+  // one is a stored instruction rather than a change to one project. Split from
+  // recon:settings for that reason: tuning a project you are looking at is a
+  // different grant from filling the library everyone applies from.
+  'preset:write',
+  // Apply REPLACES every preset field of a project in one call, resets what the
+  // preset does not name, and bypasses the per-call key cap update_recon_settings
+  // has. Held with preset:write it is recon:settings over the preset field set.
+  'preset:apply',
+  // Re-points the standalone scanners and edits a batch project's host list on a
+  // project that already exists. Scope was create-only for every token; this
+  // reopens exactly eight target-list fields, so it is never auto-ticked, and
+  // widening a third-party engagement also needs engagement:authorize.
+  'project:rescope',
   'kali:exec',
 ] as const
 

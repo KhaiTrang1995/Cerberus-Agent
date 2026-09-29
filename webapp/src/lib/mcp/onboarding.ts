@@ -879,10 +879,10 @@ const REFERENCES: ReferenceSpec[] = [
     path: 'references/lifecycle-and-scans.md',
     title: 'Lifecycle and scans',
     intro:
-      'A project is the unit of work and everything hangs off it. Its targeting mode is locked at ' +
-      'creation: you can never change what an existing project points at, whatever permissions you ' +
-      'hold. What you can do is run the pipeline over it, watch that run, and read the versions it ' +
-      'leaves behind.',
+      'A project is the unit of work and everything hangs off it. Its targeting mode, domain and ' +
+      'address list are locked at creation: you can never re-point an existing project, whatever ' +
+      'permissions you hold. What you can do is run the pipeline over it, watch that run, and read ' +
+      'the versions it leaves behind.',
     areas: ['orient', 'scans', 'timeline'],
     workflows: ['find-the-project', 'run-a-full-scan', 'queue-when-busy', 'what-changed', 'nightly-rescan', 'overwrite-mode', 'observe-other-scanners'],
   },
@@ -911,15 +911,18 @@ const REFERENCES: ReferenceSpec[] = [
     path: 'references/engagements.md',
     title: 'Opening and proving an engagement',
     intro:
-      'Everything that has to be true BEFORE a scan is allowed to run. A project\'s scope is ' +
-      'fixed when it is created and immutable afterwards, so this is the only place it is ' +
-      'decided; the engagement\'s LIMITS are ordinary settings you can change either way and ' +
+      'Everything that has to be true BEFORE a scan is allowed to run. A project\'s targeting ' +
+      'mode, domain and address list are fixed when it is created, so this is where they are ' +
+      'decided; its other target lists (a batch host list, the other scanners\' targets) change ' +
+      'only through update_project_scope, under its own permission, and widening a third-party ' +
+      'engagement there needs a new authorization record; the engagement\'s LIMITS are ordinary ' +
+      'settings you can change either way and ' +
       'that are enforced at scan start regardless; its RECORD is a person\'s to write and you ' +
       'cannot read it; and what authorized the work is recorded append-only, so it survives the ' +
       'token that claimed it. The preflight is what turns "the pipeline respects the scope" from ' +
       'an assertion into a diff you can check.',
     areas: ['engagement'],
-    workflows: ['open-an-engagement', 'tighten-mid-engagement'],
+    workflows: ['open-an-engagement', 'tighten-mid-engagement', 'change-a-target-list'],
   },
   {
     path: 'references/settings.md',
@@ -929,9 +932,10 @@ const REFERENCES: ReferenceSpec[] = [
       'is reachable and each is bounded, validated or corrected at scan start rather than blocked, ' +
       'so read describe_recon_settings for the bound before you write and do not probe for it: one ' +
       'bad key refuses the whole call. A setting takes effect on the NEXT scan, not on the graph ' +
-      'you already have.',
+      'you already have. A preset is a whole configuration: applying one REPLACES the project\'s, ' +
+      'and a preset you save is applied later by a person who may not read it.',
     areas: ['settings'],
-    workflows: ['change-tuning'],
+    workflows: ['change-tuning', 'apply-a-preset', 'curate-a-preset'],
   },
   {
     path: 'references/kali-exec.md',

@@ -21,6 +21,8 @@ const h = vi.hoisted(() => ({
   updateProject: vi.fn(),
   updateManyProjects: vi.fn(),
   findQueued: vi.fn(),
+  findAuthProfile: vi.fn(),
+  fireteamAudit: vi.fn(),
   findSchedules: vi.fn(),
   orchestratorFetch: vi.fn(),
   liveWriters: vi.fn(),
@@ -37,6 +39,8 @@ vi.mock('@/lib/prisma', () => ({
       updateMany: (...a: unknown[]) => h.updateManyProjects(...a),
     },
     jobQueue: { findMany: (...a: unknown[]) => h.findQueued(...a) },
+    projectAuthProfile: { findUnique: (...a: unknown[]) => h.findAuthProfile(...a) },
+    fireteamSettingsAudit: { createMany: (...a: unknown[]) => h.fireteamAudit(...a) },
     scanSchedule: { findMany: (...a: unknown[]) => h.findSchedules(...a) },
   },
 }))
@@ -49,6 +53,8 @@ vi.mock('@/lib/startFullScan', () => ({ startFullScan: (...a: unknown[]) => h.st
 vi.mock('@/lib/audit', () => ({ writeAudit: (...a: unknown[]) => h.audit(...a) }))
 
 import { McpScopeError, McpAccessDenied, __resetRateLimiter } from '@/lib/mcpAuth'
+import { settingsFingerprint } from '@/lib/jobQueue'
+import { authProfileFingerprint } from '@/lib/authProfileFingerprint'
 import { startRecon, stopRecon, updateReconSettings } from './writeTools'
 import type { McpContext } from './tools'
 
@@ -61,6 +67,9 @@ const ctx = (scopes: string[] = ALL_SCOPES): McpContext => ({
   },
 })
 
+/** The project updatedAt a write reads before its compare-and-swap. */
+const READ_AT = new Date('2026-09-29T08:00:00.000Z')
+
 const OK_START = {
   ok: true,
   state: { status: 'starting', current_phase: 'domain_discovery' },
@@ -72,12 +81,13 @@ beforeEach(() => {
   vi.clearAllMocks()
   vi.unstubAllEnvs()
   __resetRateLimiter()
-  h.findProject.mockResolvedValue({ id: 'p1', userId: 'owner' })
+  h.findProject.mockResolvedValue({ id: 'p1', userId: 'owner', updatedAt: READ_AT })
   h.liveWriters.mockResolvedValue(null)
   h.scanWriters.mockResolvedValue(null)
   h.startFullScan.mockResolvedValue(OK_START)
   h.orchestratorFetch.mockResolvedValue({ ok: true, json: async () => ({ status: 'stopping' }) })
   h.findQueued.mockResolvedValue([])
+  h.findAuthProfile.mockResolvedValue(null)
   h.findSchedules.mockResolvedValue([])
   h.updateProject.mockResolvedValue({})
   h.updateManyProjects.mockResolvedValue({ count: 1 })
@@ -261,7 +271,7 @@ describe('stop_recon', () => {
       h.orchestratorFetch
         .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'running' }) })
         .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'stopping' }) })
-      const r = await stopRecon(ctx(), 'p1') as Record<string, never>
+      const r = await stopRecon(ctx(), 'p1') as Record<string, unknown>
       expect(r.stopped).toBe(true)
       expect(String(r.note)).toMatch(/was running/i)
     })
@@ -271,7 +281,7 @@ describe('stop_recon', () => {
         h.orchestratorFetch
           .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'idle' }) })
           .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'idle' }) })
-        const r = await stopRecon(ctx(), 'p1') as Record<string, never>
+        const r = await stopRecon(ctx(), 'p1') as Record<string, unknown>
         expect(r.stopped).toBe(false)
         expect(String(r.note)).toMatch(/nothing/i)
       })
@@ -282,7 +292,7 @@ describe('stop_recon', () => {
       h.orchestratorFetch
         .mockResolvedValueOnce({ ok: false, status: 500 })
         .mockResolvedValueOnce({ ok: true, json: async () => ({ status: 'idle' }) })
-      const r = await stopRecon(ctx(), 'p1') as Record<string, never>
+      const r = await stopRecon(ctx(), 'p1') as Record<string, unknown>
       expect(r.stopped).toBeNull()
       expect(String(r.note)).toMatch(/could not be read/i)
     })
@@ -333,20 +343,20 @@ describe('update_recon_settings refuses what would redirect the platform', () =>
   test('THE attack: a target change is refused by name', async () => {
     await expect(updateReconSettings(ctx(), 'p1', { targetDomain: 'victim.com' }))
       .rejects.toThrow(/targetDomain/)
-    expect(h.updateProject).not.toHaveBeenCalled()
+    expect(h.updateManyProjects).not.toHaveBeenCalled()
   })
 
   test('THE attack: disabling the guardrail is refused', async () => {
     await expect(updateReconSettings(ctx(), 'p1', { targetGuardrailEnabled: false }))
       .rejects.toThrow(/targetGuardrailEnabled/)
-    expect(h.updateProject).not.toHaveBeenCalled()
+    expect(h.updateManyProjects).not.toHaveBeenCalled()
   })
 
   test('a denied field alongside a valid one rejects the WHOLE call', async () => {
     await expect(
       updateReconSettings(ctx(), 'p1', { naabuThreads: 25, targetDomain: 'victim.com' })
     ).rejects.toThrow()
-    expect(h.updateProject).not.toHaveBeenCalled()
+    expect(h.updateManyProjects).not.toHaveBeenCalled()
   })
 
   // Still refused, and each for a DIFFERENT reason, which is the point of the
@@ -361,7 +371,7 @@ describe('update_recon_settings refuses what would redirect the platform', () =>
     ['agentModel', /not a recon setting/, 'not a column at all'],
   ])('%s is refused (%s)', async (field, pattern) => {
     await expect(updateReconSettings(ctx(), 'p1', { [field]: 'x' })).rejects.toThrow(pattern)
-    expect(h.updateProject).not.toHaveBeenCalled()
+    expect(h.updateManyProjects).not.toHaveBeenCalled()
   })
 
   test('a wrong-typed value is refused whatever the disposition', async () => {
@@ -382,7 +392,7 @@ describe('update_recon_settings refuses what would redirect the platform', () =>
     // the field carries a closed value set and the write is refused by name.
     await expect(updateReconSettings(ctx(), 'p1', { nucleiDockerImage: 'attacker/evil:latest' }))
       .rejects.toThrow(/must be one of/)
-    expect(h.updateProject).not.toHaveBeenCalled()
+    expect(h.updateManyProjects).not.toHaveBeenCalled()
   })
 
   test('a shipped image is accepted', async () => {
@@ -390,7 +400,7 @@ describe('update_recon_settings refuses what would redirect the platform', () =>
       nucleiDockerImage: 'projectdiscovery/nuclei:latest',
     })
     expect(r.projectId).toBe('p1')
-    expect(h.updateProject).toHaveBeenCalled()
+    expect(h.updateManyProjects).toHaveBeenCalled()
   })
 
   test('a path outside the project directory is still refused at the write', async () => {
@@ -413,7 +423,7 @@ describe('update_recon_settings refuses what would redirect the platform', () =>
   test('an out-of-range value is refused, not clamped', async () => {
     await expect(updateReconSettings(ctx(), 'p1', { naabuThreads: 999_999 }))
       .rejects.toThrow(/between/)
-    expect(h.updateProject).not.toHaveBeenCalled()
+    expect(h.updateManyProjects).not.toHaveBeenCalled()
   })
 })
 
@@ -421,19 +431,19 @@ describe('update_recon_settings applies what it should', () => {
   test('an allowlisted change is written', async () => {
     h.findProject
       .mockResolvedValueOnce({ id: 'p1', userId: 'owner' })
-      .mockResolvedValueOnce({ naabuThreads: 10, updatedAt: new Date() })
+      .mockResolvedValueOnce({ naabuThreads: 10, updatedAt: READ_AT })
       .mockResolvedValueOnce({ naabuThreads: 25 })
 
     const r = await updateReconSettings(ctx(), 'p1', { naabuThreads: 25 })
-    expect(h.updateProject).toHaveBeenCalledWith({
-      where: { id: 'p1' }, data: { naabuThreads: 25 },
+    expect(h.updateManyProjects).toHaveBeenCalledWith({
+      where: { id: 'p1', updatedAt: READ_AT }, data: { naabuThreads: 25 },
     })
     expect(r.changed).toEqual(['naabuThreads'])
   })
 
   test('only the filtered data reaches prisma, never the raw body', async () => {
     await updateReconSettings(ctx(), 'p1', { nucleiEnabled: false })
-    expect(h.updateProject.mock.calls[0][0].data).toEqual({ nucleiEnabled: false })
+    expect(h.updateManyProjects.mock.calls[0][0].data).toEqual({ nucleiEnabled: false })
   })
 
   test('the before and after of each changed field are audited', async () => {
@@ -462,7 +472,7 @@ describe('update_recon_settings refuses mid-scan', () => {
     h.scanWriters.mockResolvedValue('a full recon scan is running')
     await expect(updateReconSettings(ctx(), 'p1', { naabuThreads: 25 }))
       .rejects.toThrow(/will not see the change/)
-    expect(h.updateProject).not.toHaveBeenCalled()
+    expect(h.updateManyProjects).not.toHaveBeenCalled()
   })
 
   test('the refusal explains why, not just that', async () => {
@@ -494,6 +504,76 @@ describe('update_recon_settings optimistic concurrency', () => {
     await expect(updateReconSettings(ctx(), 'p1', { naabuThreads: 25 }, 'yesterday'))
       .rejects.toThrow(/valid timestamp/)
   })
+
+  test('C-5: without expectedUpdatedAt it is STILL a compare-and-swap, on the value it read', async () => {
+    // Two agents writing at once each read, then wrote, and the later write's
+    // audit `before` described a state that no longer existed.
+    await updateReconSettings(ctx(), 'p1', { naabuThreads: 25 })
+    expect(h.updateManyProjects.mock.calls[0][0].where).toEqual({ id: 'p1', updatedAt: READ_AT })
+    expect(h.updateProject).not.toHaveBeenCalled()
+  })
+
+  test('C-5: a concurrent write between the read and the write is a conflict, never retried', async () => {
+    h.updateManyProjects.mockResolvedValue({ count: 0 })
+    await expect(updateReconSettings(ctx(), 'p1', { naabuThreads: 25 }))
+      .rejects.toMatchObject({ code: 'conflict' })
+    expect(h.updateManyProjects).toHaveBeenCalledTimes(1)
+    expect(h.audit).not.toHaveBeenCalled()
+  })
+
+  test('an unread updatedAt refuses rather than writing unconditionally', async () => {
+    h.findProject.mockResolvedValue({ id: 'p1', userId: 'owner' })
+    await expect(updateReconSettings(ctx(), 'p1', { naabuThreads: 25 })).rejects.toThrow(/unconditional/)
+    expect(h.updateManyProjects).not.toHaveBeenCalled()
+  })
+})
+
+describe('update_recon_settings runs the rules the project form\'s save runs', () => {
+  test('a fireteam value inside the registry bound but outside the form\'s rule is refused', async () => {
+    // The registry allows propensity 0-10; the form's schema allows 1-5. Only the
+    // form enforced its rule, so an MCP write could store a value the form refuses.
+    await expect(updateReconSettings(ctx(), 'p1', { fireteamPropensity: 9 }))
+      .rejects.toMatchObject({ code: 'setting_rejected' })
+    expect(h.updateManyProjects).not.toHaveBeenCalled()
+  })
+
+  test('a rule over two fields sees the stored one the caller did not send', async () => {
+    h.findProject
+      .mockResolvedValueOnce({ id: 'p1', userId: 'owner' })
+      .mockResolvedValueOnce({ fireteamMaxMembers: 4, updatedAt: READ_AT })
+    await expect(updateReconSettings(ctx(), 'p1', { fireteamMaxConcurrent: 8 }))
+      .rejects.toThrow(/cannot exceed fireteamMaxMembers/)
+    expect(h.updateManyProjects).not.toHaveBeenCalled()
+  })
+
+  test('a fireteam change is written to the fireteam audit, as mcp', async () => {
+    h.findProject
+      .mockResolvedValueOnce({ id: 'p1', userId: 'owner' })
+      .mockResolvedValueOnce({ fireteamMaxMembers: 5, fireteamMaxConcurrent: 2, updatedAt: READ_AT })
+      .mockResolvedValueOnce({ fireteamMaxConcurrent: 3 })
+    await updateReconSettings(ctx(), 'p1', { fireteamMaxConcurrent: 3 })
+    const rows = h.fireteamAudit.mock.calls[0][0].data
+    expect(rows).toEqual([expect.objectContaining({
+      projectId: 'p1', field: 'fireteamMaxConcurrent', oldValue: 2, newValue: 3, source: 'mcp',
+    })])
+  })
+
+  test('a write that touches no fireteam field writes no fireteam audit', async () => {
+    await updateReconSettings(ctx(), 'p1', { naabuThreads: 25 })
+    expect(h.fireteamAudit).not.toHaveBeenCalled()
+  })
+})
+
+describe('update_recon_settings refusals name the rejected key in the audit', () => {
+  test('a registry key is recorded as itself', async () => {
+    await expect(updateReconSettings(ctx(), 'p1', { naabuThreads: 5, targetDomain: 'x.tld' }))
+      .rejects.toMatchObject({ code: 'setting_rejected', audit: { rejectedKey: 'targetDomain' } })
+  })
+
+  test('anything else is recorded as a placeholder, so caller text never reaches the log line', async () => {
+    await expect(updateReconSettings(ctx(), 'p1', { 'evil\n[audit] forged': 1 }))
+      .rejects.toMatchObject({ code: 'setting_rejected', audit: { rejectedKey: '<unknown>' } })
+  })
 })
 
 describe('update_recon_settings reports what it silently affected', () => {
@@ -507,11 +587,36 @@ describe('update_recon_settings reports what it silently affected', () => {
       .mockResolvedValueOnce({ scanModules: ['port_scan'] })
       .mockResolvedValueOnce({ id: 'p1', scanModules: ['port_scan'], targetDomain: 'x.tld' })
     h.findQueued.mockResolvedValue([
-      { id: 'j1', kind: 'full_recon', settingsHash: 'a-stale-hash' },
+      { id: 'j1', kind: 'full_recon', projectId: 'p1', payload: {}, settingsHash: 'a-stale-hash' },
     ])
 
     const r = await updateReconSettings(ctx(), 'p1', { scanModules: ['port_scan'] })
-    expect(r.queuedJobsNeedingReview).toBe(1)
+    expect(r.queuedJobsNeedingReview).toEqual({ count: 1, jobIds: ['j1'] })
+  })
+
+  test('C-6: a job the settings did not move is NOT reported, auth profile included', async () => {
+    // The hash was taken from the row alone, while enqueue and the dispatcher
+    // fold in the auth profile, so every queued full recon read as parked.
+    const row = { id: 'p1', scanModules: ['port_scan'], targetDomain: 'x.tld' }
+    const profile = {
+      authType: 'bearer', authHeaderName: 'Authorization', authValue: 'v',
+      extraHeaders: {}, scopeHosts: ['x.tld'], reconEnabled: true,
+    }
+    h.findAuthProfile.mockResolvedValue(profile)
+    const enqueuedHash = settingsFingerprint('full_recon', row, {
+      authProfileFp: authProfileFingerprint(profile as never),
+    })
+    h.findProject
+      .mockResolvedValueOnce({ id: 'p1', userId: 'owner' })
+      .mockResolvedValueOnce({ scanModules: ['port_scan'], updatedAt: READ_AT })
+      .mockResolvedValueOnce({ scanModules: ['port_scan'] })
+      .mockResolvedValueOnce(row)
+    h.findQueued.mockResolvedValue([
+      { id: 'j1', kind: 'full_recon', projectId: 'p1', payload: {}, settingsHash: enqueuedHash },
+    ])
+
+    const r = await updateReconSettings(ctx(), 'p1', { scanModules: ['port_scan'] })
+    expect(r.queuedJobsNeedingReview).toEqual({ count: 0, jobIds: [] })
   })
 
   test('enabled schedules are named, because they have NO fingerprint guard', async () => {
@@ -536,7 +641,7 @@ describe('update_recon_settings reports what it silently affected', () => {
     h.findQueued.mockRejectedValue(new Error('db hiccup'))
     const r = await updateReconSettings(ctx(), 'p1', { naabuThreads: 25 })
     expect(r.affectedSchedules).toEqual({ count: 0, names: [] })
-    expect(r.queuedJobsNeedingReview).toBe(0)
+    expect(r.queuedJobsNeedingReview).toEqual({ count: 0, jobIds: [] })
   })
 })
 

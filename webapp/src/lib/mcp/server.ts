@@ -66,7 +66,16 @@ import {
   getBlastRadius,
   listExploitPaths,
 } from '@/lib/mcp/analyticsTools'
-import { describeReconSettings, listReconPresets } from '@/lib/mcp/catalogTools'
+import { describeReconSettings } from '@/lib/mcp/catalogTools'
+import {
+  applyReconPreset,
+  createReconPreset,
+  deleteReconPreset,
+  listReconPresets,
+  updateReconPreset,
+} from '@/lib/mcp/presetTools'
+import { PRESET_FIELD_KEYS } from '@/lib/project-preset-utils'
+import { PRESET_DESCRIPTION_MAX, PRESET_NAME_MAX } from '@/lib/reconPresets/server'
 import {
   attachEngagementAuthorization,
   createProject,
@@ -94,6 +103,13 @@ import { listGraphViews, runGraphView } from '@/lib/mcp/viewTools'
 import { FINDING_SECTIONS, listFindings, listMuted } from '@/lib/mcp/findingTools'
 import { compareScanVersions, listScanVersions } from '@/lib/mcp/versionTools'
 import { startRecon, stopRecon, updateReconSettings } from '@/lib/mcp/writeTools'
+import {
+  MAX_KEYS_PER_CALL,
+  refusedFieldsSentence,
+  settableFieldCount,
+} from '@/lib/reconSettings/filter'
+import { rescopableFields } from '@/lib/reconSettings/registry'
+import { updateProjectScope } from '@/lib/mcp/scopeTools'
 import {
   MAX_COMMAND_CHARS,
   MAX_WAIT_SECONDS,
@@ -225,7 +241,12 @@ function handler<A>(
         action: `mcp.${tool}`,
         targetType: projectId ? 'project' : 'user',
         targetId: projectId ?? ctx.token.userId,
-        after: { tokenId: ctx.token.tokenId, tokenPrefix: ctx.token.tokenPrefix, outcome },
+        after: {
+          tokenId: ctx.token.tokenId,
+          tokenPrefix: ctx.token.tokenPrefix,
+          outcome,
+          ...(err instanceof McpToolError ? err.audit : undefined),
+        },
         source: 'mcp',
       })
 
@@ -341,9 +362,15 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
     {
       title: 'Get recon settings',
       description:
-        'Read the recon tuning settings this token is allowed to change, so you can diff before ' +
-        'writing. This is a narrow subset on purpose: the engagement target and scope, the Rules ' +
-        'of Engagement, credentials and agent settings are not readable or writable here.',
+        'Read this project\'s recon configuration: every setting update_recon_settings can ' +
+        'change - the whole pipeline, the agent\'s settings and the engagement\'s own limits - ' +
+        'plus the engagement scope, which is readable so you can confirm which engagement this ' +
+        'is but is fixed at creation. Read it before writing so you can diff.\n\n' +
+        'It also returns the project\'s `updatedAt`. Pass it back to update_recon_settings as ' +
+        'expectedUpdatedAt to refuse writing over a change you have not seen.\n\n' +
+        'Never returned by any read: stored credentials (a credential you may set, such as ' +
+        'graphqlAuthValue, is write-only), the engagement record\'s third-party personal data, ' +
+        'and the uploaded scope document.',
       annotations: READ_ONLY,
       _meta: scopesMeta({ required: ['recon:read'] }),
       inputSchema: { projectId: projectIdSchema },
@@ -658,26 +685,158 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
     {
       title: 'List recon presets',
       description:
-        'The curated scan presets, named by engagement type: stealth recon, quick and deep bug ' +
-        'bounty, red-team operator, internal network, large network, API security, compliance ' +
-        'audit, supply-chain audit, OSINT, full passive, and more. Each says what it is for, ' +
-        'what target it suits (domain or IP) and what environment (external or internal).\n\n' +
+        'The recon presets: the curated built-ins, named by engagement type (stealth recon, quick ' +
+        'and deep bug bounty, red-team operator, internal network, large network, API security, ' +
+        'compliance audit, supply-chain audit, OSINT, full passive, and more), and the presets ' +
+        'this account saved. Each built-in says what target it suits (domain or IP) and what ' +
+        'environment (external or internal).\n\n' +
         'This is how a human configures a scan - by picking one and adjusting a few fields - ' +
-        'rather than by tuning a hundred numbers.\n\n' +
-        'THEY CANNOT BE APPLIED FROM HERE, and `applicability` says why per preset. A preset ' +
-        'sets fields across the whole project form while this surface may only write recon ' +
-        'tuning, so applying one would produce a configuration that is neither the preset nor ' +
-        'the previous state. Where `stealthCritical` is true the denied fields are precisely the ' +
-        'ones that make the scan quieter, so a half-applied stealth preset would be LOUDER than ' +
-        'not applying it. Recommend the preset to the operator to apply in the UI.\n\n' +
-        'Pass a presetId for its full description.',
+        'rather than by tuning six hundred numbers.\n\n' +
+        'Apply one with apply_recon_preset, which needs its own permission and REPLACES the ' +
+        'configuration: every preset field the preset does not name goes back to its default. To ' +
+        'overlay only what a preset names instead, read it here with includeSettings and write ' +
+        'those keys with update_recon_settings.\n\n' +
+        'Pass a presetId for its full description, and includeSettings for the values it holds. ' +
+        'If your saved presets cannot be read, `user` says so rather than listing none.',
       annotations: READ_ONLY,
       _meta: scopesMeta({ required: ['recon:read'] }),
       inputSchema: {
-        presetId: entityIdSchema.optional().describe('e.g. "stealth-recon". Omit to list all.'),
+        presetId: entityIdSchema.optional()
+          .describe('A built-in such as "stealth-recon", or one of your presets. Omit to list all.'),
+        includeSettings: z.boolean().optional()
+          .describe('With presetId: also return every value the preset holds.'),
       },
     },
-    handler(ctx, 'list_recon_presets', a => listReconPresets(ctx, { presetId: a.presetId }))
+    handler(
+      ctx,
+      'list_recon_presets',
+      a => listReconPresets(ctx, { presetId: a.presetId, includeSettings: a.includeSettings })
+    )
+  )
+
+  server.registerTool(
+    'create_recon_preset',
+    {
+      title: 'Save a recon preset',
+      description:
+        'Save a NEW preset to this account\'s library, from exactly one source: `settings` you ' +
+        'write, `fromPresetId` (a copy of a built-in or of one of your presets), or ' +
+        '`fromProjectId` (a capture of one of your projects\' current configuration).\n\n' +
+        'A preset holds only reusable configuration. It never carries the engagement scope, the ' +
+        'engagement\'s limits or record, a credential, an uploaded file or the MCP sandbox switch: ' +
+        'naming one is refused by name, with the tool that owns it. Every value is validated ' +
+        'exactly as update_recon_settings validates it, and one bad key refuses the whole call. ' +
+        'A capture leaves out paths into that project\'s own upload directory and lists them in ' +
+        'notCaptured.\n\n' +
+        'A person applies presets later, often without reading every value, and the preset drawer ' +
+        'badges one an agent wrote. Names are unique per account, ignoring case; an account holds ' +
+        'at most 200 presets.',
+      annotations: {
+        readOnlyHint: false,
+        // It only adds a row: nothing that existed is changed.
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      _meta: scopesMeta({ required: ['preset:write'] }),
+      inputSchema: {
+        name: z.string().min(1).max(PRESET_NAME_MAX).describe('Unique among your presets, ignoring case.'),
+        description: z.string().max(PRESET_DESCRIPTION_MAX).optional(),
+        settings: z.record(z.string(), z.unknown()).optional()
+          .describe('Field -> value. One of the three sources.'),
+        fromPresetId: entityIdSchema.optional()
+          .describe('Copy a built-in (e.g. "stealth-recon") or one of your presets.'),
+        fromProjectId: projectIdSchema.optional()
+          .describe('Capture one of your projects\' current configuration.'),
+      },
+    },
+    handler(ctx, 'create_recon_preset', a => createReconPreset(ctx, a))
+  )
+
+  server.registerTool(
+    'update_recon_preset',
+    {
+      title: 'Change one of your recon presets',
+      description:
+        'Rename, re-describe, or change the values of a preset YOU saved. `settings` is merged ' +
+        'into what it holds; `removeKeys` drops fields from it, so applying it resets them to ' +
+        'their default. The result is validated whole, as create_recon_preset validates.\n\n' +
+        'Built-in presets cannot be changed: copy one with create_recon_preset({fromPresetId}) and ' +
+        'change the copy. A call that changes nothing is refused rather than reported as done.\n\n' +
+        'Projects that already loaded the preset keep the settings it produced then; nothing is ' +
+        're-applied. Every write is a compare-and-swap on the preset\'s updatedAt.',
+      // It overwrites the preset's previous values, which is destructive in the
+      // spec's sense even though they can be written back.
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      _meta: scopesMeta({ required: ['preset:write'] }),
+      inputSchema: {
+        presetId: entityIdSchema.describe('One of your presets, from list_recon_presets.'),
+        name: z.string().min(1).max(PRESET_NAME_MAX).optional(),
+        description: z.string().max(PRESET_DESCRIPTION_MAX).optional(),
+        settings: z.record(z.string(), z.unknown()).optional()
+          .describe('Field -> value, merged into what the preset holds.'),
+        removeKeys: z.array(z.string().max(100)).max(PRESET_FIELD_KEYS.length).optional()
+          .describe('Fields to drop from the preset.'),
+        expectedUpdatedAt: z.string().optional()
+          .describe('Optimistic concurrency: the preset updatedAt you last saw.'),
+      },
+    },
+    handler(ctx, 'update_recon_preset', a => updateReconPreset(ctx, a))
+  )
+
+  server.registerTool(
+    'delete_recon_preset',
+    {
+      title: 'Delete one of your recon presets',
+      description:
+        'Delete a preset YOU saved. Built-in presets cannot be deleted. Projects that loaded it ' +
+        'keep their settings.\n\n' +
+        'There is no undo on this surface: the audit log keeps what the preset held, and that is ' +
+        'the only way back. Refused if the preset changed since you read it.',
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      _meta: scopesMeta({ required: ['preset:write'] }),
+      inputSchema: {
+        presetId: entityIdSchema.describe('One of your presets, from list_recon_presets.'),
+        expectedUpdatedAt: z.string().optional()
+          .describe('Optimistic concurrency: the preset updatedAt you last saw.'),
+      },
+    },
+    handler(ctx, 'delete_recon_preset', a => deleteReconPreset(ctx, a))
+  )
+
+  server.registerTool(
+    'apply_recon_preset',
+    {
+      title: 'Apply a recon preset to a project',
+      description:
+        'The project form\'s "Load preset", run here. It REPLACES the configuration: every preset ' +
+        'field takes the preset\'s value, and every one the preset does NOT name goes back to the ' +
+        'running backends\' default (the two LLM model choices are kept). That is up to six ' +
+        'hundred fields in one call, and the project shows "Preset applied" afterwards, as it does ' +
+        'when a person loads one.\n\n' +
+        'Run it with dryRun first: it reports `changed` and `resetToDefault` - the fields that move ' +
+        'only because the preset did not name them - and writes nothing.\n\n' +
+        'It never touches the target, the engagement\'s limits (the rate ceiling still caps every ' +
+        'rate at scan start), credentials or uploads, and never changes the targeting mode: ' +
+        '`targetMismatch` warns when a built-in is meant for the other kind of target.\n\n' +
+        'Refused while anything is reading or writing this project\'s graph - a scan, a triage ' +
+        'run, an in-app agent session - and when the backends\' defaults cannot be read, since it ' +
+        'would reset fields to values they do not use. Values are validated like ' +
+        'update_recon_settings. Every write is a compare-and-swap on the project\'s updatedAt.\n\n' +
+        'Apply BEFORE queue_recon: a settings change parks an already-queued scan until a person ' +
+        're-confirms it (queuedJobsNeedingReview). Settings apply to the NEXT scan; call ' +
+        'preflight_scope_check afterwards.',
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      _meta: scopesMeta({ required: ['preset:apply'] }),
+      inputSchema: {
+        projectId: projectIdSchema,
+        presetId: entityIdSchema.describe('A built-in such as "stealth-recon", or one of your presets.'),
+        dryRun: z.boolean().optional().describe('Report what would change and write nothing.'),
+        expectedUpdatedAt: z.string().optional()
+          .describe('Optimistic concurrency: the project updatedAt you last saw.'),
+      },
+    },
+    handler(ctx, 'apply_recon_preset', a => applyReconPreset(ctx, a), a => a.projectId)
   )
 
   server.registerTool(
@@ -1169,26 +1328,36 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
   server.registerTool(
     'update_recon_settings',
     {
-      title: 'Change recon tuning settings',
+      title: 'Change recon settings',
       description:
-        'Change recon TUNING for this project: per-tool enable flags, rate limits, thread and ' +
-        'worker counts, timeouts, concurrency, retries, depth and max-* caps, severity and ' +
-        'status-code lists, and which pipeline phases run.\n\n' +
-        'It can NEVER change the engagement target or scope, the Rules of Engagement, which ' +
-        'container images are spawned, another scan\'s targets, wordlists or templates, ' +
-        'request headers, any intrusiveness toggle, any credential, or any agent setting. An ' +
-        'attempt to set one of those is refused by name; nothing is silently ignored.\n\n' +
+        `Change this project's configuration on an EXISTING project: any of the ${settableFieldCount()} ` +
+        'settable fields. That is the whole recon pipeline - per-tool enable flags, which phases ' +
+        'run, rates, threads, timeouts, depths, wordlists and templates, custom request headers, ' +
+        'container images, intrusiveness toggles, severity and status-code lists - plus the ' +
+        'agent\'s settings and the engagement\'s own LIMITS (its rate ceiling, excluded hosts, ' +
+        'scanning window and the agent\'s denylists). describe_recon_settings lists every field ' +
+        'with its type and bounds.\n\n' +
+        `${refusedFieldsSentence()} One bad key refuses the WHOLE call, so nothing is ` +
+        `half-applied; at most ${MAX_KEYS_PER_CALL} fields per call.\n\n` +
+        'Values are validated, and some are then capped at scan start rather than refused: a ' +
+        'rate above the engagement ceiling comes down to the ceiling, an image outside the ' +
+        'shipped set is pinned back to the default. preflight_scope_check reports what will ' +
+        'actually run.\n\n' +
         'Settings apply to the NEXT scan. A scan already running read its settings when it ' +
         'started, so this is refused while one is writing the graph.\n\n' +
-        'Read get_recon_settings first to see the current values and what is settable. Pass ' +
-        'expectedUpdatedAt from a prior read to refuse writing over a change you have not seen.',
+        'Every write is a compare-and-swap on the project\'s updatedAt. Pass expectedUpdatedAt ' +
+        'from get_recon_settings to refuse writing over a change you have not seen; without it ' +
+        'the write still refuses when the project changes between this tool\'s own read and ' +
+        'write. On "conflict", re-read and decide again - nothing is retried for you.',
       // It overwrites the previous values rather than only adding, so it is
       // destructive in the spec's sense even though it can be written back.
       annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
       _meta: scopesMeta({ required: ['recon:settings'] }),
       inputSchema: {
         projectId: projectIdSchema,
-        settings: z.record(z.string(), z.unknown()).describe('Field -> value. Allowlisted fields only.'),
+        settings: z.record(z.string(), z.unknown()).describe(
+          'Field -> value, for any settable field (describe_recon_settings lists them with their bounds).'
+        ),
         expectedUpdatedAt: z.string().optional()
           .describe('Optimistic concurrency: the project updatedAt you last saw.'),
       },
@@ -1307,10 +1476,13 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
       description:
         'Open a NEW engagement: a project with its targeting mode, its settings and the ' +
         'record of what authorized it, written atomically.\n\n' +
-        'Scope is fixed HERE and nowhere else. Exactly one targeting mode - targetDomain, ' +
-        'targetIps, or domainBatchHosts - and it is immutable afterwards through every route on ' +
-        'this surface. A different target means a different project, which is why this tool ' +
-        'exists rather than a way to re-point an existing one.\n\n' +
+        'Scope is fixed HERE. Exactly one targeting mode - targetDomain, targetIps, or ' +
+        'domainBatchHosts - and the mode, the domain and the address list are immutable ' +
+        'afterwards through every route on this surface. A different target means a different ' +
+        'project, which is why this tool exists rather than a way to re-point an existing one. ' +
+        'Only the target LISTS the project form also edits - a batch host list and the other ' +
+        'scanners\' targets - can change later, through update_project_scope under its own ' +
+        'permission.\n\n' +
         'engagementKind is the decision that matters. "internal" is your own estate. ' +
         '"third_party" is somebody else\'s, and then a non-zero settings.roeGlobalMaxRps and an ' +
         '`authorization` record are both REQUIRED - start_recon refuses the project otherwise. ' +
@@ -1349,8 +1521,8 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
             + '"*.example.com") also puts the apex itself in scope; a wildcard on its own '
             + 'scans only what enumeration discovers beneath it. That is the same control '
             + 'the project form calls "Root" - there is no separate flag, the list is the '
-            + 'whole interface. Scope is fixed at creation on this surface: the project form '
-            + 'can edit the list later, update_project cannot.'),
+            + 'whole interface. The project form can edit the list later, and so can '
+            + 'update_project_scope, which needs its own permission.'),
         subdomainList: z.array(z.string().max(253)).max(5000).optional()
           .describe('Hosts seeded in addition to whatever discovery finds.'),
         engagementIdentityHeader: z.string().max(400).optional()
@@ -1425,6 +1597,56 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
       }),
       a => a.projectId
     )
+  )
+
+  server.registerTool(
+    'update_project_scope',
+    {
+      title: 'Change an existing project\'s target lists',
+      description:
+        'Change the target LISTS of a project that already exists - the ones the project form ' +
+        `also lets a person edit: ${rescopableFields().map(f => f.key).join(', ')}. Nothing else. ` +
+        'The target domain, the address list, the targeting mode, ownership verification and the ' +
+        'target guardrail stay fixed whatever the token holds; a different target is a different ' +
+        'project (create_project).\n\n' +
+        'domainBatchHosts replaces a domain-batch project\'s host list (only on a project created ' +
+        'in batch mode); the grouping is re-derived here, and every root goes through the ' +
+        'permanent guardrail. gvmScanTargets is both, ips_only or hostnames_only. GitHub names and ' +
+        'the supply-chain repository are validated as the form validates them.\n\n' +
+        'On a THIRD-PARTY engagement a widening - a new batch host or root, a new GitHub ' +
+        'organisation, more repositories, a new supply-chain organisation or repository - is ' +
+        'refused unless `authorization` records what authorized the wider scope, in the same ' +
+        'transaction. Passing `authorization` needs the engagement:authorize permission too. ' +
+        'Removals and narrowing need neither.\n\n' +
+        'Refused while anything reads or writes this project\'s graph. A compare-and-swap on the ' +
+        'project\'s updatedAt. Applies to the NEXT scan: call preflight_scope_check afterwards and ' +
+        'report what it says.',
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      _meta: scopesMeta({
+        required: ['project:rescope'],
+        conditional: [{
+          scope: 'engagement:authorize',
+          when: '`authorization` is passed (required to widen a third-party engagement)',
+        }],
+      }),
+      inputSchema: {
+        projectId: projectIdSchema,
+        changes: z.record(z.string(), z.unknown())
+          .describe('Field -> new value, for the target lists named above only.'),
+        authorization: z.object({
+          documentSha256: z.string().max(64).optional().describe('64 lower-case hex.'),
+          documentText: z.string().max(200000).optional().describe('The document, digested here and discarded.'),
+          documentKind: z.enum(['hackerone_program', 'bugcrowd_program', 'roe_document', 'internal_ticket', 'other']),
+          sourceUrl: z.string().max(2000).optional(),
+          programHandle: z.string().max(200).optional(),
+          issuedAt: z.string().describe('ISO 8601: when the scope document was issued.'),
+          summary: z.string().max(500).optional(),
+        }).optional().describe('What authorized the wider scope. Required to widen a third-party engagement.'),
+        expectedUpdatedAt: z.string().optional()
+          .describe('Optimistic concurrency: the project updatedAt you last saw.'),
+      },
+    },
+    handler(ctx, 'update_project_scope', a => updateProjectScope(ctx, a), a => a.projectId)
   )
 
   server.registerTool(

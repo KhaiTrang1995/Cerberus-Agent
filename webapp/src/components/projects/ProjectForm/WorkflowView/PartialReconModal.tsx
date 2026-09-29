@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { Play, Loader2, ArrowRight, Upload, FileText, Trash2, Info } from 'lucide-react'
 import { Modal, Tooltip, WikiInfoButton } from '@/components/ui'
 import { underAnyRoot } from '@/lib/partialReconScope'
+import { announceProjectWrite } from '@/lib/projectVersion'
 import type { GraphInputs, PartialReconParams, UserTargets } from '@/lib/recon-types'
 import { SECTION_INPUT_MAP, SECTION_NODE_MAP, SECTION_ENRICH_MAP } from '../nodeMapping'
 import { WORKFLOW_TOOLS } from './workflowDefinition'
@@ -462,6 +463,7 @@ export function PartialReconModal({
         setUploadError(data.error || 'Upload failed')
         return
       }
+      announceProjectWrite(projectId, (await res.json()).projectUpdatedAt)
       const listRes = await fetch(`/api/js-recon/${projectId}/upload`)
       if (listRes.ok) {
         const data = await listRes.json()
@@ -478,7 +480,8 @@ export function PartialReconModal({
   const handleJsFileDelete = useCallback(async (filename: string) => {
     if (!projectId) return
     try {
-      await fetch(`/api/js-recon/${projectId}/upload?name=${encodeURIComponent(filename)}`, { method: 'DELETE' })
+      const res = await fetch(`/api/js-recon/${projectId}/upload?name=${encodeURIComponent(filename)}`, { method: 'DELETE' })
+      if (res.ok) announceProjectWrite(projectId, (await res.json()).projectUpdatedAt)
       const listRes = await fetch(`/api/js-recon/${projectId}/upload`)
       if (listRes.ok) {
         const data = await listRes.json()

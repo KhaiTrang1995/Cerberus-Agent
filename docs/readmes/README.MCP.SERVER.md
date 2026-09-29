@@ -17,20 +17,20 @@ set of recon tuning settings, and query the attack-surface graph.
 
 ## 1. What is and is not exposed
 
-**Exposed (thirty tools).**
+**Exposed.** The table is a summary; the generated [MCP API Reference](https://github.com/samugit83/redamon/wiki/MCP-API-Reference) is rendered from the live `tools/list` and is the authoritative list.
 
 | Tool | What it does | Permission |
 | --- | --- | --- |
 | `list_projects` | The token owner's projects. Nothing else is visible. | `recon:read` |
 | `get_recon_status` | Whether a scan is running, and its phase. | `recon:read` |
-| `get_recon_settings` | The tuning subset this token may change. | `recon:read` |
+| `get_recon_settings` | Every setting `update_recon_settings` can change, plus the (read-only) engagement scope and the `updatedAt` to pass back. Credentials are never returned. | `recon:read` |
 | `graph_summary` | Count per node type + relationships present. | `recon:read` |
 | `graph_schema` | What the graph *means*. No arguments, no data. | `recon:read` |
 | `query_graph` | Ask the graph a question in natural language. | `recon:read` (+ `graph:cypher` for raw Cypher) |
 | `kali_toolbox` | The Kali sandbox's installed toolset, by category. Reads code, not the container. | `recon:read` |
 | `start_recon` | Start the full recon pipeline. | `recon:scan` (+ `recon:overwrite` for `mode:"overwrite"`) |
 | `stop_recon` | Stop a running scan. | `recon:scan` |
-| `update_recon_settings` | Change any recon tuning value. Validated and capped at scan start rather than blocked. | `recon:settings` |
+| `update_recon_settings` | Change any settable field of an EXISTING project: the whole pipeline, the agent's settings and the engagement's limits. Validated, then capped at scan start rather than blocked. A compare-and-swap on `updatedAt`. | `recon:settings` |
 | `create_project` | Open an engagement and fix its scope, atomically with the record of what authorized it. | `project:create` |
 | `attach_engagement_authorization` | Record the scope document that permits this engagement. Append-only. | `engagement:authorize` |
 | `list_engagement_authorizations` | The history of what authorized it, newest first. | `recon:read` |
@@ -45,7 +45,11 @@ set of recon tuning settings, and query the attack-surface graph.
 | `list_scan_versions` | Saved graph versions, with `pinned` and `hasSnapshot`. | `recon:read` |
 | `compare_scan_versions` | What changed between two graph states. Counts and names only. | `recon:read` |
 | `describe_recon_settings` | The reference manual for `update_recon_settings`: meanings, types, bounds. | `recon:read` |
-| `list_recon_presets` | The curated engagement presets, and how much of each is applicable here. | `recon:read` |
+| `list_recon_presets` | The built-in presets and the account's own, optionally with their values. Saved presets it cannot read are reported `unavailable`, never as none. | `recon:read` |
+| `create_recon_preset` | Save a preset from explicit settings, a copy of another preset, or a capture of a project. Validated like a settings write; never carries scope, limits, credentials or uploads. | `preset:write` |
+| `update_recon_preset` | Rename, re-describe, merge or remove keys in one of the account's presets. Built-ins are immutable. | `preset:write` |
+| `delete_recon_preset` | Delete one of the account's presets. The audit row keeps its settings. | `preset:write` |
+| `apply_recon_preset` | The form's "Load preset", server-side: REPLACES the configuration, with `dryRun`. Refused while anything reads or writes the graph and when the backends' defaults cannot be read. | `preset:apply` |
 | `get_attack_surface_overview` | Hosts, services, web surface and findings by severity, in one query. | `recon:read` |
 | `list_exploit_paths` | Technology + CVE pairs ranked by observed exploit, then CVSS. | `recon:read` |
 | `get_blast_radius` | Technologies ranked by how much of the surface they touch. | `recon:read` |
@@ -58,10 +62,13 @@ set of recon tuning settings, and query the attack-surface graph.
 | `mute_findings` | Mute 1-25 findings with a reason. Never a proven or kept-visible one, never over an existing mute; per-token daily budget; stamped `muted_channel=mcp` + token prefix. | `triage:mute` |
 | `unmute_findings` | Unmute 1-100 findings from the muted list, writing the Mute Rules exemption FIRST. A rule's mute only with `includeRuleMutes`, never during a recon scan. | `triage:mute` |
 | `search_muted_findings` | Page every muted finding with the Muted Nodes filters (who muted, rule, token, text), with exact facets. The only source of a muted finding's id. | `triage:read` |
+| `update_project_scope` | Change an existing project's eight target LISTS (batch hosts, GitHub org/repos, GVM strategy, supply-chain org/repo/ref/scope). Guardrail on every root; a third-party widening needs an authorization record. | `project:rescope` (+ `engagement:authorize` to pass `authorization`) |
 
-**Deliberately not exposed:** the agent chat, a shell, partial recon, project
-create/delete/import, secrets and LLM keys, target and scope fields, Rules of
-Engagement, guardrails, **starting** a GVM / TruffleHog / supply-chain / AI
+**Deliberately not exposed:** the agent chat, partial recon, project
+delete/import, secrets and LLM keys, re-pointing an existing project's target
+domain, address list or targeting mode (only its target LISTS move, behind
+`project:rescope`), the engagement RECORD (the client, the contacts, the dates, the
+document), guardrails, **starting** a GVM / TruffleHog / supply-chain / AI
 attack-surface scan, captured HTTP traffic, version activation or deletion,
 Mute Rules (the rules, their presets, applying or arming them), and any graph
 **write**.
@@ -188,7 +195,7 @@ and a value set only in `.env` would be silently inert.
 | `MCP_TOKEN_RETENTION_DAYS` | `90` | How long revoked/expired token rows are kept before pruning. |
 | `MCP_RATE_READ_PER_MIN` | `120` | Cheap reads per token per minute. |
 | `MCP_RATE_QUERY_PER_MIN` | `20` | `query_graph` calls per token per minute. |
-| `MCP_RATE_WRITE_PER_MIN` | `10` | Settings/stop calls per token per minute. |
+| `MCP_RATE_WRITE_PER_MIN` | `10` | Settings, stop, verdict, mute, preset and rescope calls per token per minute. |
 | `MCP_RATE_START_PER_WINDOW` | `1` | Scan starts per project per window. |
 | `MCP_RATE_START_WINDOW_MS` | `300000` | That window (5 minutes). |
 | `MCP_RATE_COMPARE_PER_WINDOW` | `2` | `compare_scan_versions` calls per project per window. Its own bucket, not `query`: one call can gunzip and parse a whole stored graph. |
@@ -542,9 +549,15 @@ with 405.
 
 ### The settings surface
 
-`PUT /api/projects/[id]` spreads its body straight into `prisma.project.update`,
-and `Project` has over 700 scalar columns — so anything that reaches it is
-written. Describing exclusions in prose is therefore not a control.
+`PUT /api/projects/[id]` (the project form's save) writes every `Project`
+column its body carries, and `Project` has over 700 scalar columns — so almost
+anything that reaches it is written. Describing exclusions in prose is therefore
+not a control. It strips only the row bookkeeping (`id`, the actor columns, the
+version-activation lock) and the upload-managed columns their own endpoints
+own, stamps `updatedById`, writes a `project.update` audit row (credentials by
+name only), and, when the body carries the `updatedAt` the form loaded, writes
+only while the row still has it: a form left open answers `409` instead of
+reverting what an MCP agent changed meanwhile.
 
 **The allowlist stopped being the control; validation at the point of use became
 it.** The first version of this surface refused 586 of the 712 columns by name,
@@ -559,9 +572,9 @@ may write:
 
 | Disposition | Count | What it means |
 | --- | --- | --- |
-| `settable` | 648 | write at any time through `update_recon_settings` |
+| `settable` | 650 | write at any time through `update_recon_settings` |
 | `create_only` | 19 | the engagement scope: written once by `create_project`, refused by name afterwards |
-| `never` | 47 | not a pipeline parameter at all; refused with its class. 24 of these are the engagement RECORD |
+| `never` | 48 | not a pipeline parameter at all; refused with its class. 24 of these are the engagement RECORD |
 
 There used to be a fourth, `tighten_only`, holding the Rules of Engagement under
 a write-time direction rule. It is deleted rather than migrated. The rule bought
@@ -625,7 +638,10 @@ server's tools. Assume an instruction embedded in a page title reaches the model
 
 | What an injected instruction could try | What stops it |
 | --- | --- |
-| Redirect the platform at a new target | Scope is `create_only`: refused by name on an existing project, whatever the token holds. A different target means a different project. |
+| Redirect the platform at a new target | The target domain, the address list and the targeting mode are `create_only`: refused by name on an existing project, whatever the token holds. A different target means a different project. |
+| Widen a third-party batch list or a scanner's target | Only `update_project_scope` moves a target list, behind `project:rescope`, which no profile ticks. Every batch root runs the permanent guardrail, and a widening of a `third_party` engagement is refused without an `authorization` record, which needs `engagement:authorize` too. The audit row records the digest. |
+| Apply the loudest preset | Needs `preset:apply`. A preset never carries the engagement's limits, so the ceiling still rewrites every rate at scan start, and a `third_party` project cannot start without one. |
+| Plant a stored instruction in the preset library | Needs `preset:write`, which only *Research and training* ticks. Values are bounded exactly as `recon:settings` bounds them; the preset drawer badges a preset an agent wrote last, with the token prefix; every write audits its before and after, and a delete keeps the settings. |
 | Discard the victim's graph history | `mode:"overwrite"` needs `recon:overwrite`, off by default. |
 | Launch a scan storm | Strict per-token/per-project start bucket + the orchestrator's one-scan-per-project rule. |
 | Escalate scan aggression | Aggression is SETTABLE and CAPPED instead of refused. Every rate resolves to at most the engagement ceiling at scan start, and `roeForbiddenTools` / `roeForbiddenCategories` / `roeAllowDos` are checked in code before a tool executes. A `third_party` engagement cannot start without a ceiling at all. |
@@ -642,6 +658,46 @@ server's tools. Assume an instruction embedded in a page title reaches the model
 | Aim a command at a third party | **Nothing, once `kali:exec` is granted.** See below. |
 | Smuggle a second command | **Nothing, and nothing is meant to.** A shell is the feature. |
 | Read the sandbox's own environment or keys | **Nothing, once `kali:exec` is granted.** See below. |
+
+### Presets and rescope over MCP
+
+**Presets.** `apply_recon_preset` is the project form's "Load preset" run
+server-side: the same `PRESET_FIELD_KEYS`, the same REPLACE semantics (every
+preset field the preset does not name goes back to the running backends'
+default), the same "Preset applied" badge. It needs the backends' `/defaults`
+and fails closed without them rather than resetting to Prisma defaults the
+backends do not use. It validates every value it CHANGES against the registry,
+then the cross-field rules the form's save runs (fireteam, supply-chain host
+allowlist), and writes with a compare-and-swap on `updatedAt`. It is refused
+while anything reads or writes the graph (`describeLiveGraphWriters`), because
+the in-app agent re-reads project settings every turn.
+
+`PRESET_FIELD_KEYS` is exactly the MCP-settable fields plus the `reconPresetId`
+badge, pinned by a test. A preset once carried `mcpKaliExecEnabled` and
+`updateGraphDb`, and because a preset resets what it does not name, applying
+ANY preset in the UI re-enabled the MCP sandbox. Both are excluded now.
+
+Presets are per user. A guessed id of another user's preset reads exactly like a
+missing one, and apply needs the caller to own both the project and the preset.
+The UI's own preset save and the project import now store only preset fields,
+and reads, the export and apply project a stored blob down to them, so a legacy
+preset carrying a target or a credential keeps it in the database.
+
+**Rescope.** `update_project_scope` reopens eight `create_only` fields, the
+registry's `rescope: true`, which are the target lists the project form already
+lets a person edit after creation. The target domain, the address list, the
+targeting mode, ownership verification and the target guardrail stay refused
+whatever the token holds.
+
+**Residual, stated plainly.** A token holding both `project:rescope` and
+`engagement:authorize` can record an authorization for any document digest and
+widen a third-party engagement with it. That claim is attributable (the token id
+is on the record), not verifiable.
+
+**Both directions of the stale-form problem.** Every MCP write is a
+compare-and-swap. The project form's full save now sends back the `updatedAt` it
+loaded, so a form left open answers `409` instead of reverting what an agent
+changed meanwhile.
 
 ### Mute and unmute over MCP
 
@@ -752,6 +808,15 @@ a token brute force or a replayed revoked token becomes visible.
 A mute or unmute over MCP also writes `muted_nodes.muted` /
 `muted_nodes.unmuted` with `source = 'mcp'`, the token id and prefix, every item
 and its outcome, and the reason; `outcome: 'unknown'` records a lost answer.
+
+The preset and rescope tools write their own rows with a before and an after:
+`mcp.create_recon_preset`, `mcp.update_recon_preset`, `mcp.delete_recon_preset`
+(which keeps the deleted settings), `mcp.apply_recon_preset` and
+`mcp.update_project_scope` (with the authorization digest and whether the Domain
+node was seeded). A refused settings write records the rejected key, a registry
+key or `<unknown>`, never caller text. The project form's save writes
+`project.update` with `source = 'ui'`, so a person reverting an agent's change is
+reconstructible too; credentials are recorded by name only.
 
 A `start_recon` also produces the normal `ScanJob` history row with
 `initiatedByUserId` set to the token owner, and the audit record carries the

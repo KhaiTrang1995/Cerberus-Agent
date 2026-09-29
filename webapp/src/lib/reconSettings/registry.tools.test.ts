@@ -262,12 +262,14 @@ describe('T9 every preset names fields the registry has', () => {
     expect(problems, 'a preset may not point a project at a different target').toEqual([])
   })
 
-  test('no preset changes the Rules of Engagement', () => {
+  test('no preset changes the engagement\'s limits', () => {
+    // This checked a `tighten_only` disposition the registry no longer has, so it
+    // asserted nothing. The limits are the `engagement_limits` group now.
     const problems: string[] = []
     for (const preset of RECON_PRESETS) {
       for (const key of Object.keys(preset.parameters ?? {})) {
         const spec = field(key)
-        if (spec && spec.mcp === 'tighten_only') problems.push(`${preset.id}/${key}`)
+        if (spec && spec.group === 'engagement_limits') problems.push(`${preset.id}/${key}`)
       }
     }
     expect(problems, 'the engagement agreement is not a tuning choice').toEqual([])

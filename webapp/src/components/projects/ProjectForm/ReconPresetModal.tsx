@@ -11,8 +11,15 @@ import { RECON_PRESETS, type ReconPreset } from '@/lib/recon-presets'
 import { matchesTargetFilter, type TargetFilter } from '@/lib/recon-presets/targeting'
 import { GeneratePresetModal } from './GeneratePresetModal'
 import styles from './ReconPresetModal.module.css'
+import provenanceStyles from './presetProvenance.module.css'
+import {
+  PRESET_FILTER_THRESHOLD,
+  filterPresetsByName,
+  mcpEditedLabel,
+  type PresetProvenance,
+} from './presetProvenance'
 
-interface PresetListItem {
+interface PresetListItem extends PresetProvenance {
   id: string
   name: string
   description: string
@@ -144,6 +151,7 @@ export function ReconPresetModal({
   // The preset (built-in or user) whose load is in progress, confirmation included.
   const [loadingPresetId, setLoadingPresetId] = useState<string | null>(null)
   const [deletingPresetId, setDeletingPresetId] = useState<string | null>(null)
+  const [nameFilter, setNameFilter] = useState('')
 
   // --- Generate modal ---
   const [isGenerateModalOpen, setIsGenerateModalOpen] = useState(false)
@@ -396,10 +404,24 @@ export function ReconPresetModal({
                 <p>Generate one with AI or use &quot;Save as Preset&quot; from the form.</p>
               </div>
             ) : (
+              <>
+              {userPresets.length > PRESET_FILTER_THRESHOLD && (
+                <input
+                  type="search"
+                  className={`textInput ${provenanceStyles.filter}`}
+                  placeholder="Filter by name"
+                  aria-label="Filter presets by name"
+                  value={nameFilter}
+                  onChange={(e) => setNameFilter(e.target.value)}
+                />
+              )}
               <div className={styles.userGrid}>
-                {userPresets.map((preset) => (
+                {filterPresetsByName(userPresets, nameFilter).map((preset) => (
                   <div key={preset.id} className={styles.userCard}>
                     <h3 className={styles.userCardName}>{preset.name}</h3>
+                    {mcpEditedLabel(preset) && (
+                      <span className={provenanceStyles.mcpBadge}>{mcpEditedLabel(preset)}</span>
+                    )}
                     {preset.description && (
                       <p className={styles.userCardDescription}>{preset.description}</p>
                     )}
@@ -433,6 +455,7 @@ export function ReconPresetModal({
                   </div>
                 ))}
               </div>
+              </>
             )}
           </div>
         )}

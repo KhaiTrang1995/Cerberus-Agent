@@ -209,7 +209,7 @@ describe('a field the surface cannot read back is not writable either', () => {
 
   test('a readable engagement LIMIT is still writable', async () => {
     await updateReconSettings(ctx(), 'p1', { roeGlobalMaxRps: 1 })
-    expect(h.updateProject.mock.calls[0][0].data).toEqual({ roeGlobalMaxRps: 1 })
+    expect(h.updateManyProject.mock.calls[0][0].data).toEqual({ roeGlobalMaxRps: 1 })
   })
 
   test('the audit for a limit change carries the real prior value', async () => {

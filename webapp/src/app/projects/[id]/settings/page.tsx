@@ -40,8 +40,9 @@ export default function ProjectSettingsPage() {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleSubmit = async (data: any) => {
     try {
-      await saveProject(data)
+      const updated = await saveProject(data)
       router.push(`/graph?project=${projectId}`)
+      return updated
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to update project'
       if (message.toLowerCase().includes('guardrail')) {
@@ -53,7 +54,7 @@ export default function ProjectSettingsPage() {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleSaveAndStay = async (data: any) => {
-    await saveProject(data)
+    return saveProject(data)
   }
 
   const handleCancel = () => {

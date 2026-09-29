@@ -92,6 +92,7 @@ import {
   type LoadedPreset,
 } from '@/lib/project-preset-utils'
 import { useUpdateProject } from '@/hooks/useProjects'
+import { onProjectWrite, versionOf } from '@/lib/projectVersion'
 
 const WorkflowView = dynamic(
   () => import('./WorkflowView/WorkflowView').then(m => ({ default: m.WorkflowView })),
@@ -102,9 +103,10 @@ type ProjectFormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt'
 
 interface ProjectFormProps {
   initialData?: Partial<ProjectFormData> & { id?: string }
-  onSubmit: (data: ProjectFormData & { roeFile?: File | null }) => Promise<void>
+  /** Resolves to the saved row when there is one, so the form can adopt its `updatedAt`. */
+  onSubmit: (data: ProjectFormData & { roeFile?: File | null }) => Promise<unknown>
   /** Save without navigating away (used by workflow modal save button) */
-  onSaveAndStay?: (data: ProjectFormData & { roeFile?: File | null }) => Promise<void>
+  onSaveAndStay?: (data: ProjectFormData & { roeFile?: File | null }) => Promise<unknown>
   onCancel: () => void
   isSubmitting?: boolean
   mode: 'create' | 'edit'
@@ -407,6 +409,23 @@ export function ProjectForm({
   )
   const projectId =
     projectIdFromRoute ?? (initialData as { id?: string } | undefined)?.id ?? (mode === 'create' ? generatedId : undefined)
+
+  // The row's updatedAt as this form last saw it written. A full save sends it
+  // back and the PUT refuses a stale one with 409, so an MCP agent's change made
+  // while the form sat open is not silently reverted by the next save. Kept out
+  // of formData so adopting a new value never marks the form dirty.
+  const savedVersionRef = useRef<string | null>(
+    versionOf((initialData as { updatedAt?: unknown } | undefined)?.updatedAt)
+  )
+  const adoptSavedVersion = useCallback((row: unknown) => {
+    const version = versionOf((row as { updatedAt?: unknown } | null | undefined)?.updatedAt)
+    if (version) savedVersionRef.current = version
+  }, [])
+  // The upload sections write the row through their own endpoints.
+  useEffect(() => {
+    if (!projectId || mode !== 'edit') return
+    return onProjectWrite(projectId, version => { savedVersionRef.current = version })
+  }, [projectId, mode])
   // Scan Queue (Phase 3): a temporary partial-recon start refusal offers Cancel /
   // Add to queue instead of a dead-end toast.
   const { handleStartFailure: handlePartialStartFailure } = useScanStartFailure(projectId ?? null)
@@ -566,13 +585,14 @@ export function ProjectForm({
         toast.error(err.error || 'Failed to save')
         return
       }
+      adoptSavedVersion(await res.json().catch(() => null))
       // Workflow toggles persist immediately; adopt the saved field into the
       // baseline so the batched Update button + guard don't flag it as unsaved.
       setBaseline(prev => ({ ...prev, [field]: value }))
     } catch {
       toast.error('Failed to save setting')
     }
-  }, [projectId, mode, toast, setBaseline])
+  }, [projectId, mode, toast, setBaseline, adoptSavedVersion])
 
   const updateMultipleFields = (fields: Partial<ProjectFormData>) => {
     setFormData(prev => ({ ...prev, ...fields }))
@@ -671,7 +691,7 @@ export function ProjectForm({
       return
     }
     try {
-      await presetSaveMutation.mutateAsync({ projectId, data: saved as Partial<Project> })
+      adoptSavedVersion(await presetSaveMutation.mutateAsync({ projectId, data: saved as Partial<Project> }))
       setBaseline(prev => ({ ...prev, ...saved }) as ProjectFormData)
       toast.success(`Preset "${presetName}" loaded and saved`, 'Preset Loaded')
     } catch (error) {
@@ -744,8 +764,9 @@ export function ProjectForm({
         reconPresetId: appliedPreset?.id ?? formData.reconPresetId ?? null,
         ...(roeFile ? { roeFile } : {}),
         ...(mode === 'create' && projectId ? { id: projectId } : {}),
+        ...(mode === 'edit' && savedVersionRef.current ? { updatedAt: savedVersionRef.current } : {}),
       }
-      await onSubmit(submitData)
+      adoptSavedVersion(await onSubmit(submitData))
       // Adopt the just-saved state as the new baseline so the form reads clean
       // (create mode usually navigates away, but this keeps state correct if not).
       setBaseline(formData)
@@ -813,8 +834,9 @@ export function ProjectForm({
         reconPresetId: appliedPreset?.id ?? formData.reconPresetId ?? null,
         ...(roeFile ? { roeFile } : {}),
         ...(mode === 'create' && projectId ? { id: projectId } : {}),
+        ...(mode === 'edit' && savedVersionRef.current ? { updatedAt: savedVersionRef.current } : {}),
       }
-      await onSaveAndStay(submitData)
+      adoptSavedVersion(await onSaveAndStay(submitData))
       setBaseline(formData)
       toast.success('Project saved')
       after?.()

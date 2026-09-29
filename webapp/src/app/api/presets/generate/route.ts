@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
+import { requireEffectiveUser } from '@/lib/access'
 import { reconPresetSchema, extractJson, RECON_PARAMETER_CATALOG } from '@/lib/recon-preset-schema'
 import { assertSafeLlmBaseUrl, BaseUrlValidationError } from '@/lib/llm-url-guard'
 
@@ -209,16 +210,18 @@ async function callAnthropic(
 
 export async function POST(request: NextRequest) {
   try {
+    // The caller spends the LLM key of whichever user this resolves to, so it is
+    // the session's effective user and never a `userId` from the body.
+    const eff = await requireEffectiveUser()
+    if (eff instanceof NextResponse) return eff
+    const userId = eff.userId
+
     const body = await request.json()
-    const { userId, model, prompt } = body as {
-      userId?: string
+    const { model, prompt } = body as {
       model?: string
       prompt?: string
     }
 
-    if (!userId) {
-      return NextResponse.json({ error: 'userId is required' }, { status: 400 })
-    }
     if (!model) {
       return NextResponse.json({ error: 'model is required' }, { status: 400 })
     }

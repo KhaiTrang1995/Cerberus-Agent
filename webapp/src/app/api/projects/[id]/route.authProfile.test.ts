@@ -127,6 +127,6 @@ describe('PUT /api/projects/[id] — auth profile is not writable through the ro
     const res = await PUT(req, params)
     expect(res.status).toBe(200)
     const data = mockProjectUpdate.mock.calls[0][0].data
-    expect(data).toEqual({ name: 'renamed' })
+    expect(data).toEqual({ name: 'renamed', updatedById: 'owner' })
   })
 })

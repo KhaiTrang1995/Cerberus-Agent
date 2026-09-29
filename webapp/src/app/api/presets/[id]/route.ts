@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { requireEffectiveUser, assertOwner } from '@/lib/access'
+import { projectPresetForRead } from '@/lib/reconPresets/server'
 
 interface RouteParams {
   params: Promise<{ id: string }>
@@ -23,7 +24,9 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
     const denied = assertOwner(eff, preset.userId)
     if (denied) return denied
 
-    return NextResponse.json(preset)
+    // The preset fields only: a preset stored before storage was filtered can
+    // carry a target or a credential, and applying ignores those anyway.
+    return NextResponse.json({ ...preset, settings: projectPresetForRead(preset.settings).settings })
   } catch (error) {
     console.error('Failed to fetch preset:', error)
     return NextResponse.json(

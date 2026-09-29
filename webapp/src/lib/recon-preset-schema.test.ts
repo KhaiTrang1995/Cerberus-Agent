@@ -147,7 +147,16 @@ describe('reconPresetSchema', () => {
   // ============================================================
   // GraphQL Security Scanner fields (Phase 1 §8.1)
   // ============================================================
-  test('accepts all 17 graphql* fields round-trip', () => {
+  test('B-8: the credential is stripped, because a preset never carries one', () => {
+    // A generated preset holding graphqlAuthValue was accepted here and then
+    // dropped on apply, so the operator saw a value that never took effect.
+    const result = reconPresetSchema.safeParse({ graphqlAuthType: 'bearer', graphqlAuthValue: 'token' })
+    expect(result.success).toBe(true)
+    expect(result.data).toEqual({ graphqlAuthType: 'bearer' })
+    expect(RECON_PARAMETER_CATALOG).not.toContain('graphqlAuthValue')
+  })
+
+  test('accepts the graphql* fields a preset carries, round-trip', () => {
     const graphqlBlock = {
       graphqlSecurityEnabled: true,
       graphqlIntrospectionTest: true,
@@ -155,7 +164,6 @@ describe('reconPresetSchema', () => {
       graphqlRateLimit: 5,
       graphqlConcurrency: 2,
       graphqlAuthType: 'bearer',
-      graphqlAuthValue: 'eyJhbGci...',
       graphqlAuthHeader: 'X-Api-Key',
       graphqlEndpoints: 'https://api.target.com/graphql,https://v1/graphql',
       graphqlDepthLimit: 15,

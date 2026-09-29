@@ -32,12 +32,18 @@ import {
   loadRegistry,
   neverFields,
   mcpReadableFields,
+  rescopableFields,
   settableFields,
   type RegistryField,
 } from './registry'
 import { validateValue } from './validators'
 
-export type SettingsMode = 'update' | 'create'
+/**
+ * update   an existing project's settings (update_recon_settings)
+ * create   a new project, scope included (create_project)
+ * rescope  an existing project's target lists and nothing else (update_project_scope)
+ */
+export type SettingsMode = 'update' | 'create' | 'rescope'
 
 export interface SettingsRejection {
   ok: false
@@ -74,11 +80,45 @@ export const DENY_REASON_DOC: Readonly<Record<string, string>> = Object.freeze({
     'Set a ceiling, an exclusion or a time window instead',
 })
 
+/**
+ * The refused half of the write surface, as one sentence for the tool
+ * descriptions an agent reads.
+ *
+ * Built from the registry rather than written, because the hand-written
+ * version described a 126-field allowlist long after the surface had grown to
+ * the whole pipeline, and agents believed it.
+ */
+export function refusedFieldsSentence(): string {
+  const createOnly = createOnlyFields().map(f => f.key)
+  const rescope = rescopableFields().map(f => f.key)
+  const classes = [...new Set(neverFields().map(f => f.deny_reason).filter((r): r is NonNullable<typeof r> => Boolean(r)))]
+    .sort()
+  return (
+    'It can NEVER change the engagement scope, which is fixed at creation by create_project: ' +
+    `${createOnly.join(', ')}. ` +
+    `Of those, update_project_scope alone may change ${rescope.join(', ')}, under its own permission. ` +
+    'Nor any column that is not a pipeline parameter at all, in these classes: ' +
+    classes.map(c => `${c} (${DENY_REASON_DOC[c]})`).join('; ') + '. ' +
+    'An attempt to set one is refused by name, never silently ignored.'
+  )
+}
+
+/**
+ * A rejected key as it may appear in an audit row: the key itself when it is a
+ * registry column, and a placeholder otherwise, so caller text never reaches
+ * the one-line console audit record.
+ */
+export function auditableKey(key: string): string | undefined {
+  if (!key) return undefined
+  return field(key) ? key : '<unknown>'
+}
+
 /** Every key a caller may write in this mode. */
 export function permittedKeys(mode: SettingsMode): string[] {
   if (mode === 'create') {
     return fieldsWhere(f => f.mcp !== 'never').map(f => f.key)
   }
+  if (mode === 'rescope') return rescopableFields().map(f => f.key)
   return settableFields().map(f => f.key)
 }
 
@@ -104,7 +144,25 @@ function explainRefusal(
     return `'${key}' is not a pipeline parameter: ${reason ?? 'it configures nothing about a scan'}.${written}`
   }
   if (mode === 'create') return null
+  if (mode === 'rescope') {
+    if (spec.mcp === 'create_only' && spec.rescope) return null
+    if (spec.mcp === 'create_only') {
+      return (
+        `'${key}' stays fixed on an existing project whatever the token holds: changing it ` +
+        `would re-point or re-verify the engagement itself, not one scanner's target list. ` +
+        `A different target means a different project; use create_project. This tool changes ` +
+        `only ${rescopableFields().map(f => f.key).join(', ')}.`
+      )
+    }
+    return `'${key}' is not a target list. Change it with update_recon_settings.`
+  }
   if (spec.mcp === 'create_only') {
+    if (spec.rescope) {
+      return (
+        `'${key}' is a target list of this engagement, fixed at creation for this tool. ` +
+        `update_project_scope changes it on an existing project, under its own permission.`
+      )
+    }
     return (
       `'${key}' is part of this project's engagement scope and is fixed at creation. ` +
       `Changing it on an existing project would re-point the platform at a different ` +

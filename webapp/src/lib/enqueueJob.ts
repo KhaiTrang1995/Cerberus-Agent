@@ -10,9 +10,8 @@
  */
 import { Prisma } from '@prisma/client'
 import prisma from '@/lib/prisma'
-import { envelopeForKind, settingsFingerprint } from '@/lib/jobQueue'
-import { resolveTrufflehogFingerprintExtra } from '@/lib/trufflehogStart'
-import { authProfileFingerprintExtra } from '@/lib/authProfileFingerprint'
+import { envelopeForKind } from '@/lib/jobQueue'
+import { currentFingerprintFor } from '@/lib/jobFingerprint'
 
 export const QUEUEABLE_KINDS = [
   'full_recon', 'partial_recon', 'gvm', 'github_hunt', 'trufflehog',
@@ -69,12 +68,8 @@ export async function enqueueJob(input: EnqueueInput): Promise<EnqueueResult> {
 
   // TruffleHog's targets live on a per-source profile, not the Project row, so
   // the fingerprint has to fetch it before hashing (section 4 / C-4).
-  const fingerprintExtra = {
-    ...(await resolveTrufflehogFingerprintExtra(kind, projectId, payload)),
-    ...(await authProfileFingerprintExtra(kind, projectId)),
-  }
-  const settingsHash = settingsFingerprint(
-    kind, project as unknown as Record<string, unknown>, fingerprintExtra,
+  const settingsHash = await currentFingerprintFor(
+    { kind, projectId, payload }, project as unknown as Record<string, unknown>,
   )
   const envelopeBytes = BigInt(envelopeForKind(kind))
 

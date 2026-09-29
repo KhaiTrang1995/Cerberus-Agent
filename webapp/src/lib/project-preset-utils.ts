@@ -62,6 +62,10 @@ export const PRESET_EXCLUDED_FIELDS: ReadonlySet<string> = new Set([
   ...fieldsWhere(f => f.tool === 'engagement').map(f => f.key),
   ...fieldsWhere(f => f.deny_reason === 'upload-managed').map(f => f.key),
   ...fieldsWhere(f => f.read_deny_reason === 'credential').map(f => f.key),
+  // A preset that does not name one of these resets it to its default, and the
+  // default of `mcpKaliExecEnabled` is ON: carrying it let applying any preset
+  // quietly re-enable the MCP sandbox a person had switched off.
+  ...fieldsWhere(f => f.deny_reason === 'escalation' || f.deny_reason === 'not-tuning').map(f => f.key),
   // reconPresetId is internal too, but it is what the "Started from" badge is
   // restored from when a user preset is loaded, so it travels.
   ...fieldsWhere((f, key) =>
@@ -80,7 +84,7 @@ export const PRESET_FIELD_KEYS: readonly string[] = fieldKeys().filter(k => !PRE
  * provider for, which is why the create form makes them pick these two
  * explicitly. Built-in and AI-generated presets never name them.
  */
-const KEPT_WHEN_ABSENT: ReadonlySet<string> = new Set(['agentOpenaiModel', 'aiPipelineModel'])
+export const KEPT_WHEN_ABSENT: ReadonlySet<string> = new Set(['agentOpenaiModel', 'aiPipelineModel'])
 
 type Lookup = { found: true; value: unknown } | { found: false }
 

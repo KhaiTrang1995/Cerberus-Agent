@@ -15,7 +15,12 @@
 
 /** An error whose message was WRITTEN to be shown to the caller. */
 export class McpToolError extends Error {
-  constructor(message: string, public code?: string) {
+  /**
+   * `audit` is merged into the refusal's audit row. It must hold only values
+   * this server chose (a registry key, a count), never caller text: the row is
+   * also printed as a one-line console record.
+   */
+  constructor(message: string, public code?: string, public audit?: Record<string, unknown>) {
     super(message)
     this.name = 'McpToolError'
   }

@@ -150,15 +150,17 @@ export const MCP_SCOPE_COPY: Record<McpScope, ScopeCopy> = {
   'project:create': {
     label: 'Create projects and set their engagement scope',
     access: 'write',
-    blurb: 'Create a new project and fix what it points at: its target list and its engagement kind, with its settings and limits applied at creation so the first scan runs configured. Scope is written ONCE at creation and is immutable afterwards through every route on this surface, so this opens new engagements rather than re-pointing existing ones. It governs create_project alone.',
+    blurb: 'Create a new project and fix what it points at: its targeting mode and its engagement kind, with its settings and limits applied at creation so the first scan runs configured. The target domain, the address list and the targeting mode are written ONCE and are immutable afterwards through every route on this surface, so this opens new engagements rather than re-pointing existing ones. It governs create_project alone.',
     detail:
       'This is the act that binds RedAmon to a target, which is why it is its own ' +
       'checkbox rather than part of changing settings. A token with recon:settings ' +
       'can tune the engagements you already have; a token with this one can open ' +
       'new ones.\n\n' +
       'What it can never do is re-point an existing project. The target domain, the ' +
-      'address list, the domain batch and the target guardrail are refused by name on ' +
-      'a project that already exists, whatever permissions the token holds.\n\n' +
+      'address list, the targeting mode and the target guardrail are refused by name on ' +
+      'a project that already exists, whatever permissions the token holds. A batch ' +
+      'project\'s host list and the other scanners\' targets are the one exception, and ' +
+      'they need a separate permission: Change an existing project\'s target lists.\n\n' +
       'It governs create_project and nothing else. An engagement\'s LIMITS - its rate ' +
       'ceiling, its excluded hosts, its scanning window, the agent\'s denylists - are ' +
       'ordinary settings afterwards, changed with recon:settings, and reachable from ' +
@@ -180,6 +182,49 @@ export const MCP_SCOPE_COPY: Record<McpScope, ScopeCopy> = {
       'needs; a row that can be rewritten is not evidence.\n\n' +
       'It carries the id of the token that wrote it, so a revoked credential is ' +
       'still attributable afterwards.',
+  },
+  'preset:write': {
+    label: 'Manage your recon preset library',
+    access: 'write',
+    blurb: 'Create, edit and delete your own recon presets: from explicit settings, as a copy of another preset, or captured from one of your projects. Every value is validated exactly as a settings change is, and a preset never carries a target, the engagement\'s limits or record, a credential or an upload. Built-in presets cannot be changed. A preset an agent wrote is badged as such in the preset drawer, because a person applies it later.',
+    detail:
+      'A preset is a stored instruction: whoever loads it into a project later gets its ' +
+      'configuration, usually without reading all six hundred values. That is why writing ' +
+      'the library is its own checkbox, apart from tuning a project you are looking at.\n\n' +
+      'An agent cannot use a preset to reach anything a settings change could not: the same ' +
+      'bounds, the same validators, and never the scope, the engagement\'s limits or record, a ' +
+      'credential, an uploaded file or the MCP sandbox switch. Deleting a preset keeps its ' +
+      'settings in the audit log, which is the only way back.',
+  },
+  'preset:apply': {
+    label: 'Apply a recon preset to a project',
+    access: 'write',
+    blurb: 'Load a built-in preset or one of your own into a project, as the project form\'s Load preset does. It REPLACES the configuration: every preset field the preset does not name goes back to its default. It never touches the target, the engagement\'s limits, credentials or uploads, and it is refused while anything is reading or writing the project\'s graph.',
+    detail:
+      'Held together with Manage your recon preset library, this equals Change recon ' +
+      'settings over every field a preset covers: an agent can write any preset values and ' +
+      'then apply them. It is also a much larger write than one settings change - up to six ' +
+      'hundred fields in one call, and it resets whatever the preset does not name - which ' +
+      'is why it has its own checkbox.\n\n' +
+      'A dry run lists every field that would change, and which of them only because the ' +
+      'preset did not name them, before anything is written. The engagement\'s rate ceiling ' +
+      'still caps every rate at scan start whatever a preset says.',
+  },
+  'project:rescope': {
+    label: 'Change an existing project\'s target lists',
+    access: 'write',
+    blurb: 'Edit a domain-batch project\'s host list and re-point the standalone scanners (the GitHub hunt\'s organisation and repositories, the GVM target strategy, the supply-chain organisation and repository) on a project that already exists. The target domain, the IP list and the targeting mode stay locked for everyone. Widening a third-party engagement also needs Record what authorized an engagement.',
+    detail:
+      'Scope is otherwise fixed at creation for every token. This reopens eight target-list ' +
+      'fields, the ones the project form already lets a person edit, and nothing else: the ' +
+      'target domain, the address list, the targeting mode, ownership verification and the ' +
+      'target guardrail stay refused whatever the token holds.\n\n' +
+      'Every new batch root runs the permanent guardrail, and on a third-party engagement any ' +
+      'widening - a new root, a new GitHub organisation or repository, a new supply-chain ' +
+      'organisation or repository - must arrive with a new authorization record.\n\n' +
+      'Stated plainly: a token holding this AND Record what authorized an engagement can ' +
+      'record an authorization for any document digest and widen with it. That claim is ' +
+      'attributable to the token that wrote it, not verified.',
   },
   'kali:exec': {
     label: 'Shell access to the Kali sandbox',
@@ -257,14 +302,14 @@ export const SCOPE_GROUPS: ScopeGroup[] = [
     label: 'Change settings and findings',
     hint: 'Writes that are not scans.',
     tone: 'action',
-    scopes: ['recon:settings', 'triage:write', 'triage:mute'],
+    scopes: ['recon:settings', 'triage:write', 'triage:mute', 'preset:write', 'preset:apply'],
   },
   {
     id: 'engagement',
     label: 'Open and authorize engagements',
     hint: 'Binds RedAmon to a target, and records who said it could.',
     tone: 'action',
-    scopes: ['project:create', 'engagement:authorize'],
+    scopes: ['project:create', 'engagement:authorize', 'project:rescope'],
   },
   {
     id: 'exec',

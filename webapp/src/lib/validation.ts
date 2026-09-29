@@ -1,4 +1,5 @@
 import { splitWildcard } from './domainBatch'
+import { REGEX_GITHUB_ORG } from '@/lib/reconSettings/validators'
 
 // === IP / Network ===
 export const REGEX_IPV4 = /^((25[0-5]|2[0-4]\d|[01]?\d\d?)\.){3}(25[0-5]|2[0-4]\d|[01]?\d\d?)$/
@@ -58,7 +59,8 @@ export function isValidHeaderList(headers: string[]): boolean {
 // === GitHub ===
 export const REGEX_GITHUB_TOKEN = /^(ghp_[a-zA-Z0-9]{36,}|github_pat_[a-zA-Z0-9_]{82,})$/
 export const REGEX_GITHUB_REPO = /^[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+$/
-export const REGEX_GITHUB_ORG = /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/
+// The server's recon-settings validator owns the rule; the form checks with the same one.
+export { REGEX_GITHUB_ORG }
 export const REGEX_GIT_BRANCH = /^[a-zA-Z0-9._\/-]+$/
 
 // === URL Paths ===

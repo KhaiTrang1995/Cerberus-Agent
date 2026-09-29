@@ -13,6 +13,13 @@ import { requireEffectiveUser, requireProjectAccess } from '@/lib/access'
 import { toAuthProfileMetadata } from '@/lib/authProfile'
 import { callGraphTriage } from '@/lib/triageClient'
 import { pickProjectColumns } from '@/lib/projectColumns'
+import { internalKeyHeaders } from '@/lib/agentAuth'
+import { writeAudit } from '@/lib/audit'
+import { canonicalJson } from '@/lib/fingerprint'
+import { field, fieldsWhere } from '@/lib/reconSettings/registry'
+import { STALE_SAVE_MESSAGE } from '@/lib/projectVersion'
+import { validateCrossFieldRules, writeFireteamAudit } from '@/lib/reconSettings/crossField'
+import { seedProjectDomains } from '@/lib/graphSeedDomains'
 
 // Path to output directories (fallback for local deletion)
 const RECON_OUTPUT_PATH = process.env.RECON_OUTPUT_PATH || '/home/samuele/Progetti didattici/RedAmon/recon/output'
@@ -27,6 +34,33 @@ const RECON_ORCHESTRATOR_URL = process.env.RECON_ORCHESTRATOR_URL || 'http://loc
 
 interface RouteParams {
   params: Promise<{ id: string }>
+}
+
+/**
+ * Columns the settings form loads with the row and PUTs back whole, but that no
+ * save may write.
+ *
+ * `activation*` is the version-activation lock: a form opened before an
+ * activation and saved during it released the lock mid-swap. The upload-managed
+ * columns belong to the endpoints that place the file on disk, and the form's
+ * copy is whatever it loaded, so writing it back reverted an upload made from
+ * inside the same form.
+ */
+const NOT_WRITABLE_BY_SAVE: ReadonlySet<string> = new Set([
+  'id', 'createdById', 'updatedById',
+  'activationState', 'activationStartedAt', 'activationVersionId',
+  ...fieldsWhere(f => f.deny_reason === 'upload-managed').map(f => f.key),
+])
+
+/** Audited by name only: the value is a credential or a whole document. */
+function auditsValue(key: string): boolean {
+  const reason = field(key)?.read_deny_reason
+  return reason !== 'credential' && reason !== 'document_blob'
+}
+
+/** canonicalJson renders every Date as `{}`, which would hide a changed timestamp. */
+function comparable(value: unknown): string {
+  return value instanceof Date ? value.toISOString() : canonicalJson(value)
 }
 
 // GET /api/projects/[id] - Get project with all params
@@ -179,10 +213,23 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       ...rawUpdate
     } = body
 
+    // The form sends back the updatedAt of the row it is editing. Writing only
+    // while it still matches is what stops a form left open from reverting,
+    // field by field, whatever an MCP agent or another tab wrote meanwhile. The
+    // single-field auto-saves carry none and keep writing unconditionally.
+    let expectedVersion: Date | null = null
+    if (updatedAt !== undefined && updatedAt !== null) {
+      expectedVersion = new Date(updatedAt)
+      if (Number.isNaN(expectedVersion.getTime())) {
+        return NextResponse.json({ error: 'updatedAt is not a valid timestamp' }, { status: 400 })
+      }
+    }
+
     // Only Project COLUMNS may be written here: a relation key in this whole-row
     // body would skip the relation's own route, its validation, its revision
     // check and its audit row.
     const updateData: Record<string, any> = pickProjectColumns(rawUpdate)
+    for (const key of NOT_WRITABLE_BY_SAVE) delete updateData[key]
 
     // Sanitize string inputs that are used as hostnames/IPs (trailing spaces break DNS)
     if (typeof updateData.targetDomain === 'string') {
@@ -290,9 +337,11 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
         // above is the control that may not be bypassed.
         if (existing?.targetGuardrailEnabled !== false) {
           try {
+            // The agent answers only a caller holding the internal key, and its
+            // verdict is `allowed`; without both this check could never block.
             const guardrailResponse = await fetch(`${AGENT_API_URL}/guardrail/check-target`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: internalKeyHeaders({ 'Content-Type': 'application/json' }),
               body: JSON.stringify({
                 target_domain: '', target_domains: nextRoots,
                 target_ips: [], user_id: existing?.userId ?? eff.userId,
@@ -300,7 +349,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
             })
             if (guardrailResponse.ok) {
               const verdict = await guardrailResponse.json()
-              if (verdict?.blocked) {
+              if (verdict?.allowed === false) {
                 return NextResponse.json(
                   { error: verdict.reason || 'Target blocked by the guardrail.' },
                   { status: 403 },
@@ -329,82 +378,63 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       )
     }
 
-    // Supply-chain input: supplyChainRepoUrl becomes a `git clone` argument in
-    // the scan container, so it is validated server-side. The Other Scans UI
-    // validates too, but a direct PUT bypasses it.
-    // A GitHub Enterprise host is allowed only when the operator registered it in
-    // their global settings, so the allowlist is read from there (never from the
-    // request). Only looked up when a supply-chain field is actually being written.
-    if ('supplyChainRepoUrl' in updateData || 'supplyChainInputMode' in updateData
-        || 'supplyChainRepoRef' in updateData || 'supplyChainOrgName' in updateData) {
-      const [{ validateSupplyChainInput }, { allowedGithubHosts }] = await Promise.all([
-        import('@/lib/validation/supplyChainInput'),
-        import('@/lib/github/ownerTarget'),
-      ])
-      const userSettings = await prisma.userSettings.findUnique({
-        where: { userId: eff.userId }, select: { githubEnterpriseHost: true },
-      }).catch(() => null)
-      const err = validateSupplyChainInput(
-        updateData, allowedGithubHosts(userSettings?.githubEnterpriseHost))
-      if (err) {
-        return NextResponse.json({ error: err }, { status: 400 })
-      }
+    // Supply-chain input becomes a `git clone` argument in the scan container and
+    // fireteam carries a rule over two fields, so both are validated server-side:
+    // a direct PUT bypasses the form's own checks. Shared with the MCP writers.
+    const crossFieldError = await validateCrossFieldRules(updateData, Object.keys(updateData), eff.userId)
+    if (crossFieldError) {
+      return NextResponse.json({ error: crossFieldError }, { status: 400 })
     }
 
-    // Fireteam settings: server-side Zod validation so a direct API call
-    // with out-of-range values (bypassing the UI form) still gets rejected.
-    // Only validate when at least one fireteam field is being touched.
-    const FIRETEAM_FIELDS = ['fireteamEnabled', 'fireteamMaxConcurrent',
-      'fireteamMaxMembers', 'fireteamMemberMaxIterations',
-      'fireteamTimeoutSec', 'fireteamAllowedPhases',
-      'fireteamPropensity'] as const
-    const touchesFireteam = FIRETEAM_FIELDS.some(k => k in updateData)
-    let fireteamOldValues: Record<string, unknown> | null = null
-    if (touchesFireteam) {
-      const { validateFireteamSettings } = await import('@/lib/validation/fireteamSettings')
-      const err = validateFireteamSettings(updateData)
-      if (err) {
-        return NextResponse.json({ error: err }, { status: 400 })
-      }
-      // Capture old values for audit log BEFORE the update.
-      const existing = await prisma.project.findUnique({
-        where: { id },
-        select: Object.fromEntries(FIRETEAM_FIELDS.map(k => [k, true])) as any,
-      })
-      fireteamOldValues = existing as Record<string, unknown> | null
-    }
-
-    const project = await prisma.project.update({
+    // The values being replaced, for the fireteam audit and the save's own.
+    const before = (await prisma.project.findUnique({
       where: { id },
-      data: updateData
-    })
+      select: Object.fromEntries(Object.keys(updateData).map(k => [k, true])) as any,
+    }) ?? {}) as Record<string, unknown>
 
-    // Audit trail for fireteam settings changes. Best-effort: audit failure
-    // must not roll back the update.
-    if (touchesFireteam && fireteamOldValues) {
-      try {
-        const auditRows = []
-        for (const field of FIRETEAM_FIELDS) {
-          if (!(field in updateData)) continue
-          const oldV = fireteamOldValues[field]
-          const newV = (updateData as Record<string, unknown>)[field]
-          if (JSON.stringify(oldV) === JSON.stringify(newV)) continue
-          auditRows.push({
-            projectId: id,
-            userId: (project as { userId?: string | null }).userId ?? null,
-            field,
-            oldValue: oldV === undefined ? null : (oldV as any),
-            newValue: newV === undefined ? null : (newV as any),
-            source: 'api',
-          })
-        }
-        if (auditRows.length > 0) {
-          await prisma.fireteamSettingsAudit.createMany({ data: auditRows })
-        }
-      } catch (e) {
-        console.warn('Fireteam settings audit write failed:', e)
+    updateData.updatedById = eff.userId
+    let project
+    if (expectedVersion) {
+      const { count } = await prisma.project.updateMany({
+        where: { id, updatedAt: expectedVersion },
+        data: updateData,
+      })
+      if (count === 0) {
+        return NextResponse.json({ error: STALE_SAVE_MESSAGE }, { status: 409 })
       }
+      project = await prisma.project.findUnique({ where: { id } })
+      if (!project) return NextResponse.json({ error: 'Project not found' }, { status: 404 })
+    } else {
+      project = await prisma.project.update({
+        where: { id },
+        data: updateData
+      })
     }
+
+    // The UI's own audit row. Without it a person reverting an MCP agent's
+    // change left no trace, while the agent's change did.
+    const changed = Object.keys(updateData).filter(k =>
+      k !== 'updatedById' && comparable(before[k]) !== comparable((project as Record<string, unknown>)[k]))
+    if (changed.length > 0) {
+      const valued = changed.filter(auditsValue)
+      void writeAudit({
+        actorId: eff.userId,
+        action: 'project.update',
+        targetType: 'project',
+        targetId: id,
+        before: Object.fromEntries(valued.map(k => [k, before[k] ?? null])),
+        after: {
+          changed,
+          values: Object.fromEntries(valued.map(k => [k, (project as Record<string, unknown>)[k] ?? null])),
+        },
+        source: 'ui',
+      })
+    }
+
+    await writeFireteamAudit(id, before, updateData, {
+      userId: (project as { userId?: string | null }).userId ?? null,
+      source: 'api',
+    })
 
     // Ensure Domain node(s) exist in Neo4j (create if missing, update if changed).
     // A batch project has an empty targetDomain and one root per group, so the
@@ -416,24 +446,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       : project.domainBatchMode
         ? batchRootsAdded
         : (project.targetDomain ? [project.targetDomain] : [])
-    if (seedDomains.length > 0) {
-      try {
-        const session = getGraphSession()
-        try {
-          for (const name of seedDomains) {
-            await session.run(
-              `MERGE (d:Domain {name: $name, user_id: $userId, project_id: $projectId})
-               ON CREATE SET d.source = 'project_creation', d.updated_at = datetime()`,
-              { name, userId: project.userId, projectId: project.id }
-            )
-          }
-        } finally {
-          await session.close()
-        }
-      } catch (e) {
-        console.warn('Failed to ensure Domain node in Neo4j on project update:', e)
-      }
-    }
+    await seedProjectDomains(seedDomains, project.userId, project.id)
 
     // Exclude binary document data from response (same as GET)
     const { roeDocumentData: _binary, ...projectWithoutBinary } = project

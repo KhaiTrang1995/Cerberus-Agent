@@ -36,7 +36,8 @@ export type Unit =
 export type Validator =
   | 'docker_image' | 'http_header' | 'project_file' | 'project_file_name'
   | 'status_codes' | 'severity' | 'scan_modules' | 'hostname' | 'url'
-  | 'port_spec' | 'free_text' | 'identifier' | 'json_object'
+  | 'port_spec' | 'free_text' | 'identifier' | 'json_object' | 'github_name'
+  | 'github_repo_list'
 export type DenyReason =
   | 'identity' | 'internal' | 'escalation' | 'secret' | 'upload-managed'
   | 'engagement-record' | 'not-tuning' | 'derived'
@@ -55,6 +56,11 @@ export interface RegistryField {
   traffic: Traffic
   roe_capped: boolean
   mcp: McpDisposition
+  /**
+   * A create_only target list that `update_project_scope` may change on an
+   * existing project, under the project:rescope permission. Absent means no.
+   */
+  rescope?: boolean
   meaning: string
   bounds?: { min: number; max: number }
   values?: string[]
@@ -208,9 +214,18 @@ export function settableFields(): NamedField[] {
   return fieldsWhere(f => f.mcp === 'settable')
 }
 
-/** Fields `create_project` may set and nothing may change afterwards. */
+/** Fields `create_project` may set and update_recon_settings may never change. */
 export function createOnlyFields(): NamedField[] {
   return fieldsWhere(f => f.mcp === 'create_only')
+}
+
+/**
+ * The create-only target lists `update_project_scope` may change: the ones the
+ * project form already lets a person edit after creation. Every other
+ * create-only field stays fixed whatever the token holds.
+ */
+export function rescopableFields(): NamedField[] {
+  return fieldsWhere(f => f.mcp === 'create_only' && f.rescope === true)
 }
 
 /**
@@ -314,6 +329,14 @@ const KIND_TOOLS: Record<string, readonly string[]> = {
 const PIPELINE_KINDS = new Set(['full_recon', 'partial_recon'])
 
 /**
+ * Tools filed under `standalone` because their form lives with the other
+ * scanners, that nevertheless RUN inside the full recon pipeline. Supply-chain
+ * recon runs after JS recon, gated by its own flag rather than by scanModules,
+ * so a change to it must re-confirm a queued full recon like any phase would.
+ */
+const IN_PIPELINE_TOOLS: ReadonlySet<string> = new Set(['supply_chain_recon'])
+
+/**
  * Fields whose change between enqueue and dispatch must re-confirm a queued job.
  *
  * Anything that steers WHERE or HOW HARD a job scans: every field of the job's
@@ -337,7 +360,8 @@ export function fingerprintFields(kind: string): string[] {
 
   if (PIPELINE_KINDS.has(kind)) {
     return fieldsWhere(
-      f => always(f) || (f.traffic !== 'none' && f.phase !== 'standalone') || f.tool === 'pipeline'
+      f => always(f) || f.tool === 'pipeline'
+        || (f.traffic !== 'none' && (f.phase !== 'standalone' || IN_PIPELINE_TOOLS.has(f.tool)))
     ).map(f => f.key)
   }
 

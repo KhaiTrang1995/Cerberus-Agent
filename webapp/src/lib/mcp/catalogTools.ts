@@ -1,5 +1,7 @@
 /**
- * The two tools that explain the recon pipeline rather than reading a project.
+ * The tool that explains the recon pipeline rather than reading a project.
+ * (Its sibling, list_recon_presets, reads the user's presets now and lives in
+ * presetTools.ts.)
  *
  * `update_recon_settings` was a 126-field API whose only reference manual was
  * `get_recon_settings`, which returns key names and current values: no meaning,
@@ -7,27 +9,24 @@
  * being refused, one field at a time, and because one bad key refuses the WHOLE
  * call, a batch of guesses applied nothing at all.
  *
- * Both tools follow the `graph_schema` shape: no projectId, no database, no
- * tenant data. They are derived from constants in this build, so they still
- * answer when Neo4j and Postgres are down.
+ * It follows the `graph_schema` shape: no projectId, no database, no tenant
+ * data. It is derived from constants in this build, so it still answers when
+ * Neo4j and Postgres are down.
  *
- * Both are now served from `recon_settings/registry.yaml`, which carries the
+ * It is served from `recon_settings/registry.yaml`, which carries the
  * unit, the phase, the traffic class, the engagement-cap flag, the bounds or
  * the validator, and a meaning for every one of the 712 Project columns. The
  * reference manual and the thing it describes are therefore the same file, so
  * an agent that trusts `describe_recon_settings` cannot be surprised by
  * `update_recon_settings`.
  */
-import { DENY_REASON_DOC, permittedKeys, settableFieldCount } from '@/lib/reconSettings/filter'
+import { settableFieldCount } from '@/lib/reconSettings/filter'
 import {
-  field,
-  fieldsWhere,
   loadRegistry,
   settableFields,
   type RegistryField,
 } from '@/lib/reconSettings/registry'
 import { SCAN_MODULE_VALUES, SEVERITY_VALUES } from '@/lib/reconSettings/validators'
-import { RECON_PRESETS, getPresetById, type ReconPreset } from '@/lib/recon-presets'
 import { requireScope } from '@/lib/mcpAuth'
 import { McpToolError } from '@/lib/mcp/errors'
 import { enforceRate, type McpContext } from '@/lib/mcp/tools'
@@ -190,133 +189,5 @@ export async function describeReconSettings(ctx: McpContext, args: { group?: str
       never: 'not a pipeline parameter; refused with its class',
     },
     notes: NOTES,
-  }
-}
-
-// --- the preset catalogue ---------------------------------------------------------
-
-export interface PresetApplicability {
-  /** Keys the preset sets that this surface could actually write. */
-  appliedCount: number
-  deniedCount: number
-  deniedByReason: Record<string, number>
-  /**
-   * True when the denied set includes a field that makes the scan QUIETER.
-   * Applying such a preset over MCP would be louder than the preset asked for,
-   * while reporting success.
-   */
-  stealthCritical: boolean
-  stealthCriticalFields: string[]
-}
-
-/**
- * How much of a preset this surface could actually apply.
- *
- * Far more than it used to. A preset sets fields across the whole project form,
- * and while 126 of 712 columns were settable, between a third and 60% of every
- * preset was refused; for the stealth presets the refused part WAS the stealth,
- * because the rate limits and the passive-mode switches were all in the denied
- * classes.
- *
- * What is still refused is the engagement scope and the engagement record, and
- * those are refused because a preset has no business setting them, not because
- * they are dangerous to tune. The engagement LIMITS are settable but a preset
- * never carries them either: they are a property of one engagement, not of a
- * reusable configuration, so `extractPresetSettings` drops them at capture.
- */
-const SETTABLE = new Set(permittedKeys('update'))
-
-export function presetApplicability(preset: ReconPreset): PresetApplicability {
-  const keys = Object.keys(preset.parameters ?? {})
-  let applied = 0
-  const deniedByReason: Record<string, number> = {}
-  const stealthCriticalFields: string[] = []
-
-  for (const key of keys) {
-    if (SETTABLE.has(key)) {
-      applied += 1
-      continue
-    }
-    const spec = field(key)
-    const reason = spec ? spec.mcp : 'not-a-column'
-    deniedByReason[reason] = (deniedByReason[reason] ?? 0) + 1
-    // A refusal only changes the ENGAGEMENT RISK when the refused field is one
-    // that would have made the scan quieter. With the scope and the RoE the
-    // only refusals left, a half-applied preset can no longer be louder than
-    // the preset asked for; it can only be pointed somewhere else, which
-    // create_project owns.
-    if (spec?.traffic === 'active' && spec.mcp !== 'settable') {
-      stealthCriticalFields.push(key)
-    }
-  }
-
-  return {
-    appliedCount: applied,
-    deniedCount: keys.length - applied,
-    deniedByReason,
-    stealthCritical: stealthCriticalFields.length > 0,
-    stealthCriticalFields: stealthCriticalFields.sort().slice(0, 20),
-  }
-}
-
-function presetRow(p: ReconPreset) {
-  return {
-    id: p.id,
-    name: p.name,
-    shortDescription: p.shortDescription,
-    targetProfile: p.targetProfile,
-    environment: p.environment,
-    applicability: presetApplicability(p),
-  }
-}
-
-/**
- * The 26 curated engagement presets, and how much of each this surface could
- * actually apply.
- *
- * `applicability` is the field that earns its place. A preset's `parameters` is
- * a partial over the WHOLE project form, so between a third and 60% of every
- * preset is denied by class here - and for the stealth presets the denied part
- * IS the stealth: the rate limits, the passive-mode switches, the brute-force
- * toggles. An intersection write would leave the caller louder than the preset
- * it asked for while reporting success, which is why this tool reads and does
- * not write.
- */
-export async function listReconPresets(ctx: McpContext, args: { presetId?: string } = {}) {
-  requireScope(ctx.token, 'recon:read')
-  enforceRate(ctx, 'read')
-
-  const id = args.presetId?.trim()
-  if (id) {
-    const preset = getPresetById(id)
-    if (!preset) {
-      throw new McpToolError(
-        `No preset with id '${id}'. Call this tool with no arguments to list them.`,
-        'not_found'
-      )
-    }
-    // The full description only for a named preset: they run to forty-plus
-    // lines each, and twenty-six of them at once would dominate the caller's
-    // context for no gain.
-    return { preset: { ...presetRow(preset), fullDescription: preset.fullDescription } }
-  }
-
-  return {
-    presets: RECON_PRESETS.map(presetRow),
-    deniedReasons: DENY_REASON_DOC,
-    notes: [
-      'These are read-only here: this tool describes presets, it does not apply them. Write ' +
-        'the fields you want with update_recon_settings, which validates each one.',
-      'appliedCount is how much of a preset this surface could write. It is most of every ' +
-        'preset now that the tuning surface is the whole pipeline; what stays refused is the ' +
-        'engagement scope (create_project) and the engagement record, which a preset has no ' +
-        'business setting. No preset carries an engagement LIMIT either, by construction.',
-      'stealthCritical means the refused part of a preset includes something that sends ' +
-        'traffic, so writing the rest would not reproduce the preset\'s posture. It is false ' +
-        'for every shipped preset today; treat a true as a reason to hand the preset to an ' +
-        'operator rather than half-applying it.',
-      'A preset is a starting point, not a scope decision. Read describe_recon_settings for ' +
-        'what each field it names actually does before writing it.',
-    ],
   }
 }

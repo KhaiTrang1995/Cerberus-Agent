@@ -14,6 +14,7 @@ import { useCredentialKeys } from '@/hooks/useCredentialKeys'
 import { isValidGitRef, parseGithubRepo } from '@/lib/validation/supplyChainInput'
 import { GITHUB_DOT_COM, hostHint, parseOwnerTarget } from '@/lib/github/ownerTarget'
 import { RegistryFields } from '../RegistryFields'
+import { announceProjectWrite } from '@/lib/projectVersion'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -139,6 +140,7 @@ export function SupplyChainScanSection({
       // into the form is not cosmetic: saving the form afterwards would write
       // back the stale name it was loaded with and un-point the scan.
       setField(updateField, 'supplyChainSbomFile', body.filename ?? '')
+      announceProjectWrite(projectId, body.projectUpdatedAt)
       await loadFiles()
     } catch {
       setError('Upload failed')
@@ -151,9 +153,10 @@ export function SupplyChainScanSection({
     if (!file || !projectId) return
     setBusy(true)
     try {
-      await fetch(
+      const res = await fetch(
         `/api/supply-chain/${projectId}/upload?filename=${encodeURIComponent(file.name)}`,
         { method: 'DELETE' })
+      if (res.ok) announceProjectWrite(projectId, (await res.json().catch(() => ({}))).projectUpdatedAt)
       setField(updateField, 'supplyChainSbomFile', '')
       await loadFiles()
     } catch {

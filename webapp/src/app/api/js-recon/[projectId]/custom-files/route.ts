@@ -155,17 +155,23 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     // Update the Prisma field with the file path (skip if project doesn't exist yet)
     const prismaField = FILE_TYPE_MAP[fileType]
+    // Its new updatedAt goes back to the settings form, whose save is a
+    // compare-and-swap on it.
+    let projectUpdatedAt: Date | null = null
     try {
-      await prisma.project.update({
+      const updated = await prisma.project.update({
         where: { id: projectId },
-        data: { [prismaField]: filePath }
+        data: { [prismaField]: filePath },
+        select: { updatedAt: true },
       })
+      projectUpdatedAt = updated.updatedAt
     } catch {
       // Project may not exist yet (pre-generated ID during creation) -- file is on disk
     }
 
     return NextResponse.json({
       uploaded: { name: filename, size: file.size, type: fileType, path: filePath },
+      projectUpdatedAt,
     })
   } catch (error) {
     console.error('Error uploading JS Recon custom file:', error)
@@ -209,12 +215,13 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
 
     // Clear the Prisma field
     const prismaField = FILE_TYPE_MAP[fileType]
-    await prisma.project.update({
+    const updated = await prisma.project.update({
       where: { id: projectId },
-      data: { [prismaField]: '' }
+      data: { [prismaField]: '' },
+      select: { updatedAt: true },
     })
 
-    return NextResponse.json({ deleted: fileType })
+    return NextResponse.json({ deleted: fileType, projectUpdatedAt: updated.updatedAt })
   } catch (error) {
     console.error('Error deleting JS Recon custom file:', error)
     return NextResponse.json({ error: 'Failed to delete file' }, { status: 500 })

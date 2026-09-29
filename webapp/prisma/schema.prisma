@@ -2289,6 +2289,12 @@ model UserProjectPreset {
   settings    Json
   createdAt   DateTime @default(now()) @map("created_at")
   updatedAt   DateTime @updatedAt @map("updated_at")
+  // Which door wrote the preset: "ui", "mcp" or "import". An agent-written
+  // preset is applied by a person later, so the drawer badges it.
+  createdVia            String  @default("ui") @map("created_via")
+  updatedVia            String  @default("ui") @map("updated_via")
+  // The display prefix of the MCP token that last wrote it. Not a credential.
+  lastWriterTokenPrefix String? @map("last_writer_token_prefix")
 
   @@index([userId])
   @@map("user_project_presets")

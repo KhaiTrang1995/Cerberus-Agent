@@ -53,6 +53,7 @@
         "traffic": { "$ref": "#/definitions/traffic" },
         "roe_capped": { "type": "boolean" },
         "mcp": { "enum": ["settable", "create_only", "never"] },
+        "rescope": { "type": "boolean" },
         "meaning": { "type": "string", "minLength": 1 },
         "bounds": {
           "type": "object",
@@ -156,7 +157,9 @@
         "port_spec",
         "free_text",
         "identifier",
-        "json_object"
+        "json_object",
+        "github_name",
+        "github_repo_list"
       ]
     },
     "read_deny_reason": {

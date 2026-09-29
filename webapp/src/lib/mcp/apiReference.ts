@@ -156,6 +156,13 @@ const EXAMPLE_EXTRA_ARGS: Record<string, Record<string, unknown>> = {
     documentKind: 'hackerone_program',
     issuedAt: '2026-01-01T00:00:00.000Z',
   },
+  // Exactly one of three optional sources is required, a rule the schema cannot
+  // express. Copying a built-in also proves a built-in passes validation.
+  create_recon_preset: { fromPresetId: 'stealth-recon' },
+  // A call that changes nothing is refused before it reaches the backend.
+  update_recon_preset: { settings: { katanaDepth: 3 } },
+  // `changes` is required but an empty object changes nothing.
+  update_project_scope: { changes: { gvmScanTargets: 'ips_only' } },
 }
 
 /** The example `arguments` for a tool. apiReference.test.ts calls every one of these. */

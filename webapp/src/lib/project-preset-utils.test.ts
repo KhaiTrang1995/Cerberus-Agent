@@ -30,6 +30,7 @@ import {
   presetFingerprint,
   readLoadedPreset,
 } from './project-preset-utils'
+import { getPresetById } from './recon-presets'
 
 /** The half that is listed by name, because it has no registry classification. */
 const UNCLASSIFIED = ['name', 'description', 'vhostSniCustomWordlist', 'supplyChainInputMode']
@@ -44,7 +45,7 @@ const ABSENT_FROM_BACKEND_DEFAULTS = [
   'rceAggressivePayloads', 'pathTraversalRequestTimeout', 'trufflehogEnabled',
   'trufflehogConcurrency', 'cypherfixDefaultBranch', 'cypherfixRequireApproval',
   'supplyChainEcosystems', 'supplyChainOrgMaxRepos', 'triageReviewBudget',
-  'agentGuardrailEnabled', 'agentLatsPhaseExploitation', 'mcpKaliExecEnabled',
+  'agentGuardrailEnabled', 'agentLatsPhaseExploitation',
 ]
 
 // ============================================================
@@ -72,9 +73,17 @@ describe('PRESET_EXCLUDED_FIELDS', () => {
       ...fieldsWhere(f => f.tool === 'engagement').map(f => f.key),
       ...fieldsWhere(f => f.deny_reason === 'upload-managed').map(f => f.key),
       ...fieldsWhere(f => f.read_deny_reason === 'credential').map(f => f.key),
+      ...fieldsWhere(f => f.deny_reason === 'escalation' || f.deny_reason === 'not-tuning').map(f => f.key),
       ...bookkeeping.map(f => f.key),
     ])
     expect([...PRESET_EXCLUDED_FIELDS].sort()).toEqual([...expected].sort())
+  })
+
+  test('C-1: the escalation and not-tuning switches never travel', () => {
+    // Neither is named by any built-in, so a preset that carried them reset them
+    // to their default on every apply - and mcpKaliExecEnabled defaults to ON.
+    expect(PRESET_EXCLUDED_FIELDS.has('mcpKaliExecEnabled')).toBe(true)
+    expect(PRESET_EXCLUDED_FIELDS.has('updateGraphDb')).toBe(true)
   })
 
   test('the scope never travels: target, batch, ownership proof, guardrail', () => {
@@ -140,9 +149,19 @@ describe('PRESET_EXCLUDED_FIELDS', () => {
   test('does NOT exclude recon, agent or reconPresetId settings', () => {
     for (const key of ['naabuEnabled', 'nucleiEnabled', 'katanaDepth', 'scanModules',
       'agentOpenaiModel', 'aiPipelineModel', 'agentMaxIterations', 'agentToolPhaseMap',
-      'reconPresetId', 'mcpKaliExecEnabled', 'updateGraphDb']) {
+      'reconPresetId']) {
       expect(PRESET_EXCLUDED_FIELDS.has(key), key).toBe(false)
     }
+  })
+})
+
+describe('the preset field set is exactly what a recon:settings token may write', () => {
+  test('every preset field is MCP-settable, except the reconPresetId badge', () => {
+    // A preset is applied by REPLACING every field it covers. A column outside
+    // the settable class joining it would let a preset carry, and reset, a
+    // value no tuning write can touch - which is how C-1 happened.
+    const offenders = PRESET_FIELD_KEYS.filter(k => k !== 'reconPresetId' && field(k)?.mcp !== 'settable')
+    expect(offenders).toEqual([])
   })
 })
 
@@ -267,13 +286,13 @@ describe('extractPresetSettings', () => {
   test('preserves false, zero and empty string (not replaced by defaults)', () => {
     const result = extractPresetSettings({
       naabuEnabled: false,
-      updateGraphDb: false,
+      katanaEnabled: false,
       ffufRate: 0,
       nucleiRetries: 0,
       agentInformationalSystemPrompt: '',
     })
     expect(result.naabuEnabled).toBe(false)
-    expect(result.updateGraphDb).toBe(false)
+    expect(result.katanaEnabled).toBe(false)
     expect(result.ffufRate).toBe(0)
     expect(result.nucleiRetries).toBe(0)
     expect(result.agentInformationalSystemPrompt).toBe('')
@@ -385,6 +404,17 @@ describe('applyPresetSettings', () => {
     expect(applyPresetSettings(withBadge, { reconPresetId: 'full-active-scan' }, {}).reconPresetId)
       .toBe('full-active-scan')
     expect(applyPresetSettings(withBadge, {}, {}).reconPresetId).toBeNull()
+  })
+
+  test('C-1: applying a built-in never re-enables the MCP sandbox or graph writes', () => {
+    // No built-in names either switch, and an unnamed preset field is reset to
+    // its default - which is ON for both - so this used to flip them back.
+    const stealth = getPresetById('stealth-recon')!
+    const row = { ...current, mcpKaliExecEnabled: false, updateGraphDb: false }
+    const next = applyPresetSettings(row, { ...stealth.parameters, reconPresetId: stealth.id },
+      { mcpKaliExecEnabled: true, updateGraphDb: true })
+    expect(next.mcpKaliExecEnabled).toBe(false)
+    expect(next.updateGraphDb).toBe(false)
   })
 
   test('does not mutate its inputs', () => {
