@@ -80,4 +80,15 @@ export interface AIAssistantDrawerProps {
   requireToolConfirmation?: boolean
   graphViewCypher?: string
   onOpenFileSystem?: () => void
+  // A node-scoped first message to send once a fresh session connects. The
+  // `token` changes per request so re-selecting the same node re-fires.
+  pendingNodeQuery?: PendingNodeQuery | null
+  onPendingNodeQueryConsumed?: () => void
+}
+
+export interface PendingNodeQuery {
+  token: number
+  nodeLabel: string
+  context: string
+  request: string
 }

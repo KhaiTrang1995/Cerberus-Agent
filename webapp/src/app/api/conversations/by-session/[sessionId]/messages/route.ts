@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { isInternalRequest } from '@/lib/session'
 import { requireEffectiveUser, requireConversationAccessBySession } from '@/lib/access'
+import { conversationTitleFromUserMessage } from '@/lib/agentQueryEnvelope'
 
 // POST /api/conversations/by-session/[sessionId]/messages
 // Append messages by session ID (used by the agent backend with X-Internal-Key -
@@ -79,7 +80,10 @@ export async function POST(
     if (!conversation.title && items.some(i => i.type === 'user_message')) {
       const firstUserMsg = items.find(i => i.type === 'user_message')
       if (firstUserMsg && typeof (firstUserMsg.data as any)?.content === 'string') {
-        const title = (firstUserMsg.data as any).content.substring(0, 100)
+        // A node-scoped first message embeds the whole node context; derive a
+        // readable "<node>: <request>" title rather than titling the chat with
+        // the context blob.
+        const title = conversationTitleFromUserMessage((firstUserMsg.data as any).content)
         await prisma.conversation.update({
           where: { id: conversation.id },
           data: { title },

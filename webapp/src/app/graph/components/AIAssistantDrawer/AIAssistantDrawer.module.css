@@ -1325,6 +1325,50 @@
   margin-bottom: 4px;
 }
 
+.nodeContextBadge {
+  display: inline-flex;
+  align-items: center;
+  /* Only user messages carry it; sit flush right over the right-aligned bubble. */
+  align-self: flex-end;
+  padding: 1px 6px;
+  background: var(--accent-primary-subtle);
+  border: 1px solid var(--accent-primary);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-size: 10px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nodeContextDetails {
+  margin-top: 6px;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}
+
+.nodeContextDetails > summary {
+  cursor: pointer;
+  color: var(--text-tertiary);
+  user-select: none;
+}
+
+.nodeContextPre {
+  margin: 6px 0 0;
+  padding: var(--space-2);
+  background: var(--bg-hover);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-xs);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 320px;
+  overflow: auto;
+}
+
 /* =============================================================================
    REPORT HEADER & PDF DOWNLOAD
    ============================================================================= */
