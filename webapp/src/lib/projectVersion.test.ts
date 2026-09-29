@@ -97,6 +97,15 @@ describe('ProjectForm adopts the updatedAt of every write it causes', () => {
     expect(page).toContain('return saveProject(data)')
     expect(page).toMatch(/const updated = await saveProject\(data\)[\s\S]*return updated/)
   })
+
+  test('a refused save reaches the form, which keeps the edit unsaved', () => {
+    // The page used to catch every error, alert it and resolve, so the form ran
+    // setBaseline after a 409 that saved nothing and read "No unsaved changes".
+    const page = read('../app/projects/[id]/settings/page.tsx')
+    const handler = page.slice(page.indexOf('const handleSubmit = async'), page.indexOf('const handleSaveAndStay'))
+    expect(handler).not.toMatch(/catch\s*\(/)
+    expect(submit).toMatch(/adoptSavedVersion\(await onSubmit\(submitData\)\)\s*\n[\s\S]*setBaseline\(formData\)[\s\S]*catch \(error\)[\s\S]*alertError\(message\)/)
+  })
 })
 
 describe('every upload that writes the row announces it', () => {
