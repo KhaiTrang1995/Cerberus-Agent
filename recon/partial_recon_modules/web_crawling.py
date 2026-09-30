@@ -911,6 +911,7 @@ def run_ffuf(config: dict) -> None:
         run_ffuf_discovery,
         pull_ffuf_binary_check,
         merge_ffuf_into_by_base_url,
+        select_base_paths,
     )
 
     roots = scope_roots(config)
@@ -1034,6 +1035,7 @@ def run_ffuf(config: dict) -> None:
     FFUF_FOLLOW_REDIRECTS = settings.get('FFUF_FOLLOW_REDIRECTS', False)
     FFUF_CUSTOM_HEADERS = merge_auth_headers(settings.get('FFUF_CUSTOM_HEADERS', []), settings, sorted(target_domains))
     FFUF_SMART_FUZZ = settings.get('FFUF_SMART_FUZZ', True)
+    FFUF_SMART_FUZZ_MAX_BASE_PATHS = settings.get('FFUF_SMART_FUZZ_MAX_BASE_PATHS', 20)
     FFUF_PARALLELISM = settings.get('FFUF_PARALLELISM', 20)
     FFUF_AI_EXTENSIONS = settings.get('FFUF_AI_EXTENSIONS', False)
     AI_PIPELINE_MODEL = settings.get('AI_PIPELINE_MODEL', 'claude-opus-4-6')
@@ -1076,7 +1078,7 @@ def run_ffuf(config: dict) -> None:
                                 if len(parts) >= 1 and parts[0]:
                                     base_paths.add(parts[0])
                             if base_paths:
-                                discovered_base_paths = sorted(base_paths)[:20]
+                                discovered_base_paths = select_base_paths(base_paths, FFUF_SMART_FUZZ_MAX_BASE_PATHS)
                                 print(f"[*][Partial Recon] Smart fuzz: targeting {len(discovered_base_paths)} discovered base paths")
         except Exception as e:
             print(f"[!][Partial Recon] Smart fuzz query failed: {e}")

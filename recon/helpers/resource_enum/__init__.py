@@ -87,6 +87,7 @@ from .ffuf_helpers import (
     run_ffuf_discovery,
     pull_ffuf_binary_check,
     merge_ffuf_into_by_base_url,
+    select_base_paths,
 )
 
 # Arjun helpers
@@ -158,6 +159,7 @@ __all__ = [
     "run_ffuf_discovery",
     "pull_ffuf_binary_check",
     "merge_ffuf_into_by_base_url",
+    "select_base_paths",
     # Arjun
     "arjun_binary_check",
     "run_arjun_discovery",

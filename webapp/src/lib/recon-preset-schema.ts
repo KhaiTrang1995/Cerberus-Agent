@@ -320,6 +320,7 @@ export const reconPresetSchema = z.object({
   ffufAutoCalibrate: bool,
   ffufFollowRedirects: bool,
   ffufSmartFuzz: bool,
+  ffufSmartFuzzMaxBasePaths: int,
   ffufParallelism: int,
   ffufAiExtensions: bool,
 
@@ -865,6 +866,7 @@ export const RECON_PARAMETER_CATALOG = `
 - ffufAutoCalibrate: boolean
 - ffufFollowRedirects: boolean
 - ffufSmartFuzz: boolean
+- ffufSmartFuzzMaxBasePaths: integer - Max crawler-discovered base paths smart fuzz runs the whole wordlist under, per target (1-50). Each one multiplies the request count
 - ffufParallelism: integer - Targets fuzzed in parallel
 - ffufAiExtensions: boolean - When true, FFuf file extensions are picked per-target by AI from response headers (requires aiInPipeline=true). The static ffufExtensions list is ignored.
 

@@ -77,6 +77,83 @@ def test_ffuf_build_fuzz_targets_trailing_slash():
     print("PASS: test_ffuf_build_fuzz_targets_trailing_slash")
 
 
+# ===========================================================================
+# Smart-fuzz base path selection
+# ===========================================================================
+
+# Synthetic prefixes spanning the alphabet, so a first-N-by-letter cut is visible.
+_SYNTHETIC_BASE_PATHS = [f"{c}dir" for c in "abcdefghijklmnopqrstuvwxyz"] + [
+    "api/v1", "api/v2", "zeta/internal", "zeta/private",
+]
+
+
+def test_select_base_paths_caps_to_a_subset_of_the_input():
+    import random
+    from recon.helpers.resource_enum.ffuf_helpers import select_base_paths
+
+    picked = select_base_paths(set(_SYNTHETIC_BASE_PATHS), 5, rng=random.Random(0))
+
+    assert len(picked) == 5
+    assert len(set(picked)) == 5
+    assert set(picked) <= set(_SYNTHETIC_BASE_PATHS)
+
+
+def test_select_base_paths_is_stable_for_a_fixed_seed():
+    import random
+    from recon.helpers.resource_enum.ffuf_helpers import select_base_paths
+
+    first = select_base_paths(_SYNTHETIC_BASE_PATHS, 7, rng=random.Random(0))
+    second = select_base_paths(_SYNTHETIC_BASE_PATHS, 7, rng=random.Random(0))
+
+    assert first == second
+
+
+def test_select_base_paths_seeded_pick_ignores_input_order():
+    """A set of strings iterates in a per-process hash order, so the same seed
+    must pick the same paths however the input happens to be ordered."""
+    import random
+    from recon.helpers.resource_enum.ffuf_helpers import select_base_paths
+
+    forward = select_base_paths(_SYNTHETIC_BASE_PATHS, 7, rng=random.Random(42))
+    backward = select_base_paths(list(reversed(_SYNTHETIC_BASE_PATHS)), 7, rng=random.Random(42))
+
+    assert forward == backward
+
+
+def test_select_base_paths_is_not_the_alphabetical_cut():
+    """Across seeds every path gets picked at least once: late-letter dirs are
+    no longer structurally excluded the way `sorted()[:cap]` excluded them."""
+    import random
+    from recon.helpers.resource_enum.ffuf_helpers import select_base_paths
+
+    cap = 10
+    ever_picked = set()
+    for seed in range(50):
+        ever_picked.update(select_base_paths(_SYNTHETIC_BASE_PATHS, cap, rng=random.Random(seed)))
+
+    assert ever_picked == set(_SYNTHETIC_BASE_PATHS)
+    assert "zeta/private" not in sorted(_SYNTHETIC_BASE_PATHS)[:cap]
+
+
+def test_select_base_paths_returns_everything_at_or_under_the_cap():
+    from recon.helpers.resource_enum.ffuf_helpers import select_base_paths
+
+    few = {"api/v1", "admin", "static"}
+
+    assert sorted(select_base_paths(few, 3)) == sorted(few)
+    assert sorted(select_base_paths(few, 20)) == sorted(few)
+    assert select_base_paths(set(), 20) == []
+
+
+def test_select_base_paths_unseeded_still_respects_the_cap():
+    from recon.helpers.resource_enum.ffuf_helpers import select_base_paths
+
+    picked = select_base_paths(_SYNTHETIC_BASE_PATHS, 20)
+
+    assert len(picked) == 20
+    assert set(picked) <= set(_SYNTHETIC_BASE_PATHS)
+
+
 def test_ffuf_deduplicate_results():
     """Deduplicate results by URL."""
     from recon.helpers.resource_enum.ffuf_helpers import _deduplicate_results
@@ -375,7 +452,8 @@ def test_ffuf_default_settings_exist():
         'FFUF_TIMEOUT', 'FFUF_MAX_TIME', 'FFUF_MATCH_CODES', 'FFUF_FILTER_CODES',
         'FFUF_FILTER_SIZE', 'FFUF_EXTENSIONS', 'FFUF_RECURSION',
         'FFUF_RECURSION_DEPTH', 'FFUF_AUTO_CALIBRATE', 'FFUF_FOLLOW_REDIRECTS',
-        'FFUF_CUSTOM_HEADERS', 'FFUF_SMART_FUZZ', 'FFUF_AI_EXTENSIONS',
+        'FFUF_CUSTOM_HEADERS', 'FFUF_SMART_FUZZ', 'FFUF_SMART_FUZZ_MAX_BASE_PATHS',
+        'FFUF_AI_EXTENSIONS',
     ]
     for key in expected_keys:
         assert key in DEFAULT_SETTINGS, f"Missing key: {key}"
@@ -384,6 +462,7 @@ def test_ffuf_default_settings_exist():
     assert DEFAULT_SETTINGS['FFUF_THREADS'] == 40
     assert DEFAULT_SETTINGS['FFUF_AUTO_CALIBRATE'] is True
     assert DEFAULT_SETTINGS['FFUF_SMART_FUZZ'] is True
+    assert DEFAULT_SETTINGS['FFUF_SMART_FUZZ_MAX_BASE_PATHS'] == 20
     assert DEFAULT_SETTINGS['FFUF_AI_EXTENSIONS'] is False
     assert isinstance(DEFAULT_SETTINGS['FFUF_MATCH_CODES'], list)
     assert 200 in DEFAULT_SETTINGS['FFUF_MATCH_CODES']
@@ -486,6 +565,7 @@ def test_settings_camelcase_mapping():
         "ffufFollowRedirects": True,
         "ffufCustomHeaders": ["X-Custom: test"],
         "ffufSmartFuzz": False,
+        "ffufSmartFuzzMaxBasePaths": 7,
         "ffufAiExtensions": True,
         "aiInPipeline": True,
         "aiPipelineModel": "claude-haiku-4-5-20251001",
@@ -515,6 +595,7 @@ def test_settings_camelcase_mapping():
     assert settings['FFUF_FOLLOW_REDIRECTS'] is True
     assert settings['FFUF_CUSTOM_HEADERS'] == ["X-Custom: test"]
     assert settings['FFUF_SMART_FUZZ'] is False
+    assert settings['FFUF_SMART_FUZZ_MAX_BASE_PATHS'] == 7
     assert settings['FFUF_AI_EXTENSIONS'] is True
     assert settings['AI_IN_PIPELINE'] is True
     assert settings['AI_PIPELINE_MODEL'] == 'claude-haiku-4-5-20251001'

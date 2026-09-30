@@ -937,6 +937,7 @@ model Project {
   ffufFollowRedirects         Boolean  @default(false) @map("ffuf_follow_redirects")
   ffufCustomHeaders           String[] @default([]) @map("ffuf_custom_headers")
   ffufSmartFuzz               Boolean  @default(true) @map("ffuf_smart_fuzz")
+  ffufSmartFuzzMaxBasePaths   Int      @default(20) @map("ffuf_smart_fuzz_max_base_paths")
   ffufParallelism             Int      @default(20) @map("ffuf_parallelism")
   ffufAiExtensions            Boolean  @default(false) @map("ffuf_ai_extensions")
 

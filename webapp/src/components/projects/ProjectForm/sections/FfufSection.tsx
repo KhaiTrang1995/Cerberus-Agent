@@ -466,6 +466,22 @@ export function FfufSection({ data, updateField, projectId, mode, onRun }: FfufS
                     onChange={(checked) => updateField('ffufSmartFuzz', checked)}
                   />
                 </div>
+                {data.ffufSmartFuzz && (
+                  <div className={styles.fieldGroup} style={{ marginTop: '0.5rem' }}>
+                    <label className={styles.fieldLabel}>Smart-fuzz: max base paths</label>
+                    <input
+                      type="number"
+                      className="textInput"
+                      value={data.ffufSmartFuzzMaxBasePaths ?? 20}
+                      onChange={(e) => updateField('ffufSmartFuzzMaxBasePaths', parseInt(e.target.value) || 20)}
+                      min={1}
+                      max={50}
+                    />
+                    <span className={styles.fieldHint}>
+                      The full wordlist runs under each one, per target. A random sample is taken when crawlers find more
+                    </span>
+                  </div>
+                )}
                 <div className={styles.toggleRow}>
                   <div>
                     <span className={styles.toggleLabel}>Follow Redirects</span>

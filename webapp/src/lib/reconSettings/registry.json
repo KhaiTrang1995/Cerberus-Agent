@@ -2764,6 +2764,26 @@
    "type": "boolean",
    "unit": "none"
   },
+  "ffufSmartFuzzMaxBasePaths": {
+   "bounds": {
+    "min": 1,
+    "max": 50
+   },
+   "default": 20,
+   "form_section": "FfufSection",
+   "has_default": true,
+   "mcp": "settable",
+   "meaning": "The most crawler-discovered directory prefixes smart fuzz runs the whole wordlist under, on every target. Each one adds a full wordlist pass per target, so this multiplies the request count. When crawlers find more, a random sample of this size is fuzzed.",
+   "optional": false,
+   "phase": "resource_enum",
+   "prisma_type": "Int",
+   "roe_capped": false,
+   "runtime_key": "FFUF_SMART_FUZZ_MAX_BASE_PATHS",
+   "tool": "ffuf",
+   "traffic": "active",
+   "type": "int",
+   "unit": "count"
+  },
   "ffufThreads": {
    "bounds": {
     "min": 1,

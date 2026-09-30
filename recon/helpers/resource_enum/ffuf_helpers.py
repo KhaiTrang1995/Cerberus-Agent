@@ -11,12 +11,13 @@ Compiled from source via multi-stage Docker build (pure Go, no CGO).
 
 import json
 import os
+import random
 import shutil
 import subprocess
 
 from recon.helpers.subprocess_helpers import run_with_heartbeat
 import tempfile
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
@@ -293,6 +294,29 @@ def _build_fuzz_targets(
                     seen_targets.add(target)
 
     return fuzz_targets
+
+
+def select_base_paths(
+    base_paths: Iterable[str],
+    cap: int,
+    *,
+    rng: Optional[random.Random] = None,
+) -> List[str]:
+    """Pick up to `cap` base paths to smart-fuzz under.
+
+    Placeholder RANDOM selection: an unbiased sample, chosen over the old
+    alphabetical cut which systematically favored early-letter dirs. A later
+    task replaces this body with a JEV value-ranking; keep this the single seam.
+
+    The input is sorted first only to give it a canonical order: `base_paths`
+    is usually a set of strings, whose iteration order changes with every
+    process's hash seed, so without it a seeded `rng` would still pick a
+    different sample on every run.
+    """
+    items = sorted(base_paths)
+    if len(items) <= cap:
+        return items
+    return (rng or random).sample(items, cap)
 
 
 def _deduplicate_results(results: List[Dict]) -> List[Dict]:

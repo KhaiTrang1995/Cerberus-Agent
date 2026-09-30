@@ -551,6 +551,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'FFUF_FOLLOW_REDIRECTS': False,
     'FFUF_CUSTOM_HEADERS': [],
     'FFUF_SMART_FUZZ': True,
+    'FFUF_SMART_FUZZ_MAX_BASE_PATHS': 20,
     'FFUF_PARALLELISM': 20,
     'FFUF_AI_EXTENSIONS': False,
 
@@ -1593,6 +1594,7 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['FFUF_FOLLOW_REDIRECTS'] = project.get('ffufFollowRedirects', DEFAULT_SETTINGS['FFUF_FOLLOW_REDIRECTS'])
     settings['FFUF_CUSTOM_HEADERS'] = project.get('ffufCustomHeaders', DEFAULT_SETTINGS['FFUF_CUSTOM_HEADERS'])
     settings['FFUF_SMART_FUZZ'] = project.get('ffufSmartFuzz', DEFAULT_SETTINGS['FFUF_SMART_FUZZ'])
+    settings['FFUF_SMART_FUZZ_MAX_BASE_PATHS'] = project.get('ffufSmartFuzzMaxBasePaths', DEFAULT_SETTINGS['FFUF_SMART_FUZZ_MAX_BASE_PATHS'])
     settings['FFUF_PARALLELISM'] = project.get('ffufParallelism', DEFAULT_SETTINGS['FFUF_PARALLELISM'])
     settings['FFUF_AI_EXTENSIONS'] = project.get('ffufAiExtensions', DEFAULT_SETTINGS['FFUF_AI_EXTENSIONS'])
 

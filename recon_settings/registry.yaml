@@ -2478,6 +2478,20 @@ fields:
     meaning: >-
       Picks extensions and wordlist entries from what the target has already
       revealed rather than fuzzing blind.
+  ffufSmartFuzzMaxBasePaths:
+    tool: ffuf
+    runtime_key: "FFUF_SMART_FUZZ_MAX_BASE_PATHS"
+    unit: count
+    phase: resource_enum
+    traffic: active
+    roe_capped: false
+    mcp: settable
+    bounds: { min: 1, max: 50 }
+    meaning: >-
+      The most crawler-discovered directory prefixes smart fuzz runs the whole
+      wordlist under, on every target. Each one adds a full wordlist pass per
+      target, so this multiplies the request count. When crawlers find more,
+      a random sample of this size is fuzzed.
   ffufThreads:
     tool: ffuf
     runtime_key: "FFUF_THREADS"

@@ -78,6 +78,7 @@ from recon.helpers.resource_enum import (
     run_ffuf_discovery,
     pull_ffuf_binary_check,
     merge_ffuf_into_by_base_url,
+    select_base_paths,
     # ZAP Ajax Spider helpers
     pull_zap_ajax_docker_image,
     run_zap_ajax_spider,
@@ -345,6 +346,7 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
             ("FFUF_AUTO_CALIBRATE", "FFuf"),
             ("FFUF_FOLLOW_REDIRECTS", "FFuf"),
             ("FFUF_SMART_FUZZ", "FFuf"),
+            ("FFUF_SMART_FUZZ_MAX_BASE_PATHS", "FFuf"),
             ("FFUF_WORDLIST", "FFuf"),
             ("FFUF_CUSTOM_HEADERS", "FFuf"),
             ("ZAP_AJAX_SPIDER_ENABLED", "ZAP Ajax Spider"),
@@ -460,6 +462,7 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
     FFUF_FOLLOW_REDIRECTS = settings.get('FFUF_FOLLOW_REDIRECTS', False)
     FFUF_CUSTOM_HEADERS = settings.get('FFUF_CUSTOM_HEADERS', [])
     FFUF_SMART_FUZZ = settings.get('FFUF_SMART_FUZZ', True)
+    FFUF_SMART_FUZZ_MAX_BASE_PATHS = settings.get('FFUF_SMART_FUZZ_MAX_BASE_PATHS', 20)
     FFUF_PARALLELISM = settings.get('FFUF_PARALLELISM', 20)
     FFUF_AI_EXTENSIONS = settings.get('FFUF_AI_EXTENSIONS', False)
     AI_PIPELINE_MODEL = settings.get('AI_PIPELINE_MODEL', 'claude-opus-4-6')
@@ -710,6 +713,8 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
         print(f"[*][FFuf] Timeout: {FFUF_TIMEOUT}s per request, {FFUF_MAX_TIME}s max")
         print(f"[*][FFuf] Auto-calibrate: {FFUF_AUTO_CALIBRATE}")
         print(f"[*][FFuf] Smart fuzz: {FFUF_SMART_FUZZ}")
+        if FFUF_SMART_FUZZ:
+            print(f"[*][FFuf] Smart fuzz max base paths: {FFUF_SMART_FUZZ_MAX_BASE_PATHS}")
         print(f"[*][FFuf] Parallelism: {FFUF_PARALLELISM} concurrent targets")
         if FFUF_EXTENSIONS:
             print(f"[*][FFuf] Extensions: {', '.join(FFUF_EXTENSIONS)}")
@@ -1111,7 +1116,7 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
                         if len(parts) >= 1 and parts[0]:
                             base_paths.add(parts[0])
                 if base_paths:
-                    discovered_base_paths = sorted(base_paths)[:20]
+                    discovered_base_paths = select_base_paths(base_paths, FFUF_SMART_FUZZ_MAX_BASE_PATHS)
                     print(f"[*][FFuf] Smart fuzz: targeting {len(discovered_base_paths)} discovered base paths")
 
             effective_extensions = FFUF_EXTENSIONS

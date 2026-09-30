@@ -102,6 +102,7 @@
  "FFUF_RECURSION": false,
  "FFUF_RECURSION_DEPTH": 5,
  "FFUF_SMART_FUZZ": true,
+ "FFUF_SMART_FUZZ_MAX_BASE_PATHS": 50,
  "FFUF_THREADS": 200,
  "FFUF_TIMEOUT": 86400,
  "FFUF_WORDLIST": "/usr/share/seclists/Discovery/Web-Content/common.txt",
