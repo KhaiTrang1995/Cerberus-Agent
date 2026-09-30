@@ -125,6 +125,12 @@ cd webapp && npm run test     # vitest run --no-file-parallelism
 cd webapp && npm run type-check && npm run lint
 ```
 
+Credentials for the local stack live in the repo-root `.env` (gitignored). To sign
+in to the UI in a browser, use `UI_LOGIN_USERNAME` / `UI_LOGIN_PASSWORD`. To call
+the MCP server, send `MCP_SERVER_TOKEN` as `Authorization: Bearer` to
+`http://localhost:3000/api/mcp-server` (the port is `WEBAPP_PORT` if changed).
+Read the values from `.env` when needed; never print them.
+
 ## QA CHECKLIST
 
 - [ ] `./redamon.sh test unit` is green (Docker gate, not host pytest).
