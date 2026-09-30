@@ -191,14 +191,65 @@ class TestTheRunRecordsWhatAReconnectingTabMissed(unittest.TestCase):
         self.assertEqual(self.run.status, "error")
 
     def test_detach_is_identity_guarded(self):
-        # A stale socket closing must not detach the tab that has since
-        # reconnected and taken its place.
+        # A socket closing detaches only itself, never another tab's.
         current, stale = object(), object()
-        self.run.socket = current
+        self.run.attach(current)
         self.run.detach(stale)
-        self.assertIs(self.run.socket, current)
+        self.assertTrue(self.run.is_attached(current))
         self.run.detach(current)
-        self.assertIsNone(self.run.socket)
+        self.assertEqual(self.run.sockets, [])
+
+    def test_attaching_the_same_socket_twice_keeps_one(self):
+        # INIT and a later start_triage both attach the same tab.
+        tab = object()
+        self.run.attach(tab)
+        self.run.attach(tab)
+        self.assertEqual(len(self.run.sockets), 1)
+
+
+class FakeSocket:
+    def __init__(self, fail: bool = False):
+        self.sent = []
+        self.fail = fail
+
+    async def send_json(self, message):
+        if self.fail:
+            raise RuntimeError("socket closed")
+        self.sent.append(message)
+
+
+class TestEveryOpenTabHearsTheRun(unittest.IsolatedAsyncioTestCase):
+    """The board and /cypherfix open side by side: the second tab to attach took
+    the run over, so the first never heard the run end and showed `running`
+    until reloaded."""
+
+    def setUp(self):
+        from cypherfix_triage.websocket_handler import TriageRun
+        self.run = TriageRun(P1)
+
+    async def test_an_event_reaches_every_attached_tab(self):
+        board, fix = FakeSocket(), FakeSocket()
+        self.run.attach(board)
+        self.run.attach(fix)
+        await self.run.send("triage_phase", {"phase": "reviewing"})
+        self.assertEqual([m["type"] for m in board.sent], ["triage_phase"])
+        self.assertEqual([m["type"] for m in fix.sent], ["triage_phase"])
+
+    async def test_a_second_tab_closing_leaves_the_first_attached(self):
+        board, fix = FakeSocket(), FakeSocket()
+        self.run.attach(board)
+        self.run.attach(fix)
+        self.run.detach(fix)
+        await self.run.send("stopped", {})
+        self.assertEqual(board.sent[-1]["type"], "stopped")
+
+    async def test_a_failing_socket_is_dropped_and_the_others_still_hear(self):
+        dead, live = FakeSocket(fail=True), FakeSocket()
+        self.run.attach(dead)
+        self.run.attach(live)
+        await self.run.send("triage_phase", {"phase": "scoring"})
+        self.assertFalse(self.run.is_attached(dead))
+        self.assertEqual(live.sent[-1]["type"], "triage_phase")
 
     def test_a_run_with_no_task_is_not_active(self):
         self.assertFalse(self.run.is_active)
@@ -280,13 +331,6 @@ class TestStartDetachedRun(unittest.IsolatedAsyncioTestCase):
         `running` for ever, and one that attached later replayed no end."""
         import asyncio
 
-        class FakeSocket:
-            def __init__(self):
-                self.sent = []
-
-            async def send_json(self, message):
-                self.sent.append(message)
-
         self.gate = asyncio.Event()
         tab = FakeSocket()
         run, _, _ = self.wh.start_detached_run("u1", P1, socket=tab)
@@ -298,6 +342,32 @@ class TestStartDetachedRun(unittest.IsolatedAsyncioTestCase):
         late = FakeSocket()
         await run.replay(late)
         self.assertEqual(late.sent[-1]["type"], "stopped")
+
+    async def test_an_mcp_stop_reaches_the_first_tab_after_a_second_came_and_went(self):
+        """The E2E V5b sequence: the board attaches, /cypherfix attaches and
+        closes, the agent stops the run over MCP."""
+        import asyncio
+
+        self.gate = asyncio.Event()
+        board, fix = FakeSocket(), FakeSocket()
+        run, _, _ = self.wh.start_detached_run("u1", P1, socket=board)
+        await asyncio.wait_for(run.authorized.wait(), 2)
+        _, attached, _ = self.wh.start_detached_run("u1", P1, socket=fix)
+        self.assertTrue(attached)
+        run.detach(fix)
+        self.assertTrue(self.wh.stop_project_run(P1)["stopped"])
+        with self.assertRaises(asyncio.CancelledError):
+            await run.task
+        self.assertEqual(board.sent[-1]["type"], "stopped")
+        self.assertEqual(fix.sent, [])
+
+    def test_the_stop_branch_answers_a_tab_only_when_the_run_will_not(self):
+        # An attached tab hears `stopped` from the run; answering it here as
+        # well would deliver it twice.
+        import inspect
+        src = inspect.getsource(self.wh.handle_triage_websocket)
+        stop = src[src.index('elif msg_type == "stop"'):]
+        self.assertIn("if not stopping.is_attached(websocket):", stop)
 
     async def test_a_run_cancelled_before_it_starts_frees_the_slot(self):
         """A task cancelled before its first step never runs its `finally`."""
