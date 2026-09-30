@@ -175,6 +175,29 @@ Features:
 - Health check endpoint included
 - Optimized for container orchestration
 
+### Gotchas
+
+- **The stack serves the baked production build.** Outside dev mode (see
+  [README.DEV.md §5.3](README.DEV.md#53-hot-reload-vs-rebuild)) an edit under
+  `webapp/src` is invisible until you rebuild:
+  `docker compose build webapp && docker compose up -d --no-deps webapp`.
+  Do not use `./redamon.sh update` for uncommitted work, because it runs `git pull`
+  first. Confirm the change reached what is served with
+  `docker exec redamon-webapp grep -rl '<new rule>' /app/.next/static/chunks/`,
+  and check free memory before building
+  ([TROUBLESHOOTING.md](TROUBLESHOOTING.md#host-and-docker-gotchas)).
+- **Every container start runs `prisma db push --accept-data-loss`** against the
+  image's own `prisma/schema.prisma` ([webapp/Dockerfile](../../webapp/Dockerfile)).
+  Starting an image built from an older schema DROPS every column that exists only
+  in a newer one, including a column someone else added in an uncommitted schema
+  edit on the same database.
+- **A CSS-module selector list whose items each hold two `:global()`s compiles
+  wrong.** Next 16 / Turbopack emits a stray `)` on the last item, for example
+  `:global([data-theme="light"]) .header :global(.a):disabled, :global([data-theme="light"]) .header :global(.b):disabled {}`.
+  The browser drops the whole rule and the build prints no error. Write one
+  selector per rule. One `:global()` per list item is fine. It only shows in the
+  built CSS, so check the served chunks as above.
+
 ---
 
 ## AWS Deployment Guide

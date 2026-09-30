@@ -133,3 +133,15 @@ by hand, set `REDAMON_NO_AUTO_RESET=1`.
 | The rules are active on new scans, but a scan left passive CVEs, OSV advisories or malicious packages unmuted | A scan's end-of-run sweep covers only recon's own finding sources; these come from Shodan, Netlas, CriminalIP and the supply-chain scanner | **Apply… → Current graph** after the scan |
 | A stopped scan left noise the rules should have muted | A stopped scan exits without its end-of-run sweep | **Apply… → Current graph**, or let the next scan finish |
 | A rule-muted finding vanished from Muted Nodes after a scan | The scan no longer reported it, and a rule mute is pruned like any other finding (a person's mute is kept and marked stale) | Nothing to fix. Mute it by hand if it must stay on record |
+
+## Host and Docker gotchas
+
+None of these errors out. Each one looks like a broken command or a broken feature.
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| A container sees an empty directory where you bind-mounted one under `/tmp`, or a `docker build` context under `/tmp` is "not found" | Snap-installed Docker has a private `/tmp` and never sees the host's | Put anything a container or a build must read beside the project, not under `/tmp` |
+| An edited bind-mounted config file has no effect after `docker compose restart` | Snap Docker binds a single file by inode | `docker compose up -d --force-recreate <service>` |
+| A stray empty, root-owned file appears in the repository | Bind-mounting a single FILE whose source does not exist creates an empty placeholder at the source path | Delete it, and check the source path before mounting |
+| Removing a directory after a containerised test run fails with `Permission denied` | The run left root-owned `__pycache__` behind | Delete from inside a container: `docker run --rm -v "$PWD/<dir>":/w alpine sh -c "find /w ! -user $(id -u) -depth -exec rm -rf {} +"` |
+| The desktop freezes, or the editor is killed, during a webapp image build | The Next.js build (`NODE_OPTIONS=--max-old-space-size=4096` in [webapp/Dockerfile](../../webapp/Dockerfile)) pushed the host into a global OOM while other stacks were running. `pick_parallelism` in `redamon.sh` only looks at total Docker memory, so it does not warn | Run `free -m` first. Build only with roughly 5 GB `available` and free swap; otherwise stop the other stacks or wait |
