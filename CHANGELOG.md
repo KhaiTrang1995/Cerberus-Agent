@@ -59,6 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A scheduled scan paused while it was starting no longer comes back on.**
 - **A project no longer stays locked by an agent session that has ended.** A session marked as running is checked with the agent; if the agent cannot be reached, the project still counts as busy.
 - **Triage and CodeFix no longer ask for a model you already have** when your settings could not be read; they say the settings could not be loaded.
+- **`update` rebuilds the agent when only the settings registry changed**, which otherwise left it refusing every RoE upload. The webapp now stops at startup when its schema cannot be applied, instead of serving without the new columns, and review budgets stored above 1,000 are brought to 1,000 when it starts.
 
 ### Security
 

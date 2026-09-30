@@ -3177,6 +3177,57 @@ cmd_install() {
     fi
 }
 
+# Which core services a release must rebuild or restart, from the paths it
+# changed. Appends to the CALLER's `rebuild_core` and `restart_only` arrays
+# (bash scoping is dynamic), so cmd_update and tests/redamon_update_map_test.sh
+# run the one map.
+_map_core_changes() {
+    local changed_files="$1"
+    # webapp: always needs rebuild (no volume mount in production)
+    if echo "$changed_files" | grep -q "^webapp/"; then
+        rebuild_core+=(webapp)
+    fi
+
+    # recon-orchestrator: rebuild only if Dockerfile/requirements changed, else restart
+    if echo "$changed_files" | grep -q "^recon_orchestrator/\(Dockerfile\|requirements\)"; then
+        rebuild_core+=(recon-orchestrator)
+    elif echo "$changed_files" | grep -q "^recon_orchestrator/"; then
+        restart_only+=(recon-orchestrator)
+    fi
+
+    # kali-sandbox: rebuild only if Dockerfile/entrypoint changed, else restart
+    if echo "$changed_files" | grep -q "^mcp/kali-sandbox/\(Dockerfile\|entrypoint\)"; then
+        rebuild_core+=(kali-sandbox)
+    elif echo "$changed_files" | grep -q "^mcp/"; then
+        restart_only+=(kali-sandbox)
+    fi
+
+    # agent: always rebuild when agentic/ changes — source code is baked into
+    # the image (no volume mount for ./agentic:/app), so restart alone won't
+    # pick up .py changes.
+    if echo "$changed_files" | grep -q "^agentic/"; then
+        rebuild_core+=(agent)
+    elif echo "$changed_files" | grep -qE "^(services/knowledge_base|graph_db)/"; then
+        rebuild_core+=(agent)
+    fi
+
+    # docker-broker: the Docker-socket filtering proxy. Rebuild when its
+    # source changes (it builds from ./services/docker_broker, no volume mount).
+    if echo "$changed_files" | grep -q "^services/docker_broker/"; then
+        rebuild_core+=(docker-broker)
+    fi
+
+    # recon_settings/ (the settings registry and the RoE prompt built from it) is
+    # COPY-baked into the agent image, which refuses every RoE upload with a 503
+    # when the registry digest it was built with no longer matches; the
+    # orchestrator reads it through a read-only mount it loads at start.
+    if echo "$changed_files" | grep -q "^recon_settings/"; then
+        [[ " ${rebuild_core[*]-} " == *" agent "* ]] || rebuild_core+=(agent)
+        [[ " ${rebuild_core[*]-} ${restart_only[*]-} " == *" recon-orchestrator "* ]] \
+            || restart_only+=(recon-orchestrator)
+    fi
+}
+
 cmd_update() {
     # --gpu / --cpu are accepted here too, so switching the PyTorch variant does
     # not require a full `install`. Unlike install, omitting them PRESERVES the
@@ -3287,39 +3338,7 @@ cmd_update() {
         info "docker-compose.yml changed -- rebuilding core service images"
         rebuild_core=(recon-orchestrator kali-sandbox agent webapp docker-broker)
     else
-        # webapp: always needs rebuild (no volume mount in production)
-        if echo "$changed_files" | grep -q "^webapp/"; then
-            rebuild_core+=(webapp)
-        fi
-
-        # recon-orchestrator: rebuild only if Dockerfile/requirements changed, else restart
-        if echo "$changed_files" | grep -q "^recon_orchestrator/\(Dockerfile\|requirements\)"; then
-            rebuild_core+=(recon-orchestrator)
-        elif echo "$changed_files" | grep -q "^recon_orchestrator/"; then
-            restart_only+=(recon-orchestrator)
-        fi
-
-        # kali-sandbox: rebuild only if Dockerfile/entrypoint changed, else restart
-        if echo "$changed_files" | grep -q "^mcp/kali-sandbox/\(Dockerfile\|entrypoint\)"; then
-            rebuild_core+=(kali-sandbox)
-        elif echo "$changed_files" | grep -q "^mcp/"; then
-            restart_only+=(kali-sandbox)
-        fi
-
-        # agent: always rebuild when agentic/ changes — source code is baked into
-        # the image (no volume mount for ./agentic:/app), so restart alone won't
-        # pick up .py changes.
-        if echo "$changed_files" | grep -q "^agentic/"; then
-            rebuild_core+=(agent)
-        elif echo "$changed_files" | grep -qE "^(services/knowledge_base|graph_db)/"; then
-            rebuild_core+=(agent)
-        fi
-
-        # docker-broker: the Docker-socket filtering proxy. Rebuild when its
-        # source changes (it builds from ./services/docker_broker, no volume mount).
-        if echo "$changed_files" | grep -q "^services/docker_broker/"; then
-            rebuild_core+=(docker-broker)
-        fi
+        _map_core_changes "$changed_files"
     fi
 
     # Tool-profile images build ONLY from their own source dirs — a docker-compose.yml
