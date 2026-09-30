@@ -73,10 +73,12 @@ class TriageRun:
     task mid-flight, so navigating away from the Priority Board tab silently threw
     away a multi-minute, paid-for LLM run and left no verdicts behind.
 
-    The task now lives here instead. A socket ATTACHES for progress and detaches
-    when the tab goes away; only an explicit Stop cancels the work. Events are
-    recorded as they happen so a tab that reconnects can be caught up on what it
-    missed.
+    The task now lives here instead. Every tab open on the project ATTACHES its
+    socket for progress and detaches when it goes away; only an explicit Stop
+    cancels the work. Events go to all of them, because a second tab (the board
+    and /cypherfix side by side) used to take the run over, and the first then
+    never heard its end. They are also recorded as they happen so a tab that
+    reconnects can be caught up on what it missed.
 
     Process-local, which matches the deployment: triage runs inside the one agent
     container. A multi-replica agent would need this in Postgres or Redis.
@@ -86,7 +88,7 @@ class TriageRun:
         self.project_id = project_id
         self.task: asyncio.Task | None = None
         self.orchestrator: TriageOrchestrator | None = None
-        self.socket: WebSocket | None = None
+        self.sockets: list[WebSocket] = []
         #: running | completed | error | stopped
         self.status = "running"
         self.last_phase: dict | None = None
@@ -110,16 +112,18 @@ class TriageRun:
         return bool(self.last_phase) and self.last_phase.get("phase") == "publishing"
 
     def attach(self, websocket: WebSocket) -> None:
-        self.socket = websocket
+        if not self.is_attached(websocket):
+            self.sockets.append(websocket)
 
     def detach(self, websocket: WebSocket) -> None:
-        """Drop the socket without touching the task. Idempotent.
+        """Drop this one socket without touching the task. Idempotent.
 
-        Guarded on identity so a stale socket closing cannot detach the tab that
-        has since reconnected.
+        By identity, so a stale socket closing never detaches another tab.
         """
-        if self.socket is websocket:
-            self.socket = None
+        self.sockets = [s for s in self.sockets if s is not websocket]
+
+    def is_attached(self, websocket: WebSocket) -> bool:
+        return any(s is websocket for s in self.sockets)
 
     def record(self, msg_type: str, payload: dict) -> None:
         """Keep the state a reconnecting tab needs to catch up."""
@@ -138,18 +142,17 @@ class TriageRun:
             self.terminal = (msg_type, payload)
 
     async def send(self, msg_type: str, payload: dict) -> None:
-        """Forward to the attached socket, if any. Never raises.
+        """Forward to every attached socket. Never raises.
 
         A detached run keeps working; its events simply have nowhere to go until
-        a tab reconnects, which is the whole point.
+        a tab reconnects, which is the whole point. A socket that fails is
+        dropped, and the others still get the event.
         """
-        socket = self.socket
-        if socket is None:
-            return
-        try:
-            await socket.send_json({"type": msg_type, "payload": payload})
-        except Exception:
-            self.socket = None
+        for socket in list(self.sockets):
+            try:
+                await socket.send_json({"type": msg_type, "payload": payload})
+            except Exception:
+                self.detach(socket)
 
     async def replay(self, websocket: WebSocket) -> None:
         """Catch a freshly attached tab up on a run already in progress."""
@@ -516,7 +519,7 @@ async def handle_triage_websocket(websocket: WebSocket):
                     _RUNS.pop(stopping.project_id, None)
                     # An attached tab hears it from the run as it ends; a tab
                     # that stopped a run it was not attached to hears it here.
-                    if stopping.socket is not websocket:
+                    if not stopping.is_attached(websocket):
                         await websocket.send_json({"type": "stopped"})
 
     except WebSocketDisconnect:
