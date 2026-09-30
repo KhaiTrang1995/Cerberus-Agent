@@ -9,8 +9,10 @@
  *    and renders as "Not reviewed".
  *  - `updated: false` is never reported as success. The op answers HTTP 200 in
  *    two different failure shapes, both carrying it.
- *  - it refuses while a triage run is live, because that run's measurement step
- *    is unconditional and would silently re-file the finding afterwards.
+ *  - during a live triage run it is written only when the agent acknowledges
+ *    that its publish honours decisions made meanwhile (`layered_publish`); an
+ *    older agent would silently re-file the finding afterwards.
+ *  - a decision a person made in the app is never changed from here.
  *  - it is audited, because a verdict is durable, suppresses future AI review,
  *    and had no actor record anywhere before this.
  *
@@ -29,11 +31,14 @@ vi.mock('@/lib/prisma', () => ({
   default: { project: { findUnique: (...a: unknown[]) => h.findProject(...a) } },
 }))
 vi.mock('@/lib/triageRun', () => ({ findLiveTriageRun: (...a: unknown[]) => h.liveTriageRun(...a) }))
+vi.mock('@/lib/activationLock', () => ({ isActivationInProgress: async () => false }))
+vi.mock('@/app/api/graph/cache', () => ({ invalidateCache: vi.fn() }))
 vi.mock('@/lib/audit', () => ({ writeAudit: (...a: unknown[]) => h.writeAudit(...a) }))
 
 import { McpScopeError, McpAccessDenied, __resetRateLimiter } from '@/lib/mcpAuth'
 import { McpToolError } from './errors'
 import { setFindingVerdict } from './verdictTools'
+import { __setLayeredAgentConfirmed } from '@/lib/triage/actions'
 import type { McpContext } from './tools'
 
 const ctx = (scopes: string[] = ['triage:write']): McpContext => ({
@@ -51,10 +56,12 @@ const sentBody = () => JSON.parse(h.fetch.mock.calls[0][1].body)
 beforeEach(() => {
   vi.clearAllMocks()
   __resetRateLimiter()
+  __setLayeredAgentConfirmed(true)
   vi.stubGlobal('fetch', h.fetch)
   h.findProject.mockResolvedValue({ id: 'p1', userId: 'owner' })
   h.liveTriageRun.mockResolvedValue(null)
-  agentReturns({ updated: true, label: 'Vulnerability' })
+  agentReturns({ updated: true, label: 'Vulnerability', rescored: true,
+                 before: { score: 40 }, after: { score: 75 }, layered_publish: true })
 })
 
 describe('permissions and arguments', () => {
@@ -107,8 +114,47 @@ describe('REGRESSION: provenance is a separate property, never a third source va
 
   test('the answer says the verdict is recorded as the operator\'s own', async () => {
     const notes = (await setFindingVerdict(ctx(), 'p1', 'v1', 'confirmed')).notes.join(' ')
-    expect(notes).toMatch(/recorded as a human verdict/)
+    expect(notes).toMatch(/recorded as the operator's decision/)
     expect(notes).toMatch(/arrived over MCP/)
+  })
+
+  test('the token prefix is sent, so the node records which token decided', async () => {
+    await setFindingVerdict(ctx(), 'p1', 'v1', 'confirmed')
+    expect(sentBody().token_prefix).toBe('rdmn_mcp_aaaaaaaa')
+  })
+})
+
+describe('the layered model', () => {
+  test('the answer carries the score before and after, rescored at once', async () => {
+    const out = await setFindingVerdict(ctx(), 'p1', 'v1', 'confirmed')
+    expect(out).toMatchObject({ rescored: true, before: { score: 40 }, after: { score: 75 } })
+    expect(out.notes.join(' ')).toMatch(/`real` factor is now 100%/)
+  })
+
+  test('a Reset says what it releases', async () => {
+    const out = await setFindingVerdict(ctx(), 'p1', 'v1', 'unreviewed')
+    expect(out.notes.join(' ')).toMatch(/no longer protected from Mute Rules/)
+  })
+
+  test('a label narrows an ambiguous id', async () => {
+    await setFindingVerdict(ctx(), 'p1', 'v1', 'confirmed', '', 'Secret')
+    expect(sentBody().label).toBe('Secret')
+  })
+
+  test('a decision a person made in the app is refused, by a stable prefix', async () => {
+    agentReturns({ updated: false, reason: 'decided_in_app', label: 'Vulnerability' })
+    const err = await setFindingVerdict(ctx(), 'p1', 'v1', 'unreviewed')
+      .then(() => null, (e: McpToolError) => e)
+    expect(err).toMatchObject({ code: 'decided_in_app' })
+    expect(err?.message).toMatch(/^Refused \(decided_in_app\): /)
+    expect(h.writeAudit).not.toHaveBeenCalled()
+  })
+
+  test('an ambiguous id names the kinds it matched', async () => {
+    agentReturns({ updated: false, reason: 'ambiguous', labels: ['Secret', 'Vulnerability'] })
+    const err = await setFindingVerdict(ctx(), 'p1', 'v1', 'confirmed')
+      .then(() => null, (e: McpToolError) => e)
+    expect(err?.message).toMatch(/^Refused \(ambiguous\): .*Secret, Vulnerability/)
   })
 })
 
@@ -158,13 +204,16 @@ describe('a failed write is never reported as success', () => {
       .rejects.toBeInstanceOf(McpToolError)
   })
 
-  test('a muted finding is refused by name, and the message says whose call it is', async () => {
+  test('a muted finding is refused by name, and the message says how a person gets it judged', async () => {
     agentReturns({ updated: false, reason: 'muted', label: 'Vulnerability' })
     const err = await setFindingVerdict(ctx(), 'p1', 'm1', 'likely_noise')
       .then(() => null, (e: McpToolError) => e)
     expect(err).toMatchObject({ code: 'muted' })
-    expect(err?.message).toMatch(/NOT recorded: this finding is muted/)
-    expect(err?.message).toMatch(/left to a person/)
+    expect(err?.message).toMatch(/^Refused \(muted\): a verdict is refused on a muted finding/)
+    expect(err?.message).toMatch(/Nothing was written/)
+    // The path is unmute-then-judge, behind its own permission: triage:write
+    // alone must never be a way to release a rule mute.
+    expect(err?.message).toMatch(/unmute it first with unmute_findings \(needs the triage:mute permission\)/)
     expect(h.writeAudit).not.toHaveBeenCalled()
   })
 
@@ -175,33 +224,44 @@ describe('a failed write is never reported as success', () => {
   })
 })
 
-// REGRESSION (plan 14.2): a triage run reads at step A and publishes minutes
-// later, and while its verdict-writing steps protect a human verdict, its
-// MEASUREMENT step is unconditional and rewrites triage_state - which drives the
-// board section. A verdict does not touch updated_at, so the publish-time
-// "unchanged" guard still matches and the row is written. A verdict set at
-// T+3min saying "confirmed" gets filed under False Positive at T+8min.
-describe('REGRESSION: it refuses while a triage run could re-file the finding', () => {
-  test('a running triage run refuses the write', async () => {
-    h.liveTriageRun.mockResolvedValue({ id: 'r1', status: 'running' })
+// REGRESSION (plan 14.2), and its replacement. A run reads at step A and
+// publishes minutes later; an agent that publishes the whole result blind would
+// re-file a finding decided meanwhile. A LAYERED agent re-reads the decision
+// under the node lock at publish, so during a live run a verdict is written only
+// when the agent acknowledges that (`layered_publish`). Version skew fails closed.
+describe('REGRESSION: an MCP verdict needs a layered agent, run or no run', () => {
+  test('with no run live, an older agent still cannot take it (it would overwrite an app decision)', async () => {
+    __setLayeredAgentConfirmed(false)
+    h.fetch.mockResolvedValueOnce({ ok: false, status: 400,
+                                    json: async () => ({ error: "unknown op 'finding_detail'" }) })
     await expect(setFindingVerdict(ctx(), 'p1', 'v1', 'confirmed'))
-      .rejects.toMatchObject({ code: 'busy' })
-    expect(h.fetch).not.toHaveBeenCalled()
+      .rejects.toMatchObject({ code: 'agent_outdated' })
+    expect(h.fetch).toHaveBeenCalledOnce()
+    expect(JSON.parse(h.fetch.mock.calls[0][1].body).op).toBe('finding_detail')
   })
 
-  test('a publishing run refuses too, and says to retry', async () => {
+  test('an agent that answers without the acknowledgement is refused too', async () => {
+    __setLayeredAgentConfirmed(false)
     h.liveTriageRun.mockResolvedValue({ id: 'r1', status: 'publishing' })
+    h.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ found: true }) })
     await expect(setFindingVerdict(ctx(), 'p1', 'v1', 'confirmed'))
-      .rejects.toThrow(/Retry once it has finished/)
+      .rejects.toThrow(/rebuild the agent image/)
   })
 
-  test('an unreadable run state FAILS CLOSED', async () => {
-    // Writing blind here means the verdict may be silently undone, which is
-    // worse than not writing it.
-    h.liveTriageRun.mockRejectedValue(new Error('db down'))
+  test('a layered agent takes the verdict during the run', async () => {
+    __setLayeredAgentConfirmed(false)
+    h.liveTriageRun.mockResolvedValue({ id: 'r1', status: 'running' })
+    h.fetch.mockResolvedValueOnce({ ok: true, json: async () => ({ found: true, layered_publish: true }) })
+    await expect(setFindingVerdict(ctx(), 'p1', 'v1', 'confirmed')).resolves.toMatchObject({ recorded: true })
+    expect(JSON.parse(h.fetch.mock.calls[1][1].body).op).toBe('human_verdict')
+  })
+
+  test('an agent that cannot be reached FAILS CLOSED', async () => {
+    __setLayeredAgentConfirmed(false)
+    h.fetch.mockRejectedValueOnce(new TypeError('fetch failed'))
     await expect(setFindingVerdict(ctx(), 'p1', 'v1', 'confirmed'))
-      .rejects.toMatchObject({ code: 'busy' })
-    expect(h.fetch).not.toHaveBeenCalled()
+      .rejects.toMatchObject({ code: 'agent_outdated' })
+    expect(h.fetch).toHaveBeenCalledOnce()
   })
 })
 

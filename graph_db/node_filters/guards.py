@@ -3,8 +3,11 @@
 Guards only ever BLOCK muting. A guarded node's target state is "not
 rule-muted", so a finding that became guarded while a rule had it muted (a
 person judged it, the agent proved it) is released at the next sweep instead
-of staying hidden for good. `set_human_verdict`, `apply_triage_scores` and the
-agent's CONFIRMS writer all match muted nodes, so that can happen.
+of staying hidden for good. `set_human_verdict` and the agent's CONFIRMS
+writer both match muted nodes, so that can happen.
+
+A person releases `g_human` with Reset: `set_human_verdict(..., 'unreviewed')`
+removes `triage_source`, so a reset finding may be rule-muted like any other.
 
 An operator's own mute is a separate case: it is neither muted nor unmuted by a
 rule, ever. That is decided from `muted` / `muted_by`, not here.

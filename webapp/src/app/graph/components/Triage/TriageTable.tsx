@@ -1,7 +1,13 @@
 'use client'
 
 /**
- * Finding triage: verdicts, and the mute control.
+ * The Priority Board: what to fix first, and who decided it.
+ *
+ * Every finding carries three layers: the rules' score from a run, a review
+ * (the built-in AI during a run, or an external agent over MCP) and a person's
+ * decision. The server combines them into the one final score the board ranks
+ * by. Each row names the layer that decided it and how far that moved the
+ * rules' score; the detail panel shows why.
  *
  * This is the working set an operator is triaging. What they decided to stop
  * looking at lives in its own table, Muted Nodes (All Nodes dropdown), which is
@@ -15,51 +21,27 @@
  * tables so every Mute button behaves the same.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Loader2, EyeOff, Check, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Loader2, EyeOff, Check, X, RotateCcw } from 'lucide-react'
 import { useAlertModal, useToast, WikiInfoButton } from '@/components/ui'
 import { useProject } from '@/providers/ProjectProvider'
 import { useCypherFixTriageWS } from '@/hooks/useCypherFixTriageWS'
-import { TriageProgress, PHASE_LABELS } from '../CypherFixTab/TriageProgress/TriageProgress'
+import { TriageProgress } from '../CypherFixTab/TriageProgress/TriageProgress'
 import { TriageRunButton } from '@/components/triage/TriageRunButton'
-import { MuteButton, useMuteNode } from '../MuteNode'
+import { TriageRunBanner } from '@/components/triage/TriageRunBanner'
+import { MuteButton, MultiMuteButton, useMuteNode } from '../MuteNode'
 import { NodeIdCell, NodeIdTh } from '../RedZoneTables/nodeId'
+import { TriageDetailPanel, type DetailTarget } from './TriageDetailPanel'
+import {
+  FACTOR_KEYS, FACTOR_NAMES, TIER_LABELS, TIER_ORDER, baseLine, changedFactors,
+  decisionChip, factorEvidence, fmtWhen, formatFactor, parseFactors, personDecided,
+  resetConfirmText, reviewChip, tierOf, whyText, REVIEW_VERDICT_TONE,
+  type Factors, type TriageFinding, type TriageTier, type VerdictResult, type VerdictStatus,
+} from './triageLayers'
 import styles from './TriageTable.module.css'
 
-export interface TriageFinding {
-  id: string
-  /** Neo4j's internal id, for the Node ID column only. `id` stays the key every
-   *  verdict and mute is written against. */
-  node_id?: string | null
-  label: string
-  name: string
-  severity: string
-  source: string
-  location?: string
-  host?: string
-  /** Which of the board's four sections this row belongs in. Decided by the
-   *  server so the client cannot disagree with it. */
-  section?: number
-  triage_state?: string
-  triage_status: TriageStatus
-  triage_confidence: number | null
-  triage_reason: string | null
-  triage_source?: string
-  triage_tier?: string
-  triage_tier_rule?: string
-  triage_factors?: string | null
-  triage_math_score?: number | null
-  triage_priority_score?: number | null
-  triage_signals?: string[]
-  triage_group_key?: string
-  triage_run_id?: string
-  triage_ai_verdict?: string
-  triage_ai_quote?: string | null
-  triage_ai_model?: string
-  triage_fix_lever?: string
-  triaged_at?: string | null
-  updated_at?: string | null
-}
+export type { TriageFinding, TriageStatus, TriageTier } from './triageLayers'
+export { TIER_LABELS } from './triageLayers'
 
 /** The four board sections, in the order they are always shown. */
 export const SECTION_RANKED = 0
@@ -79,74 +61,84 @@ export const SECTION_BLURBS: Record<number, string> = {
   [SECTION_NOT_TRIAGED]:
     'Found since the last run, or never triaged. Run triage to rank them.',
   [SECTION_FALSE_POSITIVE]:
-    'The AI or a person judged these not real. They are not muted or deleted, ' +
+    'A review or a person judged these not real. They are not muted or deleted, ' +
     'and one click puts them back.',
   [SECTION_RESOLVED]:
     'Fixed, gone, or a credential that no longer works. Kept so they can come ' +
     'back if a scan finds them again.',
 }
 
-export type TriageStatus = 'confirmed' | 'likely_noise' | 'unreviewed'
+/** The uncapped counts behind the filters (`facets` on the findings answer). */
+interface Facets {
+  total?: number
+  decided_by?: Record<string, number>
+  decided_via?: Record<string, number>
+  reviewed_via?: Record<string, number>
+  review_current?: Record<string, number>
+  sections?: Record<string, number>
+  tiers?: Record<string, number>
+}
+
+type FilterParam = 'decidedBy' | 'reviewedVia' | 'reviewCurrent'
+
+interface BoardFilter {
+  param: FilterParam
+  value: string
+}
+
+const FACET_OF: Record<FilterParam, keyof Facets> = {
+  decidedBy: 'decided_by',
+  reviewedVia: 'reviewed_via',
+  reviewCurrent: 'review_current',
+}
 
 /**
- * The four tiers the score model assigns. These are no longer score BANDS: the
- * tier is decided by fixed rules on the facts, and the score is built from it
- * (25 x tier + 25 x risk), so reading the tier back off the number would be
- * backwards. The server sends `triage_tier`; this is only the fallback for a
- * row from before the model existed.
- *
- * Severity bands are deliberately gone from this filter. "Critical" described
- * how bad a finding COULD be; "Act now" describes what to do about this one,
- * on this project, given what is actually reachable.
+ * The "Decided by" menu. Each choice is a SERVER filter, applied in the graph
+ * before the cap: filtering the capped page client-side would hide every
+ * matching row beyond it, and the operator would read the page as the set.
  */
-export type TriageTier = 'T1' | 'T2' | 'T3' | 'T4'
+const FILTER_GROUPS: Array<{ label: string; options: Array<{ param: FilterParam; value: string; label: string }> }> = [
+  {
+    label: 'Decided by',
+    options: [
+      { param: 'decidedBy', value: 'person', label: 'You' },
+      { param: 'decidedBy', value: 'review', label: 'A review' },
+      { param: 'decidedBy', value: 'rules', label: 'Rules only' },
+    ],
+  },
+  {
+    label: 'Reviewed by',
+    options: [
+      { param: 'reviewedVia', value: 'builtin', label: 'The built-in AI' },
+      { param: 'reviewedVia', value: 'mcp', label: 'An external agent (MCP)' },
+      { param: 'reviewedVia', value: 'none', label: 'Nobody (not reviewed)' },
+    ],
+  },
+  {
+    label: 'Review',
+    options: [
+      { param: 'reviewCurrent', value: 'current', label: 'Review current' },
+      { param: 'reviewCurrent', value: 'stale', label: 'Review out of date' },
+    ],
+  },
+]
 
-const TIER_ORDER: TriageTier[] = ['T1', 'T2', 'T3', 'T4']
-
-export const TIER_LABELS: Record<TriageTier, string> = {
-  T1: 'Act now',
-  T2: 'Act soon',
-  T3: 'Plan',
-  T4: 'Track',
-}
-
-/** Mirrors score_model.py: 25 x tier_level + 25 x risk. */
-function tierForScore(score: number | null | undefined): TriageTier {
-  const s = score ?? -1
-  if (s >= 75) return 'T1'
-  if (s >= 50) return 'T2'
-  if (s >= 25) return 'T3'
-  return 'T4'
-}
-
-function tierOf(f: TriageFinding): TriageTier {
-  const stored = (f.triage_tier || '') as TriageTier
-  return TIER_ORDER.includes(stored) ? stored : tierForScore(f.triage_priority_score)
-}
-
-/** What the AI concluded, in words an operator can act on. */
-const VERDICT_LABELS: Record<string, string> = {
-  real: 'Real',
-  doubtful: 'Doubtful',
-  false_positive: 'Likely false positive',
-  unclear: 'Unclear',
-  not_reviewed: 'Not reviewed',
-}
-
-/** The chip's tint follows what the verdict concluded. Anything unlisted --
- *  `not_reviewed`, or a verdict from a future model -- keeps the bare neutral
- *  chip, which reads as "no conclusion" rather than as a conclusion we cannot
- *  colour. A human verdict overrides all of these (see .verdictHuman). */
-const VERDICT_CLASS: Record<string, string> = {
+/** The review chip's tint, by what it concluded. A decision overrides all of
+ *  these (see .verdictHuman). */
+const REVIEW_TONE_CLASS: Record<string, string> = {
   real: 'verdictReal',
   doubtful: 'verdictDoubtful',
-  unclear: 'verdictDoubtful',
-  false_positive: 'verdictDismissed',
+  dismissed: 'verdictDismissed',
 }
 
-interface Factor {
-  value: number
-  evidence: string
+const VERDICT_TOASTS: Record<VerdictStatus, string> = {
+  confirmed: 'Marked real. It counts as 100% real, and no run changes your decision.',
+  likely_noise: 'Marked a false positive. It is not muted, so you can undo it.',
+  unreviewed: 'Decision reset. The rules and any review rank it again.',
+}
+
+function rowKey(f: Pick<TriageFinding, 'id' | 'label'>): string {
+  return `${f.label}:${f.id}`
 }
 
 /** The count badge carries each section's colour; see the CSS module for why
@@ -178,65 +170,37 @@ function SectionHead({ sectionKey, count }: { sectionKey: number; count: number 
   )
 }
 
-/** The four factors, parsed from the JSON the server stores. Never throws: a
- *  row written by an older run simply has no breakdown to show. */
-function parseFactors(raw: string | null | undefined): Record<string, Factor> | null {
-  if (!raw) return null
-  try {
-    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw
-    return parsed && typeof parsed === 'object' ? parsed : null
-  } catch {
-    return null
-  }
-}
-
-function factorLine(factors: Record<string, Factor> | null): string {
-  if (!factors) return ''
-  const pct = (v: number | undefined) =>
-    v === undefined ? '?' : `${Math.round(v * 100)}%`
-  const num = (v: number | undefined) => (v === undefined ? '?' : v.toFixed(2))
-  return (
-    `real ${pct(factors.C?.value)} · ` +
-    `exploit ${pct(factors.L?.value)} · ` +
-    `impact ${num(factors.I?.value)} · ` +
-    `reach ${num(factors.R?.value)}`
-  )
-}
-
-/** The evidence behind each factor, for the hover.
+/**
+ * The four factors on one line. A factor a review or a decision moved away
+ * from the rules' value is marked, and its hover gives the rules' value, so
+ * "what did the review change" is answerable from the row.
  *
- * The line above is four numbers, and a number an operator cannot interrogate
- * is a number they cannot disagree with. This matters most for C, which now
- * also carries what their own Real / False positive clicks on that detector
- * have taught it ("you judged 2 of 10 of these real"): a score that moved for
- * an invisible reason is how a ranking loses its users.
+ * The line's own hover carries the evidence behind every factor. A number an
+ * operator cannot interrogate is a number they cannot disagree with; this
+ * matters most for C, which also carries what their own Real / False positive
+ * clicks on that detector have taught it ("you judged 2 of 10 of these real").
  */
-function factorEvidence(factors: Record<string, Factor> | null): string {
-  if (!factors) return ''
-  const labels: Record<string, string> = {
-    C: 'real', L: 'exploit', I: 'impact', R: 'reach',
-  }
-  return ['C', 'L', 'I', 'R']
-    .map(key => {
-      const evidence = factors[key]?.evidence
-      return evidence ? `${labels[key]}: ${evidence}` : ''
-    })
-    .filter(Boolean)
-    .join('\n')
-}
-
-/** Worst-first, so the operator's attention lands where it should. */
-const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info', '']
-
-function severityRank(sev: string): number {
-  const i = SEVERITY_ORDER.indexOf((sev || '').toLowerCase())
-  return i === -1 ? SEVERITY_ORDER.length : i
-}
-
-function fmtWhen(iso: string | null): string {
-  if (!iso) return '-'
-  const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? '-' : d.toISOString().slice(0, 16).replace('T', ' ') + ' UTC'
+function FactorLine({ factors, base }: { factors: Factors; base: Factors | null }) {
+  const moved = changedFactors(factors, base)
+  const parts: ReactNode[] = []
+  FACTOR_KEYS.forEach((key, i) => {
+    if (i > 0) parts.push(' · ')
+    const value = formatFactor(key, factors[key]?.value)
+    if (moved.has(key)) {
+      parts.push(`${FACTOR_NAMES[key]} `)
+      parts.push(
+        <mark key={key} className={styles.factorMoved}
+              title={`rules: ${formatFactor(key, base?.[key]?.value)}`}>
+          {value}
+        </mark>,
+      )
+    } else {
+      parts.push(`${FACTOR_NAMES[key]} ${value}`)
+    }
+  })
+  return (
+    <span className={styles.factorLine} title={factorEvidence(factors)}>{parts}</span>
+  )
 }
 
 interface TriageTableProps {
@@ -250,42 +214,68 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busyId, setBusyId] = useState<string | null>(null)
-  /** Server-side total, which can exceed what the query returned. */
+  /** Server-side total of the filtered set, which can exceed what was returned. */
   const [total, setTotal] = useState(0)
+  const [facets, setFacets] = useState<Facets | null>(null)
+  /** The run whose results the board shows, as the server names it from its
+   *  run records (B9). Guessing it from the rows' newest `triaged_at` breaks
+   *  on an imported project, which has scores but no runs. */
+  const [latestRunId, setLatestRunId] = useState<string | null>(null)
   const [tierFilter, setTierFilter] = useState<TriageTier | 'all'>('all')
+  const [boardFilter, setBoardFilter] = useState<BoardFilter | null>(null)
+  const [rowErrors, setRowErrors] = useState<Record<string, { message: string; reload: boolean }>>({})
+  const [selected, setSelected] = useState<DetailTarget | null>(null)
   const [showProgress, setShowProgress] = useState(false)
   /** True when the run was launched from this mount, rather than re-attached. */
   const startedHereRef = useRef(false)
+  /** A filter change can race the previous fetch; only the newest may land. */
+  const loadSeqRef = useRef(0)
+  /** Findings the panel found gone: dropped from the board on purpose, so the
+   *  panel stays open to say so instead of closing under the operator. */
+  const goneRef = useRef(new Set<string>())
 
   const { userId } = useProject()
-  const { alertError } = useAlertModal()
+  const { dangerConfirm } = useAlertModal()
   const toast = useToast()
 
   const load = useCallback(async () => {
     if (!projectId) return
+    const seq = ++loadSeqRef.current
     setLoading(true)
     setError(null)
     try {
-      const f = await fetch(`/api/triage/findings?projectId=${encodeURIComponent(projectId)}`)
+      const query = new URLSearchParams({ projectId })
+      if (boardFilter) query.set(boardFilter.param, boardFilter.value)
+      const f = await fetch(`/api/triage/findings?${query.toString()}`)
       if (!f.ok) throw new Error((await f.json().catch(() => ({}))).error || `Findings: ${f.status}`)
       const findingsBody = await f.json()
+      if (seq !== loadSeqRef.current) return
       setFindings(findingsBody.findings ?? [])
       setTotal(findingsBody.total ?? (findingsBody.findings ?? []).length)
+      setFacets(findingsBody.facets ?? null)
+      setLatestRunId(findingsBody.latestRunId ?? null)
+      setRowErrors({})
     } catch (e) {
+      if (seq !== loadSeqRef.current) return
       setError(e instanceof Error ? e.message : 'Failed to load Priority Board data')
     } finally {
-      setLoading(false)
+      if (seq === loadSeqRef.current) setLoading(false)
     }
-  }, [projectId])
+  }, [projectId, boardFilter])
 
   useEffect(() => {
     void load()
   }, [load])
 
-  // Triage is a run of the CypherFix pipeline (collect -> classify -> correlate
-  // -> remediate), driven over the same WebSocket the CypherFix page uses. This
-  // tab launches it and reloads the verdict table when it finishes, so an
-  // operator never has to leave to /cypherfix to classify what a scan found.
+  useEffect(() => {
+    setSelected(null)
+    setBoardFilter(null)
+  }, [projectId])
+
+  // Triage is a run of the CypherFix pipeline (score -> group -> review ->
+  // fix items -> publish), driven over the same WebSocket the CypherFix page
+  // uses. This tab launches it and reloads the board when it finishes, so an
+  // operator never has to leave to /cypherfix to rank what a scan found.
   const triage = useCypherFixTriageWS({
     userId: userId || '',
     projectId: projectId || '',
@@ -297,10 +287,9 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
     onComplete: () => { void load() },
   })
 
-  // R8: reload on EVERY terminal state, not just success. A run that errored or
-  // was stopped may still have published part of its result (a Stop during the
-  // publish finishes the batch it is on), and the error path used to leave the
-  // board showing the previous order with no hint that it was stale.
+  // R8: reload on EVERY terminal state, not just success. A run that errored
+  // may still have published some of its batches, and the error path used to
+  // leave the board showing the previous order with no hint that it was stale.
   const lastTerminalRef = useRef<string | null>(null)
   useEffect(() => {
     const terminal = ['error', 'stopped', 'completed']
@@ -367,15 +356,16 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
    * The board's four sections, in their fixed order.
    *
    * THE ORDERING CONTRACT. The server decides the section and returns the rows
-   * already sorted by (section, score DESC, severity, id); this mirrors that key
-   * exactly so a client-side tier filter cannot produce a different order from
-   * the one the server published. When the two disagree, the operator is looking
-   * at a ranking nobody computed.
+   * already sorted by (section, score DESC, severity, id). The board keeps that
+   * order as it arrived and never re-sorts: a client sort with its own idea of
+   * severity is how the board and the server came to disagree (U8). A tier
+   * filter keeps RANKED rows only, since an unscored row has no tier (U6).
    */
   const sections = useMemo(() => {
     const rows = tierFilter === 'all'
       ? findings
-      : findings.filter(f => tierOf(f) === tierFilter)
+      : findings.filter(f =>
+        (f.section ?? SECTION_NOT_TRIAGED) === SECTION_RANKED && tierOf(f) === tierFilter)
 
     const bySection = new Map<number, TriageFinding[]>()
     for (const f of rows) {
@@ -383,14 +373,6 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
       const list = bySection.get(key)
       if (list) list.push(f)
       else bySection.set(key, [f])
-    }
-    for (const list of bySection.values()) {
-      list.sort((a, b) => {
-        const p = (b.triage_priority_score ?? -1) - (a.triage_priority_score ?? -1)
-        if (p !== 0) return p
-        const sev = severityRank(a.severity) - severityRank(b.severity)
-        return sev !== 0 ? sev : a.id.localeCompare(b.id)
-      })
     }
     return [SECTION_RANKED, SECTION_NOT_TRIAGED, SECTION_FALSE_POSITIVE,
             SECTION_RESOLVED]
@@ -401,76 +383,159 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
   const visible = useMemo(
     () => sections.flatMap(section => section.rows), [sections])
 
-  /** The newest completed run on the board, for the "from an older run" note. */
-  const latestRunId = useMemo(() => {
-    let best: string | null = null
-    let bestAt = ''
-    for (const f of findings) {
-      if (f.triage_run_id && (f.triaged_at || '') > bestAt) {
-        bestAt = f.triaged_at || ''
-        best = f.triage_run_id
-      }
-    }
-    return best
-  }, [findings])
-
   // The query is capped server-side. Saying so is not cosmetic: without it a
   // truncated list reads as the complete set of findings to triage, and an
   // operator would work through it believing nothing was left.
   const truncated = total > findings.length
 
+  /** Scored rows per tier. The facets count the whole project, past the cap;
+   *  under a server filter they would count rows the filter hides, so the
+   *  loaded (filtered) rows are counted instead. */
   const counts = useMemo(() => {
+    if (!boardFilter && facets?.tiers) return facets.tiers
     const c: Record<string, number> = {}
     for (const f of findings) {
+      if ((f.section ?? SECTION_NOT_TRIAGED) !== SECTION_RANKED) continue
       const t = tierOf(f)
       c[t] = (c[t] || 0) + 1
     }
     return c
-  }, [findings])
+  }, [findings, facets, boardFilter])
 
-  /** Real / False positive. The verdict route already refuses to let the AI
-   *  overwrite this, which is what makes the button worth having (R6). */
-  const setVerdict = useCallback(
-    async (finding: TriageFinding, status: 'confirmed' | 'likely_noise') => {
-      if (!projectId) return
-      setBusyId(finding.id)
+  // The panel closes when its finding leaves the board (a mute, or a filter
+  // that no longer matches it), except when the panel itself found it gone.
+  useEffect(() => {
+    if (!selected || goneRef.current.has(rowKey(selected))) return
+    if (!findings.some(f => f.id === selected.id && f.label === selected.label)) setSelected(null)
+  }, [findings, selected])
+
+  const selectedRow = useMemo(
+    () => (selected
+      ? findings.find(f => f.id === selected.id && f.label === selected.label) ?? null
+      : null),
+    [findings, selected],
+  )
+
+  /**
+   * Real / False positive / Reset. The agent rescores the finding in the same
+   * transaction and answers with the new row, which replaces the old one in
+   * place: no reload, so the operator keeps their place on the board (U9).
+   *
+   * A reason always goes with it (B10): the typed one from the panel, '' from a
+   * row button.
+   */
+  const postVerdict = useCallback(
+    async (finding: TriageFinding, status: VerdictStatus, reason: string): Promise<VerdictResult> => {
+      if (!projectId) return { ok: false, message: 'Select a project first.' }
+      if (status === 'unreviewed') {
+        const ok = await dangerConfirm(
+          resetConfirmText(finding.name || finding.id), 'Reset your decision',
+          { confirmLabel: 'Reset' })
+        if (!ok) return { ok: false, cancelled: true, message: '' }
+      }
       try {
         const res = await fetch('/api/triage/verdict', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ projectId, nodeId: finding.id, status }),
+          body: JSON.stringify({
+            projectId, nodeId: finding.id, label: finding.label, status, reason,
+          }),
         })
         const body = await res.json().catch(() => ({}))
-        if (res.status === 409 || (res.ok && body.updated === false)) {
-          await load()
-          throw new Error(
-            'This finding changed while the page was open. The list has been ' +
-            'reloaded; try again.'
-          )
+        if (!res.ok || body.updated !== true) {
+          return {
+            ok: false,
+            status: res.status,
+            code: typeof body.code === 'string' ? body.code : undefined,
+            message: res.status === 404
+              ? 'This finding is no longer on the board: a rescan or a version switch ' +
+                'replaced it. Reload to see the current list.'
+              : body.error || 'The verdict could not be saved.',
+          }
         }
-        if (!res.ok) throw new Error(body.error || 'The verdict could not be saved.')
-        toast.success(
-          status === 'confirmed'
-            ? 'Marked real. Triage will not change this again.'
-            : 'Marked a false positive. It is not muted, so you can undo it.'
-        )
-        await load()
-      } catch (e) {
-        await alertError(
-          e instanceof Error ? e.message : 'The verdict could not be saved.',
-          'Your verdict')
-      } finally {
-        setBusyId(null)
+        const row = body.row as TriageFinding | null | undefined
+        if (row && row.id) {
+          setFindings(prev => prev.map(x =>
+            x.id === finding.id && x.label === finding.label ? { ...x, ...row } : x))
+        } else {
+          await load()
+        }
+        toast.success(VERDICT_TOASTS[status] +
+          (body.rescored === false ? ' The score follows at the next run.' : ''))
+        return { ok: true }
+      } catch {
+        return { ok: false, message: 'The verdict could not be saved: the server did not answer.' }
       }
     },
-    [projectId, alertError, toast, load],
+    [projectId, dangerConfirm, toast, load],
   )
+
+  const rowVerdict = useCallback(async (finding: TriageFinding, status: VerdictStatus) => {
+    const key = rowKey(finding)
+    setBusyId(finding.id)
+    setRowErrors(prev => {
+      if (!(key in prev)) return prev
+      const { [key]: _dropped, ...rest } = prev
+      return rest
+    })
+    try {
+      const result = await postVerdict(finding, status, '')
+      if (!result.ok && !result.cancelled) {
+        setRowErrors(prev => ({
+          ...prev,
+          [key]: {
+            message: result.message,
+            reload: result.status === 404 || result.code === 'activation_changed',
+          },
+        }))
+      }
+    } finally {
+      setBusyId(null)
+    }
+  }, [postVerdict])
+
+  const openDetail = useCallback((f: TriageFinding) => {
+    setSelected({ id: f.id, label: f.label, name: f.name || f.id })
+  }, [])
+
+  const closeDetail = useCallback(() => setSelected(null), [])
+
+  const panelVerdict = useCallback(
+    (status: VerdictStatus, reason: string) => {
+      if (!selected) return Promise.resolve<VerdictResult>({ ok: false, message: 'Nothing selected.' })
+      const finding = selectedRow ??
+        ({ id: selected.id, label: selected.label, name: selected.name } as TriageFinding)
+      return postVerdict(finding, status, reason)
+    },
+    [selected, selectedRow, postVerdict],
+  )
+
+  const dropSelected = useCallback(() => {
+    if (!selected) return
+    goneRef.current.add(rowKey(selected))
+    setFindings(prev => prev.filter(x => !(x.id === selected.id && x.label === selected.label)))
+  }, [selected])
+
+  const filterValue = boardFilter ? `${boardFilter.param}:${boardFilter.value}` : ''
+  const onFilterChange = useCallback((value: string) => {
+    if (!value) {
+      setBoardFilter(null)
+      return
+    }
+    const [param, choice] = value.split(':') as [FilterParam, string]
+    setBoardFilter({ param, value: choice })
+  }, [])
+
+  const facetCount = (param: FilterParam, value: string): string => {
+    const n = facets?.[FACET_OF[param]] as Record<string, number> | undefined
+    return typeof n?.[value] === 'number' ? ` (${n[value]})` : ''
+  }
 
   if (!projectId) {
     return <div className={styles.empty}>Select a project to rank its findings.</div>
   }
 
-  if (loading && findings.length === 0) {
+  if (loading && findings.length === 0 && !error) {
     return (
       <div className={styles.empty}>
         <Loader2 className={styles.spin} size={18} /> Loading findings...
@@ -483,6 +548,9 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
       <div className={styles.error}>
         <p>{error}</p>
         <button className={styles.button} onClick={() => void load()}>Retry</button>
+        {boardFilter && (
+          <button className={styles.button} onClick={() => setBoardFilter(null)}>Clear the filter</button>
+        )}
       </div>
     )
   }
@@ -497,6 +565,27 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
           />
         )}
         <div className={styles.filters}>
+          {loading && <Loader2 className={styles.spin} size={14} aria-label="Loading" />}
+          <select
+            className={`${styles.filterSelect} ${boardFilter ? styles.filterSelectActive : ''}`}
+            aria-label="Decided by"
+            value={filterValue}
+            onChange={e => onFilterChange(e.target.value)}
+            title="Filter the whole board by who decided each finding"
+          >
+            <option value="">
+              Decided by: anyone{typeof facets?.total === 'number' ? ` (${facets.total})` : ''}
+            </option>
+            {FILTER_GROUPS.map(group => (
+              <optgroup key={group.label} label={group.label}>
+                {group.options.map(o => (
+                  <option key={`${o.param}:${o.value}`} value={`${o.param}:${o.value}`}>
+                    {o.label}{facetCount(o.param, o.value)}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
+          </select>
           <button
             className={`${styles.chip} ${tierFilter === 'all' ? styles.chipActive : ''}`}
             onClick={() => setTierFilter('all')}
@@ -509,6 +598,7 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
               className={`${styles.chip} ${styles[`tier${tier}`] ?? ''} ${
                 tierFilter === tier ? styles.chipActive : ''}`}
               onClick={() => setTierFilter(tier)}
+              title="Ranked findings in this tier"
             >
               {TIER_LABELS[tier]} ({counts[tier] ?? 0})
             </button>
@@ -520,8 +610,8 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
             projectId={projectId}
             onConfirm={runTriage}
             running={triage.status === 'running'}
-            // A published run stamped triage_run_id on the findings, so this is
-            // authoritative and costs nothing: the board already has the rows.
+            // The server names the run the board shows, so this is
+            // authoritative and costs nothing: the answer is already loaded.
             hasPreviousRun={latestRunId !== null}
             disabled={!userId || showProgress}
           />
@@ -535,32 +625,27 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
 
       <div className={styles.board}>
         {backgroundRun && (
-          <div className={styles.runBanner} role="status">
-            <Loader2 className={styles.spin} size={13} />
-            <span className={styles.runBannerText}>
-              Priority Board running
-              {triage.currentPhase ? ` — ${PHASE_LABELS[triage.currentPhase] ?? triage.currentPhase}` : ''}
-              . The ranking fills in below as it goes; you can leave this page.
-            </span>
-            <button className={styles.runBannerBtn} onClick={() => setShowProgress(true)}>
-              Details
-            </button>
-            <button className={styles.runBannerBtn} onClick={triage.stopTriage}>
-              Stop
-            </button>
-          </div>
+          <TriageRunBanner
+            projectId={projectId}
+            label="Priority Board running"
+            phase={triage.currentPhase}
+            hint="The board updates when it publishes; you can leave this page"
+            notice={triage.notice}
+            onDetails={() => setShowProgress(true)}
+            onStop={triage.stopTriage}
+          />
         )}
 
         {truncated && (
           <div className={styles.truncationNotice} role="status">
-            Showing the {findings.length} highest-severity findings of {total}. Mute or resolve
-            some, or narrow by verdict, to see the rest.
+            Showing the {findings.length} highest-ranked findings of {total}. Mute or resolve
+            some, or narrow with Decided by, to see the rest.
           </div>
         )}
 
         {visible.length === 0 ? (
           <div className={styles.empty}>
-            {findings.length === 0
+            {findings.length === 0 && !boardFilter
               ? 'No findings in scope yet. Run a scan, then run triage to see what matters most.'
               : 'No findings match this filter.'}
           </div>
@@ -579,7 +664,7 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
                       <th>Finding</th>
                       <th>Type</th>
                       <th>Score</th>
-                      <th>Verdict</th>
+                      <th>Decided by</th>
                       <th>Signals</th>
                       <th>Where</th>
                       <th>Why</th>
@@ -589,15 +674,18 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
                   <tbody>
                     {section.rows.map((f, i) => {
                       const factors = parseFactors(f.triage_factors)
+                      const baseFactors = parseFactors(f.triage_base_factors)
                       const tier = tierOf(f)
                       const score = f.triage_priority_score
-                      const isHuman = f.triage_source === 'human'
-                      const verdict = isHuman
-                        ? `You: ${f.triage_status === 'confirmed' ? 'Real' : 'False positive'}`
-                        : VERDICT_LABELS[f.triage_ai_verdict || ''] ?? 'Not reviewed'
-                      const verdictTint = isHuman
-                        ? styles.verdictHuman
-                        : styles[VERDICT_CLASS[f.triage_ai_verdict || ''] ?? ''] ?? ''
+                      const base = baseLine(f)
+                      const decision = decisionChip(f)
+                      const review = reviewChip(f)
+                      const decided = personDecided(f)
+                      const why = whyText(f)
+                      const key = rowKey(f)
+                      const rowError = rowErrors[key]
+                      const busy = busyId === f.id || mutingKey === f.id
+                      const isSelected = selected !== null && rowKey(selected) === key
                       const stale =
                         section.key === SECTION_RANKED &&
                         latestRunId !== null &&
@@ -605,11 +693,22 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
                         f.triage_run_id !== latestRunId
 
                       return (
-                        <tr key={f.id}>
+                        <tr
+                          key={key}
+                          className={`${styles.row} ${isSelected ? styles.rowSelected : ''}`}
+                          onClick={() => openDetail(f)}
+                        >
                           <td><NodeIdCell value={f.node_id} /></td>
                           <td className={styles.rank}>{i + 1}</td>
                           <td className={styles.name}>
-                            {f.name || f.id}
+                            <button
+                              type="button"
+                              className={styles.nameButton}
+                              onClick={e => { e.stopPropagation(); openDetail(f) }}
+                              title="Why it ranks here"
+                            >
+                              {f.name || f.id}
+                            </button>
                             {stale && (
                               <span
                                 className={styles.staleTag}
@@ -637,13 +736,16 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
                                 >
                                   {TIER_LABELS[tier]}
                                 </span>
-                                {factors ? (
-                                  <span
-                                    className={styles.factorLine}
-                                    title={factorEvidence(factors)}
-                                  >
-                                    {factorLine(factors)}
+                                {base && (
+                                  <span className={styles.baseLine} title={base.title}>
+                                    {base.text}{' '}
+                                    <span className={base.up ? styles.deltaUp : styles.deltaDown}>
+                                      {base.delta}
+                                    </span>
                                   </span>
+                                )}
+                                {factors ? (
+                                  <FactorLine factors={factors} base={baseFactors} />
                                 ) : (
                                   <span className={styles.factorLine}>math only</span>
                                 )}
@@ -651,19 +753,39 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
                             )}
                           </td>
                           <td className={styles.verdictCell}>
-                            <span
-                              className={`${styles.verdictChip} ${verdictTint}`}
-                              title={f.triage_ai_model
-                                ? `Reviewed by ${f.triage_ai_model}`
-                                : ''}
-                            >
-                              {verdict}
-                            </span>
-                            {f.triage_ai_quote && (
-                              <span
-                                className={styles.quote}
-                                title={f.triage_ai_quote}
-                              >
+                            <div className={styles.chipStack}>
+                              {decision && (
+                                <span
+                                  className={`${styles.verdictChip} ${styles.verdictHuman}`}
+                                  title={decision.title}
+                                >
+                                  {decision.text}
+                                </span>
+                              )}
+                              {review && (
+                                <span
+                                  className={`${styles.verdictChip} ${
+                                    styles[REVIEW_TONE_CLASS[REVIEW_VERDICT_TONE[review.verdict]] ?? ''] ?? ''
+                                  } ${review.stale ? styles.verdictStale : ''}`}
+                                  title={review.title}
+                                >
+                                  {review.text}
+                                </span>
+                              )}
+                              {review?.stale && (
+                                <span className={styles.staleTag} title={review.title}>out of date</span>
+                              )}
+                              {!decision && !review && (
+                                <span
+                                  className={styles.verdictChip}
+                                  title="No review and no decision: the rules alone rank it."
+                                >
+                                  Rules only
+                                </span>
+                              )}
+                            </div>
+                            {review && f.triage_ai_quote && (
+                              <span className={styles.quote} title={f.triage_ai_quote}>
                                 &ldquo;{f.triage_ai_quote}&rdquo;
                               </span>
                             )}
@@ -681,32 +803,65 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
                           </td>
                           <td className={styles.where}>{f.host || f.location || '-'}</td>
                           <td className={styles.reason}>
-                            {f.triage_reason || '-'}
+                            {why || '-'}
                             {f.triage_fix_lever && (
                               <span className={styles.fixLever}>{f.triage_fix_lever}</span>
                             )}
                           </td>
-                          <td className={styles.rowActions}>
+                          <td className={styles.rowActions} onClick={e => e.stopPropagation()}>
                             <button
                               className={styles.verdictButton}
-                              disabled={busyId === f.id || mutingKey === f.id}
-                              onClick={() => void setVerdict(f, 'confirmed')}
-                              title="Mark this real. Triage will not change it again."
+                              disabled={busy || (decided && f.triage_status === 'confirmed')}
+                              onClick={() => void rowVerdict(f, 'confirmed')}
+                              title={decided && f.triage_status === 'confirmed'
+                                ? 'Already marked real'
+                                : 'Mark this real. It counts as 100% real and no run changes it.'}
                             >
                               <Check size={13} /> Real
                             </button>
                             <button
                               className={styles.verdictButton}
-                              disabled={busyId === f.id || mutingKey === f.id}
-                              onClick={() => void setVerdict(f, 'likely_noise')}
-                              title="Mark this a false positive. It is not muted."
+                              disabled={busy || (decided && f.triage_status === 'likely_noise')}
+                              onClick={() => void rowVerdict(f, 'likely_noise')}
+                              title={decided && f.triage_status === 'likely_noise'
+                                ? 'Already marked a false positive'
+                                : 'Mark this a false positive. It is not muted.'}
                             >
                               <X size={13} /> False
                             </button>
+                            {decided && (
+                              <button
+                                className={styles.verdictButton}
+                                disabled={busy}
+                                onClick={() => void rowVerdict(f, 'unreviewed')}
+                                title="Remove your decision; the rules and any review rank it again."
+                              >
+                                <RotateCcw size={13} /> Reset
+                              </button>
+                            )}
+                            <MultiMuteButton
+                              compact
+                              seed={{ name: f.name || f.id, nodeId: f.id, graphId: f.node_id, label: f.label }}
+                              onMuted={keys => setFindings(prev => prev.filter(x => !keys.includes(x.id)))}
+                            />
                             <MuteButton
-                              busy={busyId === f.id || mutingKey === f.id}
+                              busy={busy}
                               onClick={() => void mute(f)}
                             />
+                            {rowError && (
+                              <div className={styles.rowError} role="alert">
+                                {rowError.message}
+                                {rowError.reload && (
+                                  <button
+                                    type="button"
+                                    className={styles.rowErrorButton}
+                                    onClick={() => void load()}
+                                  >
+                                    Reload
+                                  </button>
+                                )}
+                              </div>
+                            )}
                           </td>
                         </tr>
                       )
@@ -719,6 +874,19 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
         )}
       </div>
 
+      {selected && (
+        <TriageDetailPanel
+          key={rowKey(selected)}
+          projectId={projectId}
+          target={selected}
+          row={selectedRow}
+          onClose={closeDetail}
+          onVerdict={panelVerdict}
+          onGone={dropSelected}
+          onReload={() => void load()}
+        />
+      )}
+
       <TriageProgress
         isVisible={showProgress}
         title="Priority Board"
@@ -727,6 +895,7 @@ export function TriageTable({ projectId, onViewMuted }: TriageTableProps) {
         findings={triage.findings}
         thinking={triage.thinking}
         error={triage.error}
+        notice={triage.notice}
         status={triage.status}
         onClose={closeProgress}
         onStop={triage.stopTriage}

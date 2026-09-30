@@ -49,6 +49,7 @@ import {
   type EngagementProjectRow,
 } from '@/lib/engagement'
 import { describeScanWriters } from '@/lib/graphWriters'
+import { isHardBlockedDomain } from '@/lib/hard-guardrail'
 import { assertMcpProjectAccess, requireScope } from '@/lib/mcpAuth'
 import { McpToolError } from '@/lib/mcp/errors'
 import { enforceRate, type McpContext } from '@/lib/mcp/tools'
@@ -121,7 +122,7 @@ function requireTargetingMode(args: CreateProjectArgs) {
   return modes[0]
 }
 
-function normaliseAuthorization(auth: AuthorizationArgs) {
+export function normaliseAuthorization(auth: AuthorizationArgs) {
   if (!isDocumentKind(auth.documentKind)) {
     throw new McpToolError(
       `documentKind must be one of ${DOCUMENT_KINDS.join(', ')}.`,
@@ -221,6 +222,20 @@ async function findByIdempotencyKey(ctx: McpContext, key: string) {
   }
 }
 
+/**
+ * The non-disableable check the project form runs at creation. Scan start runs
+ * it again, but a project that can never be scanned should not be created
+ * either: it would carry an authorization record for a target nobody may touch.
+ */
+export function refuseHardBlocked(domains: string[]): void {
+  for (const domain of domains) {
+    const check = isHardBlockedDomain(domain)
+    if (check.blocked) {
+      throw new McpToolError(`Target permanently blocked: ${domain}: ${check.reason}`, 'target_blocked')
+    }
+  }
+}
+
 function isUniqueViolation(error: unknown): boolean {
   return (
     typeof error === 'object' && error !== null && (error as { code?: string }).code === 'P2002'
@@ -262,6 +277,7 @@ export async function createProject(ctx: McpContext, args: CreateProjectArgs) {
     // Same normalization as the HTTP routes: an agent that emits bug-bounty
     // scope notation must not turn `*.example.com` into a literal target.
     data.targetDomain = splitWildcard(args.targetDomain!.trim()).rest
+    refuseHardBlocked([data.targetDomain as string])
   } else if (mode === 'targetIps') {
     data.ipMode = true
     data.targetIps = args.targetIps!.map(s => s.trim()).filter(Boolean)
@@ -271,6 +287,7 @@ export async function createProject(ctx: McpContext, args: CreateProjectArgs) {
     if (validation.errors.length > 0) {
       throw new McpToolError(validation.errors.join(' '), 'bad_args')
     }
+    refuseHardBlocked(validation.groups.map(g => g.rootDomain))
     data.domainBatchMode = true
     data.domainBatchHosts = hosts
     // The server re-derives the grouping from the raw host list and discards

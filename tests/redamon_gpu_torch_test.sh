@@ -325,7 +325,8 @@ status_body="$(sed -n '/^cmd_status()/,/^}/p' "$REPO_ROOT/redamon.sh")"
 assert_contains "status reports the frozen build variant" "$status_body" "TORCH_BUILD"
 
 # update must rebuild BOTH images this feature touches.
-assert_contains "update rebuilds the agent on agentic/ changes"  "$update_body" 'grep -q "^agentic/"'
+agent_map="$(rebuild_core=(); restart_only=(); _map_core_changes "agentic/requirements.txt"; echo "${rebuild_core[*]-}")"
+assert_contains "update rebuilds the agent on agentic/ changes"  "$agent_map" "agent"
 assert_contains "update rebuilds the scanner on its Dockerfile"  "$update_body" 'scanners/ai_attack_surface_scan/(Dockerfile'
 
 # =============================================================================

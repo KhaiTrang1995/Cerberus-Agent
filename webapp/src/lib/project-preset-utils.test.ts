@@ -30,6 +30,8 @@ import {
   presetFingerprint,
   readLoadedPreset,
 } from './project-preset-utils'
+import { getPresetById } from './recon-presets'
+import { canonicalJson, cyrb53 } from './fingerprint'
 
 /** The half that is listed by name, because it has no registry classification. */
 const UNCLASSIFIED = ['name', 'description', 'vhostSniCustomWordlist', 'supplyChainInputMode']
@@ -44,7 +46,7 @@ const ABSENT_FROM_BACKEND_DEFAULTS = [
   'rceAggressivePayloads', 'pathTraversalRequestTimeout', 'trufflehogEnabled',
   'trufflehogConcurrency', 'cypherfixDefaultBranch', 'cypherfixRequireApproval',
   'supplyChainEcosystems', 'supplyChainOrgMaxRepos', 'triageReviewBudget',
-  'agentGuardrailEnabled', 'agentLatsPhaseExploitation', 'mcpKaliExecEnabled',
+  'agentGuardrailEnabled', 'agentLatsPhaseExploitation',
 ]
 
 // ============================================================
@@ -72,9 +74,17 @@ describe('PRESET_EXCLUDED_FIELDS', () => {
       ...fieldsWhere(f => f.tool === 'engagement').map(f => f.key),
       ...fieldsWhere(f => f.deny_reason === 'upload-managed').map(f => f.key),
       ...fieldsWhere(f => f.read_deny_reason === 'credential').map(f => f.key),
+      ...fieldsWhere(f => f.deny_reason === 'escalation' || f.deny_reason === 'not-tuning').map(f => f.key),
       ...bookkeeping.map(f => f.key),
     ])
     expect([...PRESET_EXCLUDED_FIELDS].sort()).toEqual([...expected].sort())
+  })
+
+  test('C-1: the escalation and not-tuning switches never travel', () => {
+    // Neither is named by any built-in, so a preset that carried them reset them
+    // to their default on every apply - and mcpKaliExecEnabled defaults to ON.
+    expect(PRESET_EXCLUDED_FIELDS.has('mcpKaliExecEnabled')).toBe(true)
+    expect(PRESET_EXCLUDED_FIELDS.has('updateGraphDb')).toBe(true)
   })
 
   test('the scope never travels: target, batch, ownership proof, guardrail', () => {
@@ -140,9 +150,19 @@ describe('PRESET_EXCLUDED_FIELDS', () => {
   test('does NOT exclude recon, agent or reconPresetId settings', () => {
     for (const key of ['naabuEnabled', 'nucleiEnabled', 'katanaDepth', 'scanModules',
       'agentOpenaiModel', 'aiPipelineModel', 'agentMaxIterations', 'agentToolPhaseMap',
-      'reconPresetId', 'mcpKaliExecEnabled', 'updateGraphDb']) {
+      'reconPresetId']) {
       expect(PRESET_EXCLUDED_FIELDS.has(key), key).toBe(false)
     }
+  })
+})
+
+describe('the preset field set is exactly what a recon:settings token may write', () => {
+  test('every preset field is MCP-settable, except the reconPresetId badge', () => {
+    // A preset is applied by REPLACING every field it covers. A column outside
+    // the settable class joining it would let a preset carry, and reset, a
+    // value no tuning write can touch - which is how C-1 happened.
+    const offenders = PRESET_FIELD_KEYS.filter(k => k !== 'reconPresetId' && field(k)?.mcp !== 'settable')
+    expect(offenders).toEqual([])
   })
 })
 
@@ -267,13 +287,13 @@ describe('extractPresetSettings', () => {
   test('preserves false, zero and empty string (not replaced by defaults)', () => {
     const result = extractPresetSettings({
       naabuEnabled: false,
-      updateGraphDb: false,
+      katanaEnabled: false,
       ffufRate: 0,
       nucleiRetries: 0,
       agentInformationalSystemPrompt: '',
     })
     expect(result.naabuEnabled).toBe(false)
-    expect(result.updateGraphDb).toBe(false)
+    expect(result.katanaEnabled).toBe(false)
     expect(result.ffufRate).toBe(0)
     expect(result.nucleiRetries).toBe(0)
     expect(result.agentInformationalSystemPrompt).toBe('')
@@ -387,6 +407,17 @@ describe('applyPresetSettings', () => {
     expect(applyPresetSettings(withBadge, {}, {}).reconPresetId).toBeNull()
   })
 
+  test('C-1: applying a built-in never re-enables the MCP sandbox or graph writes', () => {
+    // No built-in names either switch, and an unnamed preset field is reset to
+    // its default - which is ON for both - so this used to flip them back.
+    const stealth = getPresetById('stealth-recon')!
+    const row = { ...current, mcpKaliExecEnabled: false, updateGraphDb: false }
+    const next = applyPresetSettings(row, { ...stealth.parameters, reconPresetId: stealth.id },
+      { mcpKaliExecEnabled: true, updateGraphDb: true })
+    expect(next.mcpKaliExecEnabled).toBe(false)
+    expect(next.updateGraphDb).toBe(false)
+  })
+
   test('does not mutate its inputs', () => {
     const cur = { ...current }
     const preset = { naabuEnabled: true }
@@ -490,6 +521,70 @@ describe('presetFingerprint / appliedPresetName', () => {
     expect(readLoadedPreset('Stealth')).toBeNull()
     expect(readLoadedPreset({ name: 'a', fingerprint: 'b' })).toEqual({ name: 'a', fingerprint: 'b' })
   })
+
+  test('C-10: the badge keeps which preset it was, and drops a malformed source', () => {
+    expect(readLoadedPreset({ name: 'a', fingerprint: 'b', presetId: 'up1', source: 'user' }))
+      .toEqual({ name: 'a', fingerprint: 'b', presetId: 'up1', source: 'user' })
+    expect(readLoadedPreset({ name: 'a', fingerprint: 'b', presetId: 7, source: 'somewhere' }))
+      .toEqual({ name: 'a', fingerprint: 'b' })
+  })
+})
+
+describe('C-11: a badge outlives registry changes, and older badges still show', () => {
+  const loadedWith = (settings: Record<string, unknown>) =>
+    applyPresetSettings({ name: 'P', targetDomain: 'a.example.com' }, settings, {})
+
+  test('the digest is versioned and skips every field at its default', () => {
+    // An all-default project hashes the empty list: no field contributes, so a
+    // column added later (it reaches every row at its default) moves nothing.
+    expect(presetFingerprint({})).toBe(`v2:${cyrb53('')}`)
+    expect(presetFingerprint(extractPresetSettings({}))).toBe(`v2:${cyrb53('')}`)
+  })
+
+  test('a field off its default changes the digest; putting it back restores it', () => {
+    const at = presetFingerprint(loadedWith({}))
+    const off = presetFingerprint(loadedWith({ katanaDepth: 7 }))
+    expect(off).not.toBe(at)
+    expect(presetFingerprint({ ...loadedWith({ katanaDepth: 7 }), katanaDepth: field('katanaDepth')?.default })).toBe(at)
+  })
+
+  test('the digest does not depend on registry order', () => {
+    const data = loadedWith({ katanaDepth: 7, naabuEnabled: false })
+    const reversed = Object.fromEntries(Object.entries(data).reverse())
+    expect(presetFingerprint(reversed)).toBe(presetFingerprint(data))
+  })
+
+  // The unversioned digest shipped until now: every preset field in registry
+  // order, over the field set of its time. Checked once against that code
+  // itself; mirrored here so a change to the acceptance is caught.
+  const LEFT = ['mcpKaliExecEnabled', 'updateGraphDb']
+  const unversioned = (data: Record<string, unknown>, keys: readonly string[]) => {
+    const settings = { ...extractPresetSettings(data) }
+    for (const k of LEFT) settings[k] = k in data ? data[k] : field(k)?.default
+    return cyrb53(keys.map(k => `${k}=${canonicalJson(settings[k])}`).join('\n'))
+  }
+  const beforeC1 = fieldKeys().filter(k => PRESET_FIELD_KEYS.includes(k) || LEFT.includes(k))
+
+  test('the field set before C-1 is today\'s plus exactly the two that left', () => {
+    expect(beforeC1.length).toBe(PRESET_FIELD_KEYS.length + 2)
+    for (const k of LEFT) expect(PRESET_FIELD_KEYS).not.toContain(k)
+  })
+
+  test.each([
+    ['before C-1 removed two fields', () => beforeC1],
+    ['after C-1, before the digest was versioned', () => PRESET_FIELD_KEYS],
+  ])('an unversioned badge written %s still shows, and still hides on an edit', (_label, keys) => {
+    const data = { ...loadedWith({ naabuEnabled: false }), mcpKaliExecEnabled: false }
+    const project = JSON.parse(JSON.stringify({ ...data, loadedPreset: { name: 'Old', fingerprint: unversioned(data, keys()) } }))
+    expect(appliedPresetName(project)).toBe('Old')
+    expect(appliedPresetName({ ...project, katanaDepth: 9 })).toBeNull()
+  })
+
+  test('a versioned badge is never matched against the unversioned digests', () => {
+    const data = loadedWith({})
+    const forged = { ...data, loadedPreset: { name: 'X', fingerprint: `v2:${unversioned(data, PRESET_FIELD_KEYS)}` } }
+    expect(appliedPresetName(forged)).toBeNull()
+  })
 })
 
 /**
@@ -582,6 +677,8 @@ describe('ProjectForm: both preset kinds go through loadPreset', () => {
   test('it records the loaded preset, and saves that record with the settings', () => {
     const markAt = loadPreset.indexOf('fingerprint: presetFingerprint(next')
     expect(markAt).toBeGreaterThan(-1)
+    // C-10: which preset, so a rename or delete of a user preset can find it.
+    expect(loadPreset).toMatch(/presetId: source\.kind === 'builtin' \? source\.preset\.id : source\.id,\s*source: source\.kind,/)
     expect(markAt).toBeLessThan(loadPreset.indexOf('setFormData(next)'))
     expect(loadPreset).toMatch(/const saved[^=]*= \{\s*\.\.\.pickPresetFields\(next[^}]*\),\s*loadedPreset,?\s*\}/)
   })

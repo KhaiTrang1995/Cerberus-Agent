@@ -3,6 +3,8 @@
 import { useState, useRef, useEffect, useCallback, memo } from 'react'
 import { Send, Terminal, AlertTriangle, Sparkles, Loader2 } from 'lucide-react'
 import type { SessionInteractResult } from '@/lib/websocket-types'
+import { FeatureModelLine, useFeatureModelGate } from '@/components/shared/FeatureModelGate'
+import { featureModelMessage, readFeatureModelCode } from '@/lib/llmFeatures'
 import styles from './SessionTerminal.module.css'
 
 interface TerminalLine {
@@ -37,6 +39,7 @@ export const SessionTerminal = memo(function SessionTerminal({
   const inputRef = useRef<HTMLInputElement>(null)
   const nlpInputRef = useRef<HTMLInputElement>(null)
   const prevSessionRef = useRef<number | null>(null)
+  const { ensureFeatureModel, fetchWithFeatureModel } = useFeatureModelGate()
 
   // Clear terminal when session changes
   useEffect(() => {
@@ -121,11 +124,14 @@ export const SessionTerminal = memo(function SessionTerminal({
   const handleNlpSubmit = useCallback(async () => {
     if (!nlpInput.trim() || isGenerating) return
 
-    setIsGenerating(true)
     setNlpError(null)
+    // The route runs the user's own "Command whisperer" model; this only makes
+    // sure one is saved before the request.
+    if (!(await ensureFeatureModel('command_whisperer'))) return
+    setIsGenerating(true)
 
     try {
-      const resp = await fetch('/api/agent/command-whisperer', {
+      const resp = await fetchWithFeatureModel('command_whisperer', () => fetch('/api/agent/command-whisperer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -133,11 +139,14 @@ export const SessionTerminal = memo(function SessionTerminal({
           session_type: sessionType,
           project_id: projectId,
         }),
-      })
+      }))
 
       if (!resp.ok) {
         const data = await resp.json().catch(() => ({ error: 'Request failed' }))
-        setNlpError(data.error || `Error ${resp.status}`)
+        const code = readFeatureModelCode(data)
+        setNlpError(code
+          ? featureModelMessage(code, typeof data.model === 'string' ? data.model : undefined)
+          : data.error || `Error ${resp.status}`)
         return
       }
 
@@ -152,7 +161,7 @@ export const SessionTerminal = memo(function SessionTerminal({
     } finally {
       setIsGenerating(false)
     }
-  }, [nlpInput, isGenerating, sessionType, projectId])
+  }, [nlpInput, isGenerating, sessionType, projectId, ensureFeatureModel, fetchWithFeatureModel])
 
   const handleNlpKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key === 'Enter') {
@@ -235,6 +244,9 @@ export const SessionTerminal = memo(function SessionTerminal({
           </button>
         )}
         {nlpError && <span className={styles.nlpError}>{nlpError}</span>}
+        <div className={styles.nlpModel}>
+          <FeatureModelLine featureId="command_whisperer" />
+        </div>
       </div>
 
       <div className={styles.inputArea}>

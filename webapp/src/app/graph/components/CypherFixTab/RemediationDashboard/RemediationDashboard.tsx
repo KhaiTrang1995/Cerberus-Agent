@@ -1,6 +1,6 @@
 'use client'
 
-import { Fragment, useCallback, useMemo, useState } from 'react'
+import { Fragment, useCallback, useMemo, useState, type ReactNode } from 'react'
 import { RefreshCw, Trash2, XCircle, ChevronRight } from 'lucide-react'
 import { ExternalLink } from '@/components/ui'
 import { cveToUrl } from '@/lib/url-utils'
@@ -31,6 +31,10 @@ interface RemediationDashboardProps {
   onDelete: (id: string) => void
   onRefresh: () => void
   onStartTriage: () => void
+  /** A run is live, so the button says so instead of offering a second one. */
+  running?: boolean
+  /** The live-run banner, when a run this page did not start is going. */
+  banner?: ReactNode
   projectId: string
   userId: string
 }
@@ -48,6 +52,8 @@ export function RemediationDashboard({
   onDelete,
   onRefresh,
   onStartTriage,
+  running = false,
+  banner,
   projectId,
   userId,
 }: RemediationDashboardProps) {
@@ -120,9 +126,12 @@ export function RemediationDashboard({
             // This dashboard only renders when fix items exist, and fix items
             // are only ever produced by a triage run.
             hasPreviousRun={remediations.length > 0}
+            running={running}
           />
         </div>
       </div>
+
+      {banner && <div className={styles.bannerSlot}>{banner}</div>}
 
       {/* Filters */}
       <RemediationFilters

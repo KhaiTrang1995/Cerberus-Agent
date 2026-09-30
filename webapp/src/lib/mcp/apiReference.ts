@@ -145,6 +145,12 @@ const EXAMPLE_EXTRA_ARGS: Record<string, Record<string, unknown>> = {
     },
     idempotencyKey: 'YOUR_PROGRAM_HANDLE-0000000000000000',
   },
+  // Both refuse a call that names no finding, and `placeholderFor` has no array
+  // branch, so a required-only example would name none.
+  mute_findings: { findingIds: ['YOUR_FINDING_ID'] },
+  // The hash must be 40 hex, which a YOUR_* placeholder is not.
+  submit_finding_review: { evidenceHash: '0'.repeat(40) },
+  unmute_findings: { findingIds: ['YOUR_FINDING_ID'] },
   // The digest must be 64 hex and issuedAt a real timestamp, neither of which a
   // YOUR_* placeholder satisfies.
   attach_engagement_authorization: {
@@ -152,6 +158,13 @@ const EXAMPLE_EXTRA_ARGS: Record<string, Record<string, unknown>> = {
     documentKind: 'hackerone_program',
     issuedAt: '2026-01-01T00:00:00.000Z',
   },
+  // Exactly one of three optional sources is required, a rule the schema cannot
+  // express. Copying a built-in also proves a built-in passes validation.
+  create_recon_preset: { fromPresetId: 'stealth-recon' },
+  // A call that changes nothing is refused before it reaches the backend.
+  update_recon_preset: { settings: { katanaDepth: 3 } },
+  // `changes` is required but an empty object changes nothing.
+  update_project_scope: { changes: { gvmScanTargets: 'ips_only' } },
 }
 
 /** The example `arguments` for a tool. apiReference.test.ts calls every one of these. */

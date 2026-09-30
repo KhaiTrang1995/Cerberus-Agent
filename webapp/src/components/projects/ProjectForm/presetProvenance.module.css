@@ -1,0 +1,20 @@
+/* The "Edited by an MCP agent" badge and the name filter, shared by the preset
+   drawer and the preset modal. */
+
+.mcpBadge {
+  align-self: flex-start;
+  max-width: 100%;
+  padding: 1px var(--space-1-5);
+  border-radius: var(--radius-sm);
+  background: var(--status-warning-bg);
+  color: var(--status-warning-text);
+  font-size: 10px;
+  font-weight: var(--font-medium);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.filter {
+  flex-shrink: 0;
+  margin-bottom: var(--space-2);
+}

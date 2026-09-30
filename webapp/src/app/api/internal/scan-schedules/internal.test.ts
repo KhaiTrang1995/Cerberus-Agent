@@ -137,6 +137,15 @@ describe('POST /run', () => {
     expect(data.nextRunAt).toBeInstanceOf(Date)
   })
 
+  test('a run never writes enabled back, so a pause made while it started survives', async () => {
+    // update_project_scope pauses the schedules when a batch gains hosts. Writing
+    // back the `enabled: true` read before the multi-second start re-enabled a
+    // schedule paused in between, and its next run reached the new hosts unwatched.
+    await run(req('http://x/api/internal/scan-schedules/s1/run', {}), sp('s1'))
+    const data = h.updateSchedule.mock.calls[0][0].data
+    expect(data).not.toHaveProperty('enabled')
+  })
+
   test('a one-off schedule is spent after firing', async () => {
     h.findSchedule.mockResolvedValue({ ...SCHEDULE, mode: 'once', intervalMinutes: null })
     await run(req('http://x/api/internal/scan-schedules/s1/run', {}), sp('s1'))

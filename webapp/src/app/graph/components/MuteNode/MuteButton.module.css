@@ -45,3 +45,11 @@
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* Multi mute and Mute side by side, in a table cell or the drawer's header. */
+.pair {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}

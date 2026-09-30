@@ -4,7 +4,6 @@ import { useParams, useRouter } from 'next/navigation'
 import { ProjectForm } from '@/components/projects'
 import { useProjectById, useUpdateProject } from '@/hooks/useProjects'
 import { useProject } from '@/providers/ProjectProvider'
-import { useAlertModal } from '@/components/ui'
 import styles from './page.module.css'
 
 export default function ProjectSettingsPage() {
@@ -15,7 +14,6 @@ export default function ProjectSettingsPage() {
 
   const { data: project, isLoading, error } = useProjectById(projectId)
   const updateProjectMutation = useUpdateProject()
-  const { alertError } = useAlertModal()
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const saveProject = async (data: any) => {
@@ -37,23 +35,19 @@ export default function ProjectSettingsPage() {
     return updated
   }
 
+  // A failed save must reach the form, which alerts it and keeps the edits
+  // marked unsaved. Swallowing it here made the form read "No unsaved changes"
+  // after a refusal (a 409 from a stale form included) that saved nothing.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleSubmit = async (data: any) => {
-    try {
-      await saveProject(data)
-      router.push(`/graph?project=${projectId}`)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to update project'
-      if (message.toLowerCase().includes('guardrail')) {
-        throw error
-      }
-      alertError(message)
-    }
+    const updated = await saveProject(data)
+    router.push(`/graph?project=${projectId}`)
+    return updated
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const handleSaveAndStay = async (data: any) => {
-    await saveProject(data)
+    return saveProject(data)
   }
 
   const handleCancel = () => {

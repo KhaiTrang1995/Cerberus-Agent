@@ -98,9 +98,9 @@ export const MCP_SCOPE_COPY: Record<McpScope, ScopeCopy> = {
       'on this surface - no read tool returns the value.',
   },
   'triage:read': {
-    label: 'Read suppressed findings and remediations',
+    label: 'Read suppressed findings, remediations and triage detail',
     access: 'read',
-    blurb: 'Read the muted findings, whether a person muted them as noise or one of the project\'s Mute Rules did, including who or which rule muted them and why, and the remediation write-ups (their solutions, evidence summaries and PR status). Muted findings are hidden from every other permission on this surface, so this is the only way an agent can tell "nothing was found" apart from "someone suppressed it". Separate from Read recon + graph on purpose: these are not reachable any other way.',
+    blurb: 'Read the muted findings, whether a person muted them as noise or one of the project\'s Mute Rules did, including who or which rule muted them and why, and the remediation write-ups (their solutions, evidence summaries and PR status). Muted findings are hidden from every other permission on this surface, so this is the only way an agent can tell "nothing was found" apart from "someone suppressed it". Separate from Read recon + graph on purpose: these are not reachable any other way. It also reads, for any finding, the full breakdown behind its Priority Board score and the evidence a reviewer reads.',
   },
   'recon:queue': {
     label: 'Queue scans to run later',
@@ -110,7 +110,47 @@ export const MCP_SCOPE_COPY: Record<McpScope, ScopeCopy> = {
   'triage:write': {
     label: 'Record a verdict on a finding',
     access: 'write',
-    blurb: 'Let an agent mark a finding confirmed, likely noise, or back to unreviewed, as if you had clicked it yourself. The verdict is DURABLE: it survives re-scans and stops later AI triage runs from overruling it, and the node records that it arrived over MCP. It cannot mute or unmute anything, so it is refused on a muted finding: on one a Mute Rule muted, a verdict would release the mute. Nothing on this surface can undo a verdict except another verdict.',
+    blurb: 'Let an agent mark a finding Real (which raises its score) or a false positive, or reset a verdict it made, as if you had clicked it yourself. The verdict is DURABLE: it survives re-scans and outranks any AI or agent review, and the node records that it arrived over MCP. A verdict a person made in the app can never be changed or reset from here. A verdict only ranks a finding, it never hides one, and it is refused on a muted finding: on one a Mute Rule muted, a verdict would release the mute. Muting is a separate permission.',
+  },
+  'triage:mute': {
+    label: 'Mute and unmute findings',
+    access: 'write',
+    blurb: 'Let an agent hide a finding as noise, or bring a muted one back, as if you had pressed Mute or Unmute yourself. A muted finding disappears from the graph, reports, the in-app agent and every other tool here, so an agent misled by target text could hide a real issue: every agent mute needs a reason, counts against a daily limit, is marked as the agent\'s in Muted Nodes, and can be undone there. It never hides a confirmed finding or one a person brought back.',
+    detail:
+      'A verdict ranks a finding; a mute HIDES it, from every read on this surface, the graph ' +
+      'views, the reports and RedAmon\'s own agent. That is why this is its own permission, never ' +
+      'ticked for you, and why it is bounded in code rather than by the tool\'s wording.\n\n' +
+      'What is refused whatever the agent asks: a finding a person or the agent CONFIRMED, one ' +
+      'carrying a proof or confirmed by an attack chain ("proven"); a finding a person brought back ' +
+      'by unmuting it ("kept visible"); and changing a mute that already exists, whoever made it. A ' +
+      'finding a Mute Rule muted is unmuted only when the agent explicitly asks for rule mutes, and ' +
+      'never while a recon scan is running; each such unmute becomes a standing exception on the Mute ' +
+      'Rules page. Anything refused because the project is busy (a version activation, a rules apply, ' +
+      'a scan) is refused cleanly, with nothing half-written.\n\n' +
+      'Every agent mute needs a reason, and one token may mute at most a set number of findings a ' +
+      'day (MCP_MUTE_DAILY_BUDGET, 200 by default). If the answer to a mute or unmute is lost in ' +
+      'transit, the agent is told the outcome is UNKNOWN and to check before retrying, never that the ' +
+      'service was unavailable.\n\n' +
+      'Pair it with Read suppressed findings: an agent cannot find the id of a muted finding, and so ' +
+      'cannot unmute one, without it. In Muted Nodes every agent mute is badged with the token that ' +
+      'made it, and the Muted by and Token filters list one token\'s mutes together so you can ' +
+      'review and unmute them in one go.',
+    learnMore: [
+      {
+        text: 'Hiding and revealing findings over MCP',
+        href: `${WIKI}/MCP-Server#mute_findings-and-unmute_findings-hiding-and-revealing-findings`,
+      },
+    ],
+  },
+  'triage:review': {
+    label: 'Submit evidence reviews',
+    access: 'write',
+    blurb: 'Let an agent act as a second reviewer: it reads a finding\'s evidence and corrects the factors behind its score, quoting the evidence for every correction. RedAmon checks every quote and recomputes the score itself; the agent never sets a number. Its reviews are labelled as an agent\'s on the Priority Board, are replaced by a newer review or when the evidence changes, and never override a person\'s Real or False positive.',
+  },
+  'triage:run': {
+    label: 'Start and stop triage runs',
+    access: 'write',
+    blurb: 'Let an agent re-rank the project: start a Priority Board run, or stop one before it publishes. A run rewrites the board\'s order and the CypherFix fix list, and its evidence review spends your configured model\'s budget. While it runs, version switching, Recon Delta and Mute Rules wait for it, so runs an agent starts are spaced out and capped per day.',
   },
   'graph:cypher': {
     label: 'Run raw Cypher',
@@ -120,15 +160,17 @@ export const MCP_SCOPE_COPY: Record<McpScope, ScopeCopy> = {
   'project:create': {
     label: 'Create projects and set their engagement scope',
     access: 'write',
-    blurb: 'Create a new project and fix what it points at: its target list and its engagement kind, with its settings and limits applied at creation so the first scan runs configured. Scope is written ONCE at creation and is immutable afterwards through every route on this surface, so this opens new engagements rather than re-pointing existing ones. It governs create_project alone.',
+    blurb: 'Create a new project and fix what it points at: its targeting mode and its engagement kind, with its settings and limits applied at creation so the first scan runs configured. The target domain, the address list and the targeting mode are written ONCE and are immutable afterwards through every route on this surface, so this opens new engagements rather than re-pointing existing ones. It governs create_project alone.',
     detail:
       'This is the act that binds RedAmon to a target, which is why it is its own ' +
       'checkbox rather than part of changing settings. A token with recon:settings ' +
       'can tune the engagements you already have; a token with this one can open ' +
       'new ones.\n\n' +
       'What it can never do is re-point an existing project. The target domain, the ' +
-      'address list, the domain batch and the target guardrail are refused by name on ' +
-      'a project that already exists, whatever permissions the token holds.\n\n' +
+      'address list, the targeting mode and the target guardrail are refused by name on ' +
+      'a project that already exists, whatever permissions the token holds. A batch ' +
+      'project\'s host list and the other scanners\' targets are the one exception, and ' +
+      'they need a separate permission: Change an existing project\'s target lists.\n\n' +
       'It governs create_project and nothing else. An engagement\'s LIMITS - its rate ' +
       'ceiling, its excluded hosts, its scanning window, the agent\'s denylists - are ' +
       'ordinary settings afterwards, changed with recon:settings, and reachable from ' +
@@ -150,6 +192,49 @@ export const MCP_SCOPE_COPY: Record<McpScope, ScopeCopy> = {
       'needs; a row that can be rewritten is not evidence.\n\n' +
       'It carries the id of the token that wrote it, so a revoked credential is ' +
       'still attributable afterwards.',
+  },
+  'preset:write': {
+    label: 'Manage your recon preset library',
+    access: 'write',
+    blurb: 'Create, edit and delete your own recon presets: from explicit settings, as a copy of another preset, or captured from one of your projects. Every value is validated exactly as a settings change is, and a preset never carries a target, the engagement\'s limits or record, a credential or an upload. Built-in presets cannot be changed. A preset an agent wrote is badged as such in the preset drawer, because a person applies it later.',
+    detail:
+      'A preset is a stored instruction: whoever loads it into a project later gets its ' +
+      'configuration, usually without reading all six hundred values. That is why writing ' +
+      'the library is its own checkbox, apart from tuning a project you are looking at.\n\n' +
+      'An agent cannot use a preset to reach anything a settings change could not: the same ' +
+      'bounds, the same validators, and never the scope, the engagement\'s limits or record, a ' +
+      'credential, an uploaded file or the MCP sandbox switch. Deleting a preset keeps its ' +
+      'settings in the audit log, which is the only way back.',
+  },
+  'preset:apply': {
+    label: 'Apply a recon preset to a project',
+    access: 'write',
+    blurb: 'Load a built-in preset or one of your own into a project, as the project form\'s Load preset does. It REPLACES the configuration: every preset field the preset does not name goes back to its default. It never touches the target, the engagement\'s limits, credentials or uploads, and it is refused while anything is reading or writing the project\'s graph.',
+    detail:
+      'Held together with Manage your recon preset library, this equals Change recon ' +
+      'settings over every field a preset covers: an agent can write any preset values and ' +
+      'then apply them. It is also a much larger write than one settings change - up to six ' +
+      'hundred fields in one call, and it resets whatever the preset does not name - which ' +
+      'is why it has its own checkbox.\n\n' +
+      'A dry run lists every field that would change, and which of them only because the ' +
+      'preset did not name them, before anything is written. The engagement\'s rate ceiling ' +
+      'still caps every rate at scan start whatever a preset says.',
+  },
+  'project:rescope': {
+    label: 'Change an existing project\'s target lists',
+    access: 'write',
+    blurb: 'Edit a domain-batch project\'s host list and re-point the standalone scanners (the GitHub hunt\'s organisation and repositories, the GVM target strategy, the supply-chain organisation and repository) on a project that already exists. The target domain, the IP list and the targeting mode stay locked for everyone. Widening a third-party engagement also needs Record what authorized an engagement.',
+    detail:
+      'Scope is otherwise fixed at creation for every token. This reopens eight target-list ' +
+      'fields, the ones the project form already lets a person edit, and nothing else: the ' +
+      'target domain, the address list, the targeting mode, ownership verification and the ' +
+      'target guardrail stay refused whatever the token holds.\n\n' +
+      'Every new batch root runs the permanent guardrail, and on a third-party engagement any ' +
+      'widening - a new root, a new GitHub organisation or repository, a new supply-chain ' +
+      'organisation or repository - must arrive with a new authorization record.\n\n' +
+      'Stated plainly: a token holding this AND Record what authorized an engagement can ' +
+      'record an authorization for any document digest and widen with it. That claim is ' +
+      'attributable to the token that wrote it, not verified.',
   },
   'kali:exec': {
     label: 'Shell access to the Kali sandbox',
@@ -217,24 +302,24 @@ export const SCOPE_GROUPS: ScopeGroup[] = [
   },
   {
     id: 'scan',
-    label: 'Run scans',
+    label: 'Run scans and triage',
     hint: 'Start work that writes the attack-surface graph.',
     tone: 'action',
-    scopes: ['recon:scan', 'recon:queue', 'recon:overwrite'],
+    scopes: ['recon:scan', 'recon:queue', 'recon:overwrite', 'triage:run'],
   },
   {
     id: 'write',
     label: 'Change settings and findings',
     hint: 'Writes that are not scans.',
     tone: 'action',
-    scopes: ['recon:settings', 'triage:write'],
+    scopes: ['recon:settings', 'triage:write', 'triage:mute', 'triage:review', 'preset:write', 'preset:apply'],
   },
   {
     id: 'engagement',
     label: 'Open and authorize engagements',
     hint: 'Binds RedAmon to a target, and records who said it could.',
     tone: 'action',
-    scopes: ['project:create', 'engagement:authorize'],
+    scopes: ['project:create', 'engagement:authorize', 'project:rescope'],
   },
   {
     id: 'exec',

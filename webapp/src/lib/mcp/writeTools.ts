@@ -23,15 +23,18 @@ import { orchestratorFetch } from '@/lib/orchestrator'
 import { describeLiveGraphWriters, describeScanWriters } from '@/lib/graphWriters'
 import { startFullScan } from '@/lib/startFullScan'
 import { writeAudit } from '@/lib/audit'
-import { FINGERPRINT_FIELDS, settingsFingerprint } from '@/lib/jobQueue'
+import { FINGERPRINT_FIELDS } from '@/lib/jobQueue'
+import { currentFingerprintFor } from '@/lib/jobFingerprint'
 import { assertMcpProjectAccess, requireScope } from '@/lib/mcpAuth'
 import { McpToolError } from '@/lib/mcp/errors'
 import {
+  auditableKey,
   filterReconSettings,
   projectReconSettings,
   reconSettingsSelect,
 } from '@/lib/reconSettings/filter'
 import { enforceRate, type McpContext } from '@/lib/mcp/tools'
+import { validateCrossFieldRules, writeFireteamAudit } from '@/lib/reconSettings/crossField'
 
 const RECON_ORCHESTRATOR_URL = process.env.RECON_ORCHESTRATOR_URL || 'http://localhost:8010'
 
@@ -204,15 +207,40 @@ export async function stopRecon(ctx: McpContext, projectId: string) {
   }
 }
 
+/** Queued scans whose settings fingerprint no longer matches, so the dispatcher will park them. */
+export interface QueuedJobsNeedingReview {
+  count: number
+  jobIds: string[]
+}
+
 export interface UpdateSettingsResult {
   projectId: string
   updated: Record<string, unknown>
   changed: string[]
-  /** Queued scans whose settings fingerprint no longer matches (plan 11.2). */
-  queuedJobsNeedingReview: number
+  queuedJobsNeedingReview: QueuedJobsNeedingReview
   /** Enabled schedules this change silently alters (plan 11.3). */
   affectedSchedules: { count: number; names: string[] }
   note: string
+}
+
+/**
+ * The `updatedAt` a compare-and-swap write must still find: the caller's
+ * `expectedUpdatedAt` when it passed one, otherwise the value this call read.
+ */
+export function casVersion(read: unknown, expectedUpdatedAt?: string): Date {
+  if (!expectedUpdatedAt) {
+    // Prisma drops an `undefined` filter, so a missing read would turn the
+    // compare-and-swap into an unconditional write.
+    if (!(read instanceof Date) || Number.isNaN(read.getTime())) {
+      throw new Error('[mcp] the project updatedAt was not read; refusing an unconditional write')
+    }
+    return read
+  }
+  const expected = new Date(expectedUpdatedAt)
+  if (Number.isNaN(expected.getTime())) {
+    throw new McpToolError('expectedUpdatedAt is not a valid timestamp.', 'bad_args')
+  }
+  return expected
 }
 
 export async function updateReconSettings(
@@ -242,7 +270,7 @@ export async function updateReconSettings(
   if (!filtered.ok) {
     // Named, never silently stripped: a caller who believes a setting applied
     // would act on a scan configured differently from the one they asked for.
-    throw new McpToolError(filtered.error, 'setting_rejected')
+    throw new McpToolError(filtered.error, 'setting_rejected', { rejectedKey: auditableKey(filtered.key) })
   }
 
   const before = await prisma.project.findUnique({
@@ -251,26 +279,27 @@ export async function updateReconSettings(
   })
   if (!before) throw new McpToolError('Project not found', 'not_found')
 
-  if (expectedUpdatedAt) {
-    // Optimistic: the project form PUTs the whole row, so an operator with a
-    // stale form open can revert an MCP change on their next save. This lets a
-    // caller refuse to write over a change it has not seen.
-    const expected = new Date(expectedUpdatedAt)
-    if (Number.isNaN(expected.getTime())) {
-      throw new McpToolError('expectedUpdatedAt is not a valid timestamp.', 'bad_args')
-    }
-    const { count } = await prisma.project.updateMany({
-      where: { id: projectId, updatedAt: expected },
-      data: filtered.data,
-    })
-    if (count === 0) {
-      throw new McpToolError(
-        'The project changed since you read it. Re-read get_recon_settings and retry.',
-        'conflict'
-      )
-    }
-  } else {
-    await prisma.project.update({ where: { id: projectId }, data: filtered.data })
+  // The rules over several fields that the project form's save enforces. Judged
+  // on the stored row with this change applied, so a rule over two fields sees
+  // both even when the caller sent one.
+  const crossField = await validateCrossFieldRules(
+    { ...(before as Record<string, unknown>), ...filtered.data }, Object.keys(filtered.data), ctx.token.userId
+  )
+  if (crossField) throw new McpToolError(crossField, 'setting_rejected')
+
+  // Always a compare-and-swap, on the caller's expectedUpdatedAt or else on the
+  // value just read. Without the second, two agents writing at once each read,
+  // then wrote, and the later one's audit `before` described a state that no
+  // longer existed. Never retried here: a conflict is the caller's to resolve.
+  const { count } = await prisma.project.updateMany({
+    where: { id: projectId, updatedAt: casVersion(before.updatedAt, expectedUpdatedAt) },
+    data: filtered.data,
+  })
+  if (count === 0) {
+    throw new McpToolError(
+      'The project changed since you read it. Re-read get_recon_settings and retry.',
+      'conflict'
+    )
   }
 
   const after = await prisma.project.findUnique({
@@ -279,6 +308,9 @@ export async function updateReconSettings(
   })
   const updated = projectReconSettings((after ?? {}) as Record<string, unknown>)
   const changed = Object.keys(filtered.data)
+  await writeFireteamAudit(projectId, before as Record<string, unknown>, filtered.data, {
+    userId: ctx.token.userId, source: 'mcp',
+  })
 
   void writeAudit({
     actorId: ctx.token.userId,
@@ -312,29 +344,33 @@ export async function updateReconSettings(
 
 /**
  * A settings change can park a queued scan: the dispatcher compares a
- * fingerprint taken at enqueue and moves the row to needs_review when it moved.
- * Of the fingerprinted fields only `scanModules` is allowlisted, so this can
- * happen - and an agent that was not told would sit waiting for a scan that is
- * now blocked on a human.
+ * fingerprint taken at enqueue and moves the row to needs_review when it moved,
+ * and only a person can release it. An agent that was not told would sit
+ * waiting for a scan that is now blocked on a human.
+ *
+ * Computed exactly as the dispatcher computes it. Hashing the row alone left
+ * out the auth profile, so every queued full and partial recon read as parked.
  */
-async function countQueuedJobsNeedingReview(projectId: string): Promise<number> {
+export async function countQueuedJobsNeedingReview(projectId: string): Promise<QueuedJobsNeedingReview> {
   try {
     const [project, queued] = await Promise.all([
       prisma.project.findUnique({ where: { id: projectId } }),
       prisma.jobQueue.findMany({
         where: { projectId, status: 'queued' },
-        select: { id: true, kind: true, settingsHash: true },
+        select: { id: true, kind: true, projectId: true, payload: true, settingsHash: true },
       }),
     ])
-    if (!project || queued.length === 0) return 0
+    if (!project || queued.length === 0) return { count: 0, jobIds: [] }
     const row = project as unknown as Record<string, unknown>
-    return queued.filter(job => {
-      if (!FINGERPRINT_FIELDS[job.kind]) return false
-      return settingsFingerprint(job.kind, row) !== job.settingsHash
-    }).length
+    const jobIds: string[] = []
+    for (const job of queued) {
+      if (!FINGERPRINT_FIELDS[job.kind]) continue
+      if (await currentFingerprintFor(job, row) !== job.settingsHash) jobIds.push(job.id)
+    }
+    return { count: jobIds.length, jobIds }
   } catch (err) {
     console.error('[mcp] could not evaluate queued-job fingerprints:', err)
-    return 0
+    return { count: 0, jobIds: [] }
   }
 }
 
@@ -344,7 +380,16 @@ async function countQueuedJobsNeedingReview(projectId: string): Promise<number> 
  * every future scheduled run. Report-only for now; pausing them is a product
  * decision, not this tool's to make.
  */
-async function describeAffectedSchedules(projectId: string) {
+/** What a caller refused as busy by describeLiveGraphWriters can do about it. */
+export function busyHint(busy: string): string {
+  // A flag the agent disowns is cleared before this is reached, so what is
+  // left is a confirmed session or an agent that did not answer.
+  if (busy.includes('could not be reached')) return 'The agent did not answer; check that its container is up, then retry.'
+  if (busy.includes('agent session')) return 'A person can stop the session in the RedAmon UI, or wait for it to finish.'
+  return 'Wait for it to finish.'
+}
+
+export async function describeAffectedSchedules(projectId: string) {
   try {
     const schedules = await prisma.scanSchedule.findMany({
       where: { projectId, enabled: true },

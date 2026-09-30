@@ -1,7 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
+import { requireEffectiveUser } from '@/lib/access'
 import { reconPresetSchema, extractJson, RECON_PARAMETER_CATALOG } from '@/lib/recon-preset-schema'
 import { assertSafeLlmBaseUrl, BaseUrlValidationError } from '@/lib/llm-url-guard'
+import { readFeatureModel, featureModelErrorResponse } from '@/lib/featureModels'
 
 // ---------------------------------------------------------------------------
 // POST /api/presets/generate
@@ -149,16 +151,27 @@ async function callOpenAICompatible(opts: OpenAICompatOptions): Promise<string> 
   try {
     const res = await fetch(`${opts.baseUrl}/chat/completions`, init)
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => 'Unknown error')
-      throw new Error(`LLM API returned ${res.status}: ${errText}`)
-    }
+    if (!res.ok) throw await providerError('LLM', res)
 
     const data = await res.json()
     return data.choices?.[0]?.message?.content ?? ''
   } finally {
     clearTimeout(timer)
   }
+}
+
+/**
+ * A provider's refusal as something safe to log: the status and, when the body
+ * is JSON, its short error type or code. Never the body's text: a 401 body can
+ * quote part of the key it refused.
+ */
+async function providerError(provider: string, res: Response): Promise<Error> {
+  const body: unknown = await res.json().catch(() => null)
+  const error = body && typeof body === 'object' ? (body as { error?: unknown }).error : null
+  const fields = error && typeof error === 'object' ? error as { type?: unknown; code?: unknown } : {}
+  const kind = [fields.type, fields.code].find(
+    (v): v is string => typeof v === 'string' && /^[A-Za-z0-9_.-]{1,60}$/.test(v))
+  return new Error(`${provider} API returned ${res.status}: ${kind ?? 'no error code'}`)
 }
 
 /**
@@ -194,10 +207,7 @@ async function callAnthropic(
       signal: controller.signal,
     })
 
-    if (!res.ok) {
-      const errText = await res.text().catch(() => 'Unknown error')
-      throw new Error(`Anthropic API returned ${res.status}: ${errText}`)
-    }
+    if (!res.ok) throw await providerError('Anthropic', res)
 
     const data = await res.json()
     const textBlock = data.content?.find((b: { type: string }) => b.type === 'text')
@@ -208,20 +218,23 @@ async function callAnthropic(
 }
 
 export async function POST(request: NextRequest) {
+  let savedModel = ''
   try {
-    const body = await request.json()
-    const { userId, model, prompt } = body as {
-      userId?: string
-      model?: string
-      prompt?: string
-    }
+    // The caller spends the LLM key of whichever user this resolves to, so it is
+    // the session's effective user and never a `userId` from the body.
+    const eff = await requireEffectiveUser()
+    if (eff instanceof NextResponse) return eff
+    const userId = eff.userId
 
-    if (!userId) {
-      return NextResponse.json({ error: 'userId is required' }, { status: 400 })
-    }
-    if (!model) {
-      return NextResponse.json({ error: 'model is required' }, { status: 400 })
-    }
+    // The model is the user's saved "Recon preset generator" model. A `model`
+    // in the body is ignored: a client cannot pick one the user never chose.
+    const model = await readFeatureModel(userId, 'preset_generator')
+    if (!model) return featureModelErrorResponse('model_required', 'preset_generator')
+    savedModel = model
+
+    const body = await request.json()
+    const { prompt } = body as { prompt?: string }
+
     if (!prompt || !prompt.trim()) {
       return NextResponse.json({ error: 'prompt is required' }, { status: 400 })
     }
@@ -229,10 +242,10 @@ export async function POST(request: NextRequest) {
     const resolved = resolveModel(model)
 
     if (resolved.kind === 'builtin' && resolved.providerType === 'bedrock') {
-      return NextResponse.json(
-        { error: 'AWS Bedrock is not yet supported for preset generation. Use an OpenAI, Anthropic, OpenAI-Compatible, or other provider.' },
-        { status: 400 },
-      )
+      return featureModelErrorResponse('model_unavailable', 'preset_generator', {
+        model,
+        error: 'AWS Bedrock is not yet supported for preset generation. Choose an OpenAI, Anthropic, OpenAI-Compatible, or other model.',
+      })
     }
 
     const providers = await prisma.userLlmProvider.findMany({ where: { userId } })
@@ -244,12 +257,8 @@ export async function POST(request: NextRequest) {
       // model name). The actual api model name is on the provider record.
       const provider = providers.find((p) => p.id === resolved.providerId)
       if (!provider) {
-        return NextResponse.json(
-          {
-            error: `No custom provider with id "${resolved.providerId}" found. Reconfigure the LLM Model in Agent Behaviour, or add the provider in Global Settings.`,
-          },
-          { status: 400 },
-        )
+        // The provider behind the saved model was deleted: pick another model.
+        return featureModelErrorResponse('model_unavailable', 'preset_generator', { model })
       }
 
       const apiModel = provider.modelIdentifier?.trim()
@@ -308,12 +317,10 @@ export async function POST(request: NextRequest) {
           xai: 'xAI (Grok)',
           mistral: 'Mistral AI',
         }
-        return NextResponse.json(
-          {
-            error: `No ${friendlyNames[providerType] || providerType} provider configured. Add one in Global Settings to use model "${model}".`,
-          },
-          { status: 400 },
-        )
+        return featureModelErrorResponse('model_unavailable', 'preset_generator', {
+          model,
+          error: `No ${friendlyNames[providerType] || providerType} provider configured for your preset model "${model}". Add one in Global Settings or choose another model.`,
+        })
       }
 
       if (providerType === 'anthropic') {
@@ -394,8 +401,16 @@ export async function POST(request: NextRequest) {
     }
 
     console.error('Preset generation failed:', message)
+    // A refused key or an unknown model opens the model picker. Neither the
+    // log nor the answer carries the provider's own text (`providerError`).
+    if (/API returned (401|403|404):/.test(message)) {
+      return featureModelErrorResponse('model_unavailable', 'preset_generator', {
+        model: savedModel || undefined,
+      })
+    }
+    const status = /API returned (\d{3}):/.exec(message)?.[1]
     return NextResponse.json(
-      { error: `Failed to generate preset: ${message}` },
+      { error: status ? `The model provider answered ${status}. Try again in a moment.` : 'Failed to generate preset. The details are in the webapp log.' },
       { status: 502 },
     )
   }

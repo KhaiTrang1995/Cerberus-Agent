@@ -159,6 +159,12 @@ export function checkHeader(raw: unknown): string | null {
 
 const STATUS_CODE_RE = /^[0-9]{3}(-[0-9]{3})?$/
 
+/** A GitHub account (user or organisation) name: GitHub's own rule, 39 characters at most. */
+export const REGEX_GITHUB_ORG = /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/
+
+/** A GitHub repository name, as the secret hunt compares it with `repo.name`. */
+const GITHUB_REPO_NAME_RE = /^[A-Za-z0-9._-]{1,100}$/
+
 /**
  * Container images the OPERATOR approved beyond the shipped set.
  *
@@ -230,6 +236,20 @@ function checkScalar(validator: string, value: unknown, ctx: ValidationContext):
       return typeof value === 'string' && (value === '' || /^https?:\/\/[^\s]+$/.test(value))
         ? null
         : 'must be an http or https URL'
+    case 'github_name':
+      // Empty means "none set"; anything else names one account.
+      return typeof value === 'string' && (value === '' || (value.length <= 39 && REGEX_GITHUB_ORG.test(value)))
+        ? null
+        : 'must be a GitHub account name: letters, digits and single hyphens, at most 39 characters'
+    case 'github_repo_list': {
+      // Comma-separated, empty for "every repository". Each entry is matched
+      // against a repository NAME, so an owner/ prefix or a URL would match nothing.
+      if (typeof value !== 'string') return 'must be a string'
+      const names = value.split(',').map(n => n.trim()).filter(Boolean)
+      return names.every(n => GITHUB_REPO_NAME_RE.test(n) && n !== '.' && n !== '..')
+        ? null
+        : 'must be a comma-separated list of repository names (no owner/ prefix, no URL)'
+    }
     case 'port_spec':
       return typeof value === 'string' && /^[0-9,\s-]{0,2000}$/.test(value)
         ? null
@@ -291,6 +311,9 @@ export function validateValue(
         }
         return `must be one of ${spec.values.join(', ')}`
       }
+      // A single header column's default is "" for "send no header", so clearing
+      // it must be writable. An empty ITEM in a header list stays refused.
+      if (spec.validator === 'http_header' && value === '') return null
       return checkScalar(spec.validator ?? 'free_text', value, ctx)
     }
 

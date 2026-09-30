@@ -22,6 +22,9 @@
 import { useCallback, useState } from 'react'
 import { Loader2, ScanSearch } from 'lucide-react'
 import { useAlertModal } from '@/components/ui'
+import { useFeatureModelGate } from '@/components/shared/FeatureModelGate'
+import { featureModelMessage, readFeatureModelCode } from '@/lib/llmFeatures'
+import { runOrigin, type LiveTriageRun } from './TriageRunBanner'
 import styles from './TriageRunButton.module.css'
 
 export interface TriagePreflight {
@@ -31,13 +34,18 @@ export interface TriagePreflight {
   inScope: number
   newSinceLastRun: number
   openFindings: number
+  /** The project's review budget, clamped as the run clamps it. */
   reviewBudget: number
+  /** Reviews whose evidence has not changed; the run keeps them unpaid. */
+  reviewsKept?: number
+  /** How many of those an external agent wrote over MCP. */
+  externalReviews?: number
   estimatedAiCalls: number
   estimatedReviewed: number
   pendingRemediations: number
   inProgressRemediations: number
   lastRun: { id: string; finishedAt: string | null; model: string } | null
-  liveRun: { id: string; startedAt: string } | null
+  liveRun: (Partial<LiveTriageRun> & { id: string; startedAt: string }) | null
   blockedReason: string | null
   defaultRepo: string
 }
@@ -61,6 +69,15 @@ interface TriageRunButtonProps {
   className?: string
 }
 
+/** "N reviews still valid will be kept, M of them by an external agent." */
+export function reviewsKeptLine(pre: Pick<TriagePreflight, 'reviewsKept' | 'externalReviews'>): string | null {
+  const kept = pre.reviewsKept ?? 0
+  if (kept <= 0) return null
+  const external = pre.externalReviews ?? 0
+  return `${kept} review${kept === 1 ? '' : 's'} still valid will be kept` +
+    (external > 0 ? `, ${external} of them by an external agent.` : '.')
+}
+
 function formatDate(iso: string | null | undefined): string {
   if (!iso) return 'never'
   const date = new Date(iso)
@@ -71,6 +88,7 @@ function formatDate(iso: string | null | undefined): string {
 
 export function buildDialog(pre: TriagePreflight) {
   const isFirstRun = !pre.lastRun
+  const kept = reviewsKeptLine(pre)
   return (
     <div className={styles.dialog}>
       <p>
@@ -95,7 +113,13 @@ export function buildDialog(pre: TriagePreflight) {
           for example one CVE on three hosts.
         </li>
         <li>
-          {pre.hasModelKey ? (
+          {pre.reviewBudget === 0 ? (
+            <>
+              <strong>AI review.</strong> Off for this project (its review budget
+              is 0), so the board will be ranked by the score alone and the fix
+              items will use standard text.
+            </>
+          ) : pre.hasModelKey ? (
             <>
               <strong>AI review.</strong> {pre.model || 'The configured model'} receives
               the evidence behind each score: the request and response, the file
@@ -103,8 +127,9 @@ export function buildDialog(pre: TriagePreflight) {
               likely it is to be real or how bad it would be, dispute a fact the
               evidence contradicts, or mark it as a likely false positive. Every
               quote it gives is checked, and the score is recalculated by the same
-              rules. Up to {pre.reviewBudget} findings are reviewed; findings whose
-              evidence has not changed since the last review cost nothing.
+              rules. Up to {pre.reviewBudget} findings are reviewed (this project&apos;s
+              review budget); a finding whose evidence has not changed since its last
+              review keeps that review and costs nothing.
             </>
           ) : (
             <>
@@ -118,6 +143,8 @@ export function buildDialog(pre: TriagePreflight) {
           <strong>Fix items.</strong> One per group, in the same order as the board.
         </li>
       </ol>
+
+      {kept && <p>{kept}</p>}
 
       <p>
         <strong>On the Priority Board:</strong> every finding gets a new score,
@@ -168,6 +195,7 @@ export function TriageRunButton({
   className,
 }: TriageRunButtonProps) {
   const { confirm, alertError } = useAlertModal()
+  const { ensureFeatureModel } = useFeatureModelGate()
   const [checking, setChecking] = useState(false)
   // null = nothing authoritative yet, so fall back to the caller's hint.
   const [lastRunSeen, setLastRunSeen] = useState<boolean | null>(null)
@@ -176,18 +204,32 @@ export function TriageRunButton({
     if (!projectId) return
     setChecking(true)
     try {
-      const res = await fetch(
+      const preflight = () => fetch(
         `/api/triage/preflight?projectId=${encodeURIComponent(projectId)}`
       )
+      let res = await preflight()
+      // A review budget above 0 needs the owner's "Triage review" model. The
+      // gate asks for it, then the preflight runs again so the dialog names
+      // the model that will actually review.
+      if (!res.ok && readFeatureModelCode(await res.clone().json().catch(() => null)) === 'model_required') {
+        if (!(await ensureFeatureModel('triage', { force: true }))) return
+        res = await preflight()
+      }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}))
-        throw new Error(body.error || 'The project could not be checked.')
+        const code = readFeatureModelCode(body)
+        throw new Error(code ? featureModelMessage(code) : body.error || 'The project could not be checked.')
       }
       const pre: TriagePreflight = await res.json()
       setLastRunSeen(Boolean(pre.lastRun))
 
       if (pre.blockedReason) {
-        await alertError(pre.blockedReason, 'Triage cannot start yet')
+        // A run nobody on this screen started is a mystery unless it says who did.
+        const origin = runOrigin(pre.liveRun ? { trigger: pre.liveRun.trigger ?? 'app',
+          tokenPrefix: pre.liveRun.tokenPrefix ?? null } : null)
+        await alertError(
+          origin ? `${pre.blockedReason} ${origin}.` : pre.blockedReason,
+          'Triage cannot start yet')
         return
       }
 
@@ -211,7 +253,7 @@ export function TriageRunButton({
     } finally {
       setChecking(false)
     }
-  }, [projectId, confirm, alertError, onConfirm])
+  }, [projectId, confirm, alertError, onConfirm, ensureFeatureModel])
 
   const busy = checking || running
   const previouslyRun = lastRunSeen ?? hasPreviousRun

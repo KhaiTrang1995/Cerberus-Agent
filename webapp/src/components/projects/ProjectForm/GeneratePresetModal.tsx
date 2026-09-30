@@ -4,6 +4,8 @@ import { useState, useEffect } from 'react'
 import { Loader2, AlertTriangle, Sparkles, RotateCcw } from 'lucide-react'
 import { Modal } from '@/components/ui/Modal/Modal'
 import { useToast, WikiInfoButton } from '@/components/ui'
+import { FeatureModelLine, useFeatureModelGate } from '@/components/shared/FeatureModelGate'
+import { featureModelMessage, readFeatureModelCode } from '@/lib/llmFeatures'
 import formStyles from './ProjectForm.module.css'
 import styles from './GeneratePresetModal.module.css'
 
@@ -12,7 +14,6 @@ interface GeneratePresetModalProps {
   onClose: () => void
   onSaved: () => void
   userId: string | null | undefined
-  model: string
 }
 
 /** Summarise the generated parameters for the review step. */
@@ -84,9 +85,9 @@ export function GeneratePresetModal({
   onClose,
   onSaved,
   userId,
-  model,
 }: GeneratePresetModalProps) {
   const toast = useToast()
+  const { ensureFeatureModel, fetchWithFeatureModel } = useFeatureModelGate()
 
   // Step state
   const [step, setStep] = useState<'describe' | 'review'>('describe')
@@ -117,21 +118,28 @@ export function GeneratePresetModal({
   const handleGenerate = async () => {
     if (!prompt.trim() || !userId) return
 
-    setIsGenerating(true)
     setError(null)
     setErrorDetails([])
+    // The route runs the user's saved "Recon preset generator" model and takes
+    // none from the request; this only makes sure one is saved.
+    if (!(await ensureFeatureModel('preset_generator'))) return
+    setIsGenerating(true)
 
     try {
-      const res = await fetch('/api/presets/generate', {
+      const res = await fetchWithFeatureModel('preset_generator', () => fetch('/api/presets/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, model, prompt: prompt.trim() }),
-      })
+        body: JSON.stringify({ prompt: prompt.trim() }),
+      }))
 
       const data = await res.json()
 
       if (!res.ok) {
-        setError(data.error || 'Failed to generate preset')
+        const code = readFeatureModelCode(data)
+        // model_unavailable keeps the route's own text: for Bedrock it says why.
+        setError(code && code !== 'model_unavailable'
+          ? featureModelMessage(code)
+          : data.error || 'Failed to generate preset')
         if (data.details) setErrorDetails(data.details)
         return
       }
@@ -227,7 +235,7 @@ export function GeneratePresetModal({
         <div className={styles.promptArea}>
           <div className={styles.modelBadge}>
             <Sparkles size={12} />
-            Model: {model || 'Not configured'}
+            <FeatureModelLine featureId="preset_generator" />
           </div>
 
           <textarea

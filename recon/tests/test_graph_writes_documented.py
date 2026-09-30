@@ -163,9 +163,12 @@ def test_every_property_the_code_writes_is_documented():
     for lab, props in _properties_written().items():
         if lab not in catalog.DOCUMENTED:
             continue  # label coverage is the other suite's job
+        # A leading underscore is the write-lock idiom (`SET n._prune_lock =
+        # true REMOVE n._prune_lock`): set and removed in the same statement,
+        # so it is never stored and documenting it would teach a phantom.
         gone = sorted(
             p for p in props
-            if p not in ignore and not p.startswith("triage") and p not in doc
+            if p not in ignore and not p.startswith(("triage", "_")) and p not in doc
         )
         if gone:
             missing[lab] = gone

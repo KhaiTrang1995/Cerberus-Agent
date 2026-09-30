@@ -1,0 +1,173 @@
+{
+  "batch_id": "mm-00000000",
+  "groups": [
+    {
+      "ai": true,
+      "concepts": [
+        "same_low_risk"
+      ],
+      "id": "g1",
+      "labels": [
+        "Same low-risk weakness"
+      ],
+      "members": [
+        {
+          "ai_only": false,
+          "checked": true,
+          "host": "b.example.com",
+          "key": "v-b",
+          "name": "Nginx version disclosure",
+          "node_id": "1021",
+          "quote": "<html>Welcome</html>",
+          "quote_verified": true,
+          "severity": "low",
+          "verdict": "match",
+          "why": "the same default page"
+        },
+        {
+          "ai_only": false,
+          "checked": true,
+          "host": "c.example.com",
+          "key": "v-c",
+          "name": "Nginx version disclosure",
+          "node_id": "1021",
+          "quote": "<html>Welcome</html>",
+          "quote_verified": true,
+          "severity": "low",
+          "verdict": "match",
+          "why": "the same default page"
+        },
+        {
+          "ai_only": false,
+          "checked": false,
+          "host": "a.example.com",
+          "key": "v-apache",
+          "name": "Apache version disclosure",
+          "node_id": "1056",
+          "quote": null,
+          "quote_verified": false,
+          "severity": "low",
+          "verdict": "maybe",
+          "why": "a banner, but another server"
+        }
+      ],
+      "probably_not": [],
+      "title": "Version banners",
+      "why": "informational fingerprints"
+    },
+    {
+      "ai": false,
+      "concepts": [
+        "same_detector",
+        "same_problem"
+      ],
+      "id": "g2",
+      "labels": [
+        "Same detector",
+        "Same issue elsewhere"
+      ],
+      "members": [
+        {
+          "ai_only": false,
+          "checked": true,
+          "host": "b.example.com",
+          "key": "v-b",
+          "name": "Nginx version disclosure",
+          "node_id": "1021",
+          "quote": "<html>Welcome</html>",
+          "quote_verified": true,
+          "severity": "low",
+          "verdict": "match",
+          "why": "the same default page"
+        },
+        {
+          "ai_only": false,
+          "checked": true,
+          "host": "c.example.com",
+          "key": "v-c",
+          "name": "Nginx version disclosure",
+          "node_id": "1021",
+          "quote": "<html>Welcome</html>",
+          "quote_verified": true,
+          "severity": "low",
+          "verdict": "match",
+          "why": "the same default page"
+        }
+      ],
+      "probably_not": [],
+      "title": null,
+      "why": null
+    },
+    {
+      "ai": false,
+      "concepts": [
+        "same_host"
+      ],
+      "id": "g3",
+      "labels": [
+        "Same host: a.example.com"
+      ],
+      "members": [
+        {
+          "ai_only": false,
+          "checked": false,
+          "host": "a.example.com",
+          "key": "v-apache",
+          "name": "Apache version disclosure",
+          "node_id": "1056",
+          "quote": null,
+          "quote_verified": false,
+          "severity": "low",
+          "verdict": "maybe",
+          "why": "a banner, but another server"
+        }
+      ],
+      "probably_not": [
+        {
+          "ai_only": false,
+          "checked": false,
+          "host": "a.example.com",
+          "key": "v-git",
+          "name": "Exposed .git/config",
+          "node_id": "1035",
+          "quote": null,
+          "quote_verified": false,
+          "severity": "low",
+          "verdict": "no",
+          "why": "exposed source matters more"
+        }
+      ],
+      "title": null,
+      "why": null
+    }
+  ],
+  "model": "provider/model-x",
+  "pool": {
+    "candidates": 4,
+    "clusters_sent": 3,
+    "excluded": {
+      "stale": 1
+    },
+    "total": 4,
+    "truncated": false
+  },
+  "prompt_version": "multi-mute-v3",
+  "read": {
+    "quote": "",
+    "quote_verified": false,
+    "reason": "not_worth_fixing",
+    "why": "an informational banner"
+  },
+  "seed": {
+    "host": "a.example.com",
+    "key": "v-seed",
+    "kind": "Nuclei",
+    "label": "Vulnerability",
+    "name": "Nginx version disclosure",
+    "node_id": "1042",
+    "severity": "low",
+    "source": "nuclei",
+    "triaged": false
+  },
+  "status": "ok"
+}

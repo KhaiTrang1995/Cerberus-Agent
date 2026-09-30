@@ -53,6 +53,16 @@ interface TokenRow {
   createdAt: string
 }
 
+/**
+ * Ending a token does not undo what it muted, and after a delete its prefix is
+ * the only thing left that says which token did it. Said where it is ended.
+ */
+export function muteReviewLine(t: Pick<TokenRow, 'scopes' | 'tokenPrefix'>): string | null {
+  if (!t.scopes.includes('triage:mute')) return null
+  return 'Findings this token muted stay muted. Review them in Muted Nodes with the Token filter ' +
+    `${t.tokenPrefix}; after a delete the prefix is the only record of which token did it.`
+}
+
 const EXPIRY_OPTIONS: { value: number | 'never'; label: string }[] = [
   { value: 30, label: '30 days' },
   { value: 60, label: '60 days' },
@@ -388,10 +398,12 @@ export default function McpTokensTab({ userId, onDirtyChange }: Props) {
   }
 
   const remove = async (t: TokenRow) => {
+    const mutes = muteReviewLine(t)
     const confirmed = await dangerConfirm(
       `Delete '${t.name}' (${t.tokenPrefix}…)? The token is removed from the database, not ` +
       'just switched off, so this row disappears and any agent using it stops working ' +
-      'immediately. The audit log keeps a record that it existed. This cannot be undone.',
+      'immediately. The audit log keeps a record that it existed. This cannot be undone.' +
+      (mutes ? `\n\n${mutes}` : ''),
       'Delete MCP Access Token',
     )
     if (!confirmed) return
@@ -702,6 +714,7 @@ export default function McpTokensTab({ userId, onDirtyChange }: Props) {
               {editExpiry === 'now' && (
                 <span className="formHint">
                   The agent&apos;s next call fails. Unlike revoking, you can extend it again later.
+                  {muteReviewLine(editing) && <> {muteReviewLine(editing)}</>}
                 </span>
               )}
             </div>

@@ -261,3 +261,73 @@
 .viewBtn:hover {
   opacity: 0.9;
 }
+
+.stopBtn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.stoppedIcon {
+  color: var(--text-secondary);
+}
+
+/* ── Phase steps ─────────────────────────────────────────
+   The six phases the run really reports, so a long review reads as one step
+   of six rather than an opaque spinner. */
+
+.steps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.step {
+  padding: 1px 7px;
+  border-radius: 9999px;
+  border: 1px solid var(--border-default);
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.step_done {
+  color: var(--text-secondary);
+}
+
+.step_current {
+  border-color: var(--accent-primary);
+  color: var(--text-primary);
+  font-weight: var(--font-semibold);
+}
+
+/* ── Notice and stopped ─────────────────────────────────── */
+
+.noticeBox {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0 var(--space-4) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: var(--text-xs);
+}
+
+.stoppedSection {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 0 var(--space-4) var(--space-4);
+  text-align: center;
+}
+
+.stoppedSection p {
+  margin: 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+}

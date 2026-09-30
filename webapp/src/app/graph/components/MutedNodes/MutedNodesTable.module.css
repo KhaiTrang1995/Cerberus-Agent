@@ -206,6 +206,25 @@
   font-style: italic;
 }
 
+/* An agent's mute is not a person's judgement, so it is marked as such. */
+.agentBadge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--status-warning-bg);
+  color: var(--status-warning-text);
+  font-size: 10px;
+  font-weight: var(--font-semibold);
+  white-space: nowrap;
+}
+
+.mutedReason {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-tertiary);
+  font-size: 10px;
+}
+
 .resolved {
   padding: 1px 6px;
   border-radius: var(--radius-full, 999px);
@@ -295,4 +314,17 @@
 @keyframes pulse {
   0%, 100% { opacity: 0.5; }
   50% { opacity: 1; }
+}
+
+/* A person's mute, but chosen in bulk from AI suggestions: marked apart from
+   a one-by-one mute, and apart from an agent's. */
+.multiBadge {
+  display: inline-block;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  background: var(--status-info-bg);
+  color: var(--status-info-text);
+  font-size: 10px;
+  font-weight: var(--font-semibold);
+  overflow-wrap: anywhere;
 }

@@ -1,0 +1,49 @@
+"""`agentic/feature_models.py`, the Python mirror of the webapp's feature registry."""
+from __future__ import annotations
+
+import re
+import sys
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO_ROOT / "agentic"))
+
+from feature_models import FEATURE_IDS, feature_model  # noqa: E402
+
+WEBAPP_REGISTRY = REPO_ROOT / "webapp" / "src" / "lib" / "llmFeatures.ts"
+
+
+def test_the_eight_ids():
+    assert FEATURE_IDS == (
+        "roe_parse", "preset_generator", "triage", "codefix", "command_whisperer",
+        "tradecraft_section_picker", "report_narratives", "multi_mute",
+    )
+
+
+def test_the_ids_match_the_webapp_registry():
+    """Two copies of one list drift; this is where they would."""
+    if not WEBAPP_REGISTRY.exists():
+        pytest.skip("webapp registry not present in this checkout")
+    source = WEBAPP_REGISTRY.read_text(encoding="utf-8")
+    union = re.search(r"type FeatureId\s*=((?:\s*\|?\s*'[a-z_]+')+)", source)
+    assert union, "FeatureId union not found in llmFeatures.ts"
+    webapp_ids = set(re.findall(r"'([a-z_]+)'", union.group(1)))
+    assert webapp_ids == set(FEATURE_IDS)
+
+
+def test_a_saved_model_is_returned():
+    assert feature_model({"featureModels": {"triage": "gpt-5-mini"}}, "triage") == "gpt-5-mini"
+
+
+@pytest.mark.parametrize("settings", [
+    None, {}, {"featureModels": None}, {"featureModels": []},
+    {"featureModels": {"triage": 3}}, {"featureModels": {"codefix": "x"}},
+])
+def test_unset_or_malformed_is_empty(settings):
+    assert feature_model(settings, "triage") == ""
+
+
+def test_an_unknown_feature_is_empty_even_when_stored():
+    assert feature_model({"featureModels": {"graph_query": "x"}}, "graph_query") == ""

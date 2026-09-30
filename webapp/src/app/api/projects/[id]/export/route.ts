@@ -8,6 +8,7 @@ import { Readable } from 'stream'
 import { randomUUID } from 'crypto'
 import { requireEffectiveUser, requireProjectAccess } from '@/lib/access'
 import { serializeGraphProperties } from '@/lib/graphSerialize'
+import { projectPresetForRead } from '@/lib/reconPresets/server'
 
 const RECON_OUTPUT_PATH = process.env.RECON_OUTPUT_PATH || '/data/recon-output'
 const GVM_OUTPUT_PATH = process.env.GVM_OUTPUT_PATH || '/data/gvm-output'
@@ -100,11 +101,14 @@ export async function GET(_request: NextRequest, { params }: RouteParams) {
       orderBy: { createdAt: 'asc' },
     })
 
-    // 2d. Fetch user project presets
-    const userPresets = await prisma.userProjectPreset.findMany({
+    // 2d. Fetch user project presets. Their settings leave as the PRESET FIELDS
+    // only: a preset stored before storage was filtered can carry a target or a
+    // credential, and an export is a file that travels.
+    const userPresets = (await prisma.userProjectPreset.findMany({
       where: { userId: project.userId },
       orderBy: { createdAt: 'asc' },
-    })
+      select: { name: true, description: true, settings: true, createdAt: true },
+    })).map(p => ({ ...p, settings: projectPresetForRead(p.settings).settings }))
     const muteRulesPresets = await prisma.userMuteRulesPreset.findMany({
       where: { userId: project.userId },
       orderBy: { createdAt: 'asc' },

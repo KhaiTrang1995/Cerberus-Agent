@@ -75,7 +75,10 @@ class SecretMixin:
                 """
                 MATCH (gs:GithubSecret {user_id: $uid, project_id: $pid})
                 WHERE NOT EXISTS { (:GithubPath)-[:CONTAINS_SECRET]->(gs) }
-                  AND NOT gs:Muted
+                SET gs._prune_lock = true
+                REMOVE gs._prune_lock
+                WITH gs
+                WHERE NOT gs:Muted
                   AND coalesce(gs.triage_source, '') <> 'human'
                 DETACH DELETE gs
                 RETURN count(gs) as deleted
@@ -91,7 +94,10 @@ class SecretMixin:
                 """
                 MATCH (gsf:GithubSensitiveFile {user_id: $uid, project_id: $pid})
                 WHERE NOT EXISTS { (:GithubPath)-[:CONTAINS_SENSITIVE_FILE]->(gsf) }
-                  AND NOT gsf:Muted
+                SET gsf._prune_lock = true
+                REMOVE gsf._prune_lock
+                WITH gsf
+                WHERE NOT gsf:Muted
                   AND coalesce(gsf.triage_source, '') <> 'human'
                 DETACH DELETE gsf
                 RETURN count(gsf) as deleted
@@ -115,6 +121,13 @@ class SecretMixin:
             result = session.run(
                 """
                 MATCH (gp:GithubPath {user_id: $uid, project_id: $pid})
+                // Lock the findings under the path before reading their mute,
+                // or a mute committing meanwhile orphans its finding.
+                OPTIONAL MATCH (gp)-[:CONTAINS_SECRET|CONTAINS_SENSITIVE_FILE]->(held)
+                FOREACH (x IN CASE WHEN held IS NULL THEN [] ELSE [held] END |
+                  SET x._prune_lock = true
+                  REMOVE x._prune_lock)
+                WITH DISTINCT gp
                 WHERE NOT EXISTS {
                   MATCH (gp)-[:CONTAINS_SECRET|CONTAINS_SENSITIVE_FILE]->(f)
                   WHERE f:Muted OR coalesce(f.triage_source, '') = 'human'
@@ -593,7 +606,9 @@ class SecretMixin:
 
         with self.driver.session() as session:
             # Leaves first, so an interrupted clear cannot leave a finding
-            # dangling off a deleted asset.
+            # dangling off a deleted asset. Each delete takes the finding's
+            # write lock before reading n:Muted, so a mute committing
+            # mid-statement is kept rather than deleted with the node.
             # X7: findings a person touched are NOT deleted. Deleting them
             # deleted the mute they applied and the verdict they recorded with
             # them, on every scan of this source. The rest are still cleared
@@ -604,7 +619,10 @@ class SecretMixin:
                 f"""
                 MATCH (n:MultiscannerFinding)
                 WHERE n.user_id = $uid AND n.project_id = $pid{where}
-                  AND NOT n:Muted
+                SET n._prune_lock = true
+                REMOVE n._prune_lock
+                WITH n
+                WHERE NOT n:Muted
                   AND coalesce(n.triage_source, '') <> 'human'
                 DETACH DELETE n
                 RETURN count(n) as deleted
@@ -620,6 +638,12 @@ class SecretMixin:
                     f"""
                     MATCH (n:{label})
                     WHERE n.user_id = $uid AND n.project_id = $pid{where}
+                    OPTIONAL MATCH (n)-[:HAS_FINDING]->(held:MultiscannerFinding)
+                    FOREACH (x IN CASE WHEN held IS NULL THEN [] ELSE [held] END |
+                      SET x._prune_lock = true
+                      REMOVE x._prune_lock)
+                    WITH DISTINCT n
+                    WHERE true
                       // X7: an asset still holding a finding a person touched
                       // survives, or that finding is orphaned and the board can
                       // no longer say where it was found.

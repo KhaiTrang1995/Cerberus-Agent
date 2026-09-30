@@ -43,18 +43,37 @@ class _RecordingSemaphore:
 
 
 class _FakeTriageClient:
+    driver = None
+
     def __init__(self):
         self.calls = []
         self.verdict_updates = True
         self.verdict_muted = False
+        self.verdict_busy = False
+        self.review_result = {"written": True, "label": "Vulnerability",
+                              "accepted": {"verdict": "doubtful"},
+                              "before": {"score": 70.0}, "after": {"score": 20.0}}
 
     def list_triage_findings(self, user_id, project_id, **kwargs):
         self.calls.append(("list_triage_findings", user_id, project_id, kwargs))
         return [{"id": "f1", "label": "Vulnerability"}]
 
-    def count_triage_findings(self, user_id, project_id):
-        self.calls.append(("count_triage_findings", user_id, project_id))
+    def count_triage_findings(self, user_id, project_id, **kwargs):
+        self.calls.append(("count_triage_findings", user_id, project_id, kwargs))
         return 137
+
+    def triage_facets(self, user_id, project_id):
+        self.calls.append(("triage_facets", user_id, project_id))
+        return {"total": 3, "decided_by": {"person": 1, "review": 1, "rules": 1}}
+
+    def get_triage_detail(self, user_id, project_id, node_id, label=None):
+        self.calls.append(("get_triage_detail", node_id, label))
+        return {"found": True, "row": {"id": node_id, "label": "Vulnerability",
+                                       "source": "nuclei"}, "group": [], "detector": {}}
+
+    def write_review(self, user_id, project_id, node_id, decide, combine, label=None):
+        self.calls.append(("write_review", node_id, label))
+        return self.review_result
 
     def list_muted(self, user_id, project_id, limit=None, **kwargs):
         self.calls.append(("list_muted", user_id, project_id, limit, kwargs))
@@ -68,20 +87,41 @@ class _FakeTriageClient:
         self.calls.append(("muted_facets", user_id, project_id))
         return {"total": 1, "by_person": 1, "labels": {}, "rules": []}
 
-    def unmute_findings(self, user_id, project_id, keys):
-        self.calls.append(("unmute_findings", user_id, project_id, list(keys)))
+    def unmute_findings(self, user_id, project_id, keys, skip_rule_mutes=False):
+        self.calls.append(("unmute_findings", user_id, project_id, list(keys),
+                           skip_rule_mutes))
         return {"unmuted": len(keys),
                 "items": [{"key": k, "label": "Vulnerability", "muted_by": "rule:x/abc123"}
                           for k in keys]}
 
+    def mute_finding(self, user_id, project_id, node_id, muted_by="", reason=""):
+        self.calls.append(("mute_finding", node_id, muted_by, reason))
+        return {"muted": True, "already": False, "label": "Vulnerability"}
+
+    def mute_findings_delegated(self, user_id, project_id, **kwargs):
+        self.calls.append(("mute_findings_delegated", user_id, project_id, kwargs))
+        return {"items": [
+            {"ref": "v1", "key": "v1", "label": "Vulnerability", "outcome": "muted"},
+            {"ref": "v2", "key": "v2", "label": "Vulnerability", "outcome": "proven"},
+            {"ref": "v3", "key": "v3", "label": "Secret", "outcome": "muted"},
+        ], "not_found": []}
+
+    def resolve_muted(self, user_id, project_id, **kwargs):
+        self.calls.append(("resolve_muted", user_id, project_id, kwargs))
+        return {"to_unmute": [], "skipped_rule_mute": [], "not_found": []}
+
     def set_human_verdict(self, user_id, project_id, node_id, status, reason,
-                          channel="", verdict_by="", refuse_muted=False):
+                          channel="", verdict_by="", refuse_muted=False, **kwargs):
         self.calls.append(
             ("set_human_verdict", node_id, status, reason, channel, verdict_by,
-             refuse_muted))
+             refuse_muted, kwargs))
+        if self.verdict_busy:
+            from graph_db.mixins.recon.triage_mixin import TriageWriteBusy
+            raise TriageWriteBusy("timed out")
         if self.verdict_muted and refuse_muted:
             return {"updated": False, "reason": "muted", "label": "Vulnerability"}
-        return {"updated": self.verdict_updates, "label": "Vulnerability"}
+        return {"updated": self.verdict_updates, "label": "Vulnerability",
+                "before": {"score": 40.0}, "after": {"score": 75.0}}
 
 
 class TriageGateTests(unittest.IsolatedAsyncioTestCase):
@@ -161,6 +201,20 @@ class TriageLimitTests(unittest.IsolatedAsyncioTestCase):
         await api.graph_triage(self._req())
         self.assertEqual(self._list_kwargs(), {})
 
+    async def test_filters_reach_both_the_page_and_its_total(self):
+        await api.graph_triage(self._req(decided_by="review", reviewed_via="mcp",
+                                         review_current="stale"))
+        want = {"decided_by": "review", "reviewed_via": "mcp", "review_current": "stale"}
+        self.assertEqual(self._list_kwargs(), want)
+        count = [c for c in self.client.calls if c[0] == "count_triage_findings"][0]
+        self.assertEqual(count[3], want)
+
+    async def test_an_unknown_filter_value_is_refused(self):
+        for name in ("decided_by", "reviewed_via", "review_current"):
+            resp = await api.graph_triage(self._req(**{name: "everything"}))
+            self.assertEqual(resp.status_code, 400, name)
+        self.assertEqual(self.client.calls, [])
+
     async def test_a_limit_is_passed_through(self):
         await api.graph_triage(self._req(limit=25))
         self.assertEqual(self._list_kwargs(), {"limit": 25})
@@ -204,17 +258,18 @@ class TriageOpValidationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             api._TRIAGE_OPS,
             frozenset({"mute", "unmute", "unmute_many", "list_muted", "muted_facets",
-                       "list_findings", "human_verdict", "preflight", "stop_run"}))
+                       "list_findings", "human_verdict", "preflight", "stop_run",
+                       "mute_many", "resolve_muted", "mute_batch",
+                       "finding_detail", "finding_evidence", "submit_review",
+                       "triage_facets"}))
 
     async def test_a_node_op_without_a_node_id_is_refused_before_dispatch(self):
-        for op in ("mute", "unmute", "human_verdict"):
+        for op in ("mute", "unmute", "human_verdict", "finding_detail",
+                   "finding_evidence", "submit_review"):
             resp = await api.graph_triage(
                 api.GraphTriageRequest(op=op, user_id="u1", project_id="p1"))
             self.assertEqual(resp.status_code, 400, op)
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class VerdictProvenanceTests(unittest.IsolatedAsyncioTestCase):
@@ -255,6 +310,32 @@ class VerdictProvenanceTests(unittest.IsolatedAsyncioTestCase):
             if c[0] == "set_human_verdict":
                 return c
         self.fail("set_human_verdict was never called")
+
+    async def test_the_verdict_rescores_through_combine_layers(self):
+        from cypherfix_triage.layers import combine_props
+        await api.graph_triage(self._req(label="Secret"))
+        kwargs = self._verdict_call()[7]
+        self.assertIs(kwargs["combine"], combine_props)
+        self.assertEqual(kwargs["label"], "Secret")
+        self.assertEqual(kwargs["token"], "")
+
+    async def test_an_mcp_verdict_is_stamped_with_its_token_prefix(self):
+        await api.graph_triage(self._req(source="mcp", token_prefix="rdmn_mcp_0a1b2c3d"))
+        self.assertEqual(self._verdict_call()[7]["token"], "rdmn_mcp_0a1b2c3d")
+
+    async def test_a_verdict_log_carries_no_text(self):
+        await api.graph_triage(self._req(source="mcp", reason="an agent wrote this"))
+        name, kw = self.events[0]
+        self.assertEqual(name, "finding_verdict_set")
+        self.assertNotIn("reason", kw)
+        self.assertNotIn("an agent wrote this", repr(kw))
+        self.assertEqual((kw["score_before"], kw["score_after"]), (40.0, 75.0))
+
+    async def test_a_write_timeout_is_503_busy(self):
+        self.client.verdict_busy = True
+        resp = await api.graph_triage(self._req())
+        self.assertEqual(resp.status_code, 503)
+        self.assertEqual(_body(resp)["code"], "busy")
 
     async def test_the_source_becomes_the_recorded_channel(self):
         await api.graph_triage(self._req(source="mcp"))
@@ -450,3 +531,351 @@ class GateAcknowledgementTests(unittest.IsolatedAsyncioTestCase):
         body = _body(resp)
         self.assertEqual(body["total"], 137)
         self.assertEqual(len(body["findings"]), 1)
+
+
+#: A body `mute_many` accepts, so each refusal test changes exactly one thing.
+_GOOD_MUTE_MANY = dict(
+    op="mute_many", user_id="u1", project_id="p1", source="mcp",
+    keys=["v1", "v2", "v3"], graph_ids=["812"], exempt_pairs=[["Secret", "s9"]],
+    muted_by="u1", reason="dev-only banner, confirmed by the owner",
+    token_prefix="rdmn_mcp_ab12cd34",
+)
+
+
+class _TriageEndpointCase(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.client = _FakeTriageClient()
+        self.events = []
+        self._patches = [
+            mock.patch.object(api, "_triage_graph_client", lambda: self.client),
+            mock.patch.object(api, "_graph_exec_mcp_semaphore", lambda: _RecordingSemaphore()),
+            mock.patch.object(api, "master_key_is_weak", lambda: False),
+        ]
+        for p in self._patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self._patches])
+        import session_log
+        self._log = mock.patch.object(
+            session_log, "log_event",
+            lambda name, **kw: self.events.append((name, kw)))
+        self._log.start()
+        self.addCleanup(self._log.stop)
+
+    async def call(self, **kw):
+        return await api.graph_triage(api.GraphTriageRequest(**kw))
+
+    def calls(self, name):
+        return [c for c in self.client.calls if c[0] == name]
+
+
+class RuleAttributionIsNeverForgedTests(_TriageEndpointCase):
+    """Only the Mute Rules sweep writes rule mutes, and it does not come here.
+
+    A `muted_by` starting `rule:` makes the prune delete the finding (a rule
+    mute is not a person's decision) and lets a sweep release or re-attribute
+    it, so any master-key caller could turn a mute into a deletion.
+    """
+
+    async def test_a_rule_muted_by_is_refused_on_the_ui_mute(self):
+        resp = await self.call(op="mute", user_id="u1", project_id="p1",
+                               node_id="v1", muted_by="rule:vuln.nuclei/abc123")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.calls("mute_finding"), [])
+
+    async def test_a_rule_muted_by_is_refused_on_the_mcp_mute(self):
+        resp = await self.call(**{**_GOOD_MUTE_MANY, "muted_by": "rule:secret/x"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.calls("mute_findings_delegated"), [])
+
+    async def test_a_person_mute_still_works(self):
+        resp = await self.call(op="mute", user_id="u1", project_id="p1",
+                               node_id="v1", muted_by="u1", reason="noise")
+        self.assertEqual(resp.status_code, 200)
+        self.assertIs(_body(resp)["already"], False)
+
+    async def test_an_already_muted_finding_is_not_logged_as_a_new_mute(self):
+        # The mute left it as it was; a log line would credit this person
+        # with a rule's or an agent's mute.
+        self.client.mute_finding = lambda *a, **k: {
+            "muted": True, "already": True, "label": "Vulnerability"}
+        resp = await self.call(op="mute", user_id="u1", project_id="p1",
+                               node_id="v1", muted_by="u1", reason="noise")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual([e for e in self.events if e[0] == "finding_muted"], [])
+
+    async def test_a_fresh_mute_is_still_logged(self):
+        await self.call(op="mute", user_id="u1", project_id="p1",
+                        node_id="v1", muted_by="u1", reason="noise")
+        (name, kw), = [e for e in self.events if e[0] == "finding_muted"]
+        self.assertEqual(kw["node_id"], "v1")
+
+    async def test_the_unconfigured_key_refusal_says_nothing_was_done(self):
+        # Coded, so the webapp reports the write as not done, not as an
+        # unknown outcome that keeps an MCP token's budget spent.
+        with mock.patch.object(api, "master_key_is_weak", lambda: True):
+            resp = await self.call(**_GOOD_MUTE_MANY)
+        self.assertEqual(resp.status_code, 503)
+        self.assertEqual(_body(resp)["code"], "not_configured")
+        self.assertEqual(self.calls("mute_findings_delegated"), [])
+
+    async def test_a_ui_mute_reason_is_capped(self):
+        resp = await self.call(op="mute", user_id="u1", project_id="p1",
+                               node_id="v1", reason="x" * 501)
+        self.assertEqual(resp.status_code, 400)
+
+
+class MuteManyValidationTests(_TriageEndpointCase):
+    """`mute_many` is the MCP mute, re-checked here for any master-key caller."""
+
+    async def assertRefused(self, **override):
+        resp = await self.call(**{**_GOOD_MUTE_MANY, **override})
+        self.assertEqual(resp.status_code, 400, override)
+        self.assertEqual(self.calls("mute_findings_delegated"), [], override)
+        return _body(resp)["error"]
+
+    async def test_the_good_body_is_accepted(self):
+        resp = await self.call(**_GOOD_MUTE_MANY)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(len(self.calls("mute_findings_delegated")), 1)
+
+    async def test_a_browser_source_is_refused(self):
+        await self.assertRefused(source=None)
+
+    async def test_absent_exemptions_are_refused_not_read_as_none(self):
+        # Absent would silently re-hide everything a person unmuted.
+        self.assertIn("exempt_pairs", await self.assertRefused(exempt_pairs=None))
+
+    async def test_an_empty_exemption_list_is_a_real_answer(self):
+        resp = await self.call(**{**_GOOD_MUTE_MANY, "exempt_pairs": []})
+        self.assertEqual(resp.status_code, 200)
+
+    async def test_a_malformed_pair_is_refused(self):
+        await self.assertRefused(exempt_pairs=[["Secret"]])
+
+    async def test_a_bad_token_prefix_is_refused(self):
+        for bad in (None, "", "rdmn_mcp_", "rdmn_mcp_ZZ12cd34", "rdmn_mcp_ab12cd34ef",
+                    "rdmn_mcp_ab12cd34\n[audit] forged", "rdmn_mcp_ab12cd34\n"):
+            with self.subTest(prefix=bad):
+                await self.assertRefused(token_prefix=bad)
+
+    async def test_the_reason_is_required_and_bounded(self):
+        for bad in (None, "", "  a ", "x" * 501):
+            with self.subTest(reason=(bad or "")[:10]):
+                await self.assertRefused(reason=bad)
+
+    async def test_at_least_one_ref(self):
+        await self.assertRefused(keys=[], graph_ids=[])
+
+    async def test_at_most_25_keys_and_25_node_ids(self):
+        await self.assertRefused(keys=[f"v{i}" for i in range(26)])
+        await self.assertRefused(graph_ids=[str(i) for i in range(26)])
+
+    async def test_keys_and_node_ids_over_25_together_are_refused_not_truncated(self):
+        # 25 of each used to pass here, and the mixin then muted the first 25
+        # of the combined set and reported the rest neither done nor not found.
+        self.assertIn("at most 25", await self.assertRefused(
+            keys=[f"v{i}" for i in range(13)], graph_ids=[str(i) for i in range(13)]))
+        resp = await self.call(**{**_GOOD_MUTE_MANY, "keys": [f"v{i}" for i in range(12)],
+                                  "graph_ids": [str(i) for i in range(13)]})
+        self.assertEqual(resp.status_code, 200)
+
+    async def test_graph_ids_are_digits_only(self):
+        for bad in ("12a", "-1", "1 OR 1=1", "1" * 19, "12\n", "\u00b2"):
+            with self.subTest(gid=bad):
+                await self.assertRefused(graph_ids=[bad])
+
+    async def test_the_arguments_reach_the_mixin(self):
+        await self.call(**{**_GOOD_MUTE_MANY, "reason": "  noisy banner  "})
+        kwargs = self.calls("mute_findings_delegated")[0][3]
+        self.assertEqual(kwargs["keys"], ["v1", "v2", "v3"])
+        self.assertEqual(kwargs["graph_ids"], ["812"])
+        self.assertEqual(kwargs["exempt_pairs"], [["Secret", "s9"]])
+        self.assertEqual(kwargs["muted_by"], "u1")
+        self.assertEqual(kwargs["reason"], "noisy banner")
+        self.assertEqual(kwargs["token_prefix"], "rdmn_mcp_ab12cd34")
+
+    async def test_the_write_is_acknowledged_as_gated(self):
+        resp = await self.call(**_GOOD_MUTE_MANY)
+        self.assertIs(_body(resp)["mcp_gated"], True)
+
+    async def test_one_log_line_per_finding_actually_muted(self):
+        await self.call(**_GOOD_MUTE_MANY)
+        muted = [kw for name, kw in self.events if name == "finding_muted"]
+        self.assertEqual([kw["node_id"] for kw in muted], ["v1", "v3"])
+        for kw in muted:
+            self.assertEqual(kw["channel"], "mcp")
+            self.assertEqual(kw["token_prefix"], "rdmn_mcp_ab12cd34")
+            self.assertEqual(kw["reason"], "dev-only banner, confirmed by the owner")
+
+
+class UnmuteScopeTests(_TriageEndpointCase):
+    async def test_an_mcp_unmute_skips_rule_mutes_unless_asked(self):
+        await self.call(op="unmute_many", user_id="u1", project_id="p1",
+                        keys=["v1"], source="mcp")
+        self.assertIs(self.calls("unmute_findings")[0][4], True)
+
+    async def test_an_mcp_unmute_with_the_flag_releases_rule_mutes(self):
+        await self.call(op="unmute_many", user_id="u1", project_id="p1",
+                        keys=["v1"], source="mcp", include_rule_mutes=True)
+        self.assertIs(self.calls("unmute_findings")[0][4], False)
+
+    async def test_the_ui_unmute_is_unchanged(self):
+        await self.call(op="unmute_many", user_id="u1", project_id="p1", keys=["v1"])
+        self.assertIs(self.calls("unmute_findings")[0][4], False)
+
+    async def test_the_mcp_ceiling_is_100_and_the_ui_ceiling_500(self):
+        keys = [f"v{i}" for i in range(101)]
+        resp = await self.call(op="unmute_many", user_id="u1", project_id="p1",
+                               keys=keys, source="mcp")
+        self.assertEqual(resp.status_code, 400)
+        resp = await self.call(op="unmute_many", user_id="u1", project_id="p1", keys=keys)
+        self.assertEqual(resp.status_code, 200)
+        resp = await self.call(op="unmute_many", user_id="u1", project_id="p1",
+                               keys=[f"v{i}" for i in range(501)])
+        self.assertEqual(resp.status_code, 400)
+
+    async def test_an_unmute_is_logged_with_its_channel(self):
+        await self.call(op="unmute_many", user_id="u1", project_id="p1",
+                        keys=["v1"], source="mcp")
+        (name, kw), = [e for e in self.events if e[0] == "finding_unmuted"]
+        self.assertEqual(kw["channel"], "mcp")
+
+    async def test_resolve_passes_the_flag_and_node_ids(self):
+        resp = await self.call(op="resolve_muted", user_id="u1", project_id="p1",
+                               keys=["v1"], graph_ids=["77"], source="mcp",
+                               include_rule_mutes=True)
+        self.assertIs(_body(resp)["mcp_gated"], True)
+        kwargs = self.calls("resolve_muted")[0][3]
+        self.assertEqual(kwargs, {"keys": ["v1"], "graph_ids": ["77"],
+                                  "include_rule_mutes": True})
+
+    async def test_keys_and_node_ids_over_the_ceiling_together_are_refused_not_truncated(self):
+        for op in ("resolve_muted", "unmute_many"):
+            with self.subTest(op=op):
+                resp = await self.call(op=op, user_id="u1", project_id="p1", source="mcp",
+                                       keys=[f"v{i}" for i in range(60)],
+                                       graph_ids=[str(i) for i in range(41)])
+                self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.calls("resolve_muted") + self.calls("unmute_findings"), [])
+
+    async def test_resolve_refuses_a_non_digit_node_id(self):
+        resp = await self.call(op="resolve_muted", user_id="u1", project_id="p1",
+                               graph_ids=["n1"], source="mcp")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.calls("resolve_muted"), [])
+
+
+class MutedTokenFilterTests(_TriageEndpointCase):
+    async def test_the_token_filter_reaches_the_page_and_its_count(self):
+        await self.call(op="list_muted", user_id="u1", project_id="p1",
+                        token="rdmn_mcp_ab12cd34", muted_via="mcp")
+        listed = self.calls("list_muted")[0][4]
+        counted = self.calls("count_muted")[0][3]
+        self.assertEqual(listed["token"], "rdmn_mcp_ab12cd34")
+        self.assertEqual(counted["token"], "rdmn_mcp_ab12cd34")
+        self.assertEqual(listed["muted_via"], "mcp")
+
+    async def test_a_token_that_is_not_a_prefix_is_refused(self):
+        resp = await self.call(op="list_muted", user_id="u1", project_id="p1",
+                               token="rdmn_mcp_ab12cd34ef567890")
+        self.assertEqual(resp.status_code, 400)
+        self.assertEqual(self.calls("list_muted"), [])
+
+
+class LayeredOpsTests(unittest.IsolatedAsyncioTestCase):
+    """The single-finding ops, how they are scheduled, and what they answer."""
+
+    def setUp(self):
+        self.client = _FakeTriageClient()
+        self.sem = _RecordingSemaphore()
+        self.threaded = []
+        self.events = []
+
+        async def recording_to_thread(fn, *args, **kwargs):
+            self.threaded.append(fn)
+            return fn(*args, **kwargs)
+
+        import session_log
+        from cypherfix_triage import finding_ops
+        self._patches = [
+            mock.patch.object(api, "_triage_graph_client", lambda: self.client),
+            mock.patch.object(api, "_graph_exec_mcp_semaphore", lambda: self.sem),
+            mock.patch.object(api, "master_key_is_weak", lambda: False),
+            mock.patch.object(api.asyncio, "to_thread", recording_to_thread),
+            mock.patch.object(finding_ops, "read_finding_row",
+                              lambda *a, **k: {"id": "v1", "source": "nuclei", "name": "x",
+                                               "raw_response": "body text here"}),
+            mock.patch.object(session_log, "log_event",
+                              lambda name, **kw: self.events.append((name, kw))),
+        ]
+        for p in self._patches:
+            p.start()
+        self.addCleanup(lambda: [p.stop() for p in self._patches])
+
+    def _review(self, **kw):
+        base = dict(op="submit_review", user_id="u1", project_id="p1", node_id="v1",
+                    source="mcp", token_prefix="rdmn_mcp_0a1b2c3d", evidence_hash="a" * 40,
+                    review={"verdict": "doubtful", "why": "SECRET-WHY-TEXT"})
+        base.update(kw)
+        return api.GraphTriageRequest(**base)
+
+    async def test_every_op_runs_off_the_event_loop(self):
+        """B18: a browser write waiting on a publish lock stalled every coroutine."""
+        for op, extra in (("list_findings", {}), ("triage_facets", {}),
+                          ("preflight", {}), ("finding_detail", {"node_id": "v1"}),
+                          ("human_verdict", {"node_id": "v1", "status": "confirmed"}),
+                          ("muted_facets", {})):
+            self.threaded.clear()
+            await api.graph_triage(api.GraphTriageRequest(
+                op=op, user_id="u1", project_id="p1", **extra))
+            self.assertEqual(len(self.threaded), 1, op)
+            self.assertEqual(self.sem.entered, 0, op)
+
+    async def test_every_answer_acknowledges_the_layered_publish(self):
+        for source in (None, "mcp"):
+            resp = await api.graph_triage(api.GraphTriageRequest(
+                op="list_findings", user_id="u1", project_id="p1", source=source))
+            self.assertIs(_body(resp)["layered_publish"], True)
+
+    async def test_a_review_is_the_mcp_door_only(self):
+        resp = await api.graph_triage(self._review(source=None))
+        self.assertEqual(resp.status_code, 400)
+        self.assertNotIn("write_review", [c[0] for c in self.client.calls])
+
+    async def test_a_review_needs_a_real_token_prefix_and_hash(self):
+        for bad in (dict(token_prefix="nope"), dict(evidence_hash="xyz"),
+                    dict(evidence_hash="A" * 40), dict(review=None)):
+            resp = await api.graph_triage(self._review(**bad))
+            self.assertEqual(resp.status_code, 400, bad)
+
+    async def test_a_finding_id_and_label_are_validated(self):
+        for bad in (dict(node_id="v1; MATCH (n) DETACH DELETE n"),
+                    dict(label="Domain"), dict(node_id="x" * 201)):
+            resp = await api.graph_triage(self._review(**bad))
+            self.assertEqual(resp.status_code, 400, bad)
+
+    async def test_a_review_takes_the_mcp_ceiling_and_is_logged_without_text(self):
+        resp = await api.graph_triage(self._review())
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(self.sem.entered, 1)
+        name, kw = self.events[0]
+        self.assertEqual(name, "finding_review_submitted")
+        self.assertEqual(kw["verdict"], "doubtful")
+        self.assertEqual((kw["score_before"], kw["score_after"]), (70.0, 20.0))
+        self.assertNotIn("SECRET-WHY-TEXT", repr(self.events))
+
+    async def test_a_refused_review_is_not_logged_as_one(self):
+        self.client.review_result = {"written": False, "reason": "decided_by_person"}
+        resp = await api.graph_triage(self._review())
+        self.assertEqual(_body(resp)["reason"], "decided_by_person")
+        self.assertEqual(self.events, [])
+
+    async def test_a_stop_stays_on_the_loop(self):
+        """It touches the in-process run registry."""
+        await api.graph_triage(api.GraphTriageRequest(
+            op="stop_run", user_id="u1", project_id="p1"))
+        self.assertEqual(self.threaded, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

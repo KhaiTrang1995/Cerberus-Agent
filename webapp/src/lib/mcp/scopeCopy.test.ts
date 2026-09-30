@@ -41,6 +41,17 @@ describe('the copy', () => {
     }
   })
 
+  test('the mute copy names what bounds it: a reason, a daily limit, and undo', () => {
+    const copy = MCP_SCOPE_COPY['triage:mute']
+    expect(copy.access).toBe('write')
+    expect(copy.blurb).toMatch(/daily limit/)
+    expect(copy.blurb).toMatch(/can be undone/)
+    expect(copy.blurb).toMatch(/needs a reason/)
+    expect(copy.blurb).toMatch(/never hides a confirmed finding/)
+    expect(copy.detail).toMatch(/MCP_MUTE_DAILY_BUDGET/)
+    expect(SCOPE_GROUPS.find(g => g.id === 'write')!.scopes).toContain('triage:mute')
+  })
+
   test('detail is UI-only, so it may be as long as it needs to be', () => {
     // Nothing asserts its length; this asserts it EXISTS where the UI needs it.
     expect(MCP_SCOPE_COPY['kali:exec'].detail).toBeDefined()

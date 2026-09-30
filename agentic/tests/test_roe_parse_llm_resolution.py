@@ -2,27 +2,24 @@
 
 The bug this pins, found by driving the real feature end to end:
 
-`_setup_llm_for_endpoint` read `USER_LLM_PROVIDERS` out of the orchestrator's
-loaded PROJECT settings. But a RoE document is uploaded while a project is being
-CREATED - that is the only place the UI offers the upload - so there is no
-project, and on a freshly started agent no project has ever been loaded. The
-provider list was empty, no API key resolved, and `setup_llm` raised. Every
-parse answered:
-
-    503 {"error": "LLM not available for model <whatever>"}
-
-for every model, with two working providers configured in the database.
+The endpoint read `USER_LLM_PROVIDERS` out of the orchestrator's loaded PROJECT
+settings. But a RoE document is uploaded while a project is being CREATED - that
+is the only place the UI offers the upload - so there is no project, and on a
+freshly started agent no project has ever been loaded. The provider list was
+empty, no API key resolved, and `setup_llm` raised. Every parse answered 503 for
+every model, with two working providers configured in the database.
 
 It looked like a model-routing problem and was not. It was an endpoint reading
 its credentials out of a scope it does not have.
 
-The fix: the caller's user id travels with the request and the agent fetches
-THAT user's providers. These tests hold the two halves - the request carries the
-id, and an empty project scope no longer decides the answer.
+The endpoint now builds through the shared "Models by feature" builder, which
+ALWAYS fetches the caller's own providers: a loaded project cannot lend its
+owner's keys to someone else's parse, and no loaded project is no longer fatal.
 """
 from __future__ import annotations
 
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import patch
 
@@ -37,6 +34,26 @@ WEBAPP_ROUTE = REPO_ROOT / "webapp" / "src" / "app" / "api" / "roe" / "parse" / 
 AGENT_API = REPO_ROOT / "agentic" / "api.py"
 
 
+@pytest.fixture(scope="module")
+def api():
+    @asynccontextmanager
+    async def fake_lifespan(_app):
+        yield
+
+    with patch("api.lifespan", fake_lifespan):
+        import api as api_module
+    return api_module
+
+
+class _Answer:
+    content = '{"projectName": "x"}'
+
+
+class _Llm:
+    async def ainvoke(self, _messages):
+        return _Answer()
+
+
 def test_the_request_model_carries_a_user_id():
     """Without it the agent has nothing to resolve providers against."""
     source = AGENT_API.read_text(encoding="utf-8")
@@ -48,83 +65,55 @@ def test_the_request_model_carries_a_user_id():
 def test_the_webapp_route_sends_the_caller_id():
     """It is the only party that knows who is asking."""
     source = WEBAPP_ROUTE.read_text(encoding="utf-8")
-    assert "getEffectiveUser" in source
-    assert "user_id: userId" in source or "...(userId && { user_id: userId })" in source
+    assert "getEffectiveUser" in source or "requireEffectiveUser" in source
+    assert "user_id: userId" in source or "user_id: eff.userId" in source
 
 
-def test_the_endpoint_passes_the_id_into_the_llm_setup():
-    """A id that arrives and is then dropped is the same bug with extra steps."""
-    source = AGENT_API.read_text(encoding="utf-8")
-    assert "_setup_llm_for_endpoint(requested_model, body.user_id)" in source
+def test_no_project_loaded_still_uses_the_callers_providers(api, monkeypatch):
+    """The regression itself: an empty project scope must not decide the answer."""
+    from fastapi.testclient import TestClient
 
-
-def test_an_empty_project_scope_no_longer_decides_the_answer():
-    """The regression itself, at the seam where it lived.
-
-    Project settings hold no providers - the state a fresh agent is always in -
-    and a user id is supplied. The setup must reach for that user's providers
-    rather than concluding there are none.
-    """
-    import api
-
+    monkeypatch.delenv("INTERNAL_API_KEY", raising=False)
+    monkeypatch.delenv("SCANNER_API_KEY", raising=False)
     fetched: list[str] = []
 
-    def fake_fetch(user_id: str):
+    def fake_fetch(user_id):
         fetched.append(user_id)
         return [{"providerType": "deepseek", "apiKey": "sk-test", "name": "DeepSeek"}]
 
-    with patch.object(api, "_fetch_user_llm_providers", fake_fetch), \
-         patch("project_settings.get_settings", return_value={"USER_LLM_PROVIDERS": []}), \
-         patch("orchestrator_helpers.llm_setup.setup_llm") as setup:
-        api._setup_llm_for_endpoint("deepseek/deepseek-chat", "user-123")
+    with patch.object(api, "fetch_user_providers", fake_fetch), \
+         patch("orchestrator_helpers.llm_setup.setup_llm", return_value=_Llm()) as setup, \
+         patch.object(api, "_prompt_skew", return_value=None):
+        res = TestClient(api.app).post("/roe/parse", json={
+            "text": "scope: example.com", "model": "deepseek/deepseek-chat",
+            "user_id": "user-123",
+        })
 
+    assert res.status_code == 200, res.text
     assert fetched == ["user-123"], "the caller's providers were never fetched"
     assert setup.call_args.kwargs.get("deepseek_api_key") == "sk-test"
+    assert res.json()["model_used"] == "deepseek/deepseek-chat"
 
 
-def test_a_loaded_project_scope_still_wins_and_costs_no_fetch():
-    """When a project IS loaded its providers are already correct.
+def test_a_loaded_project_never_lends_its_keys(api, monkeypatch):
+    """Whatever project the agent last loaded belongs to someone; the parse
+    runs on the CALLER's keys even when that project's list is non-empty."""
+    from fastapi.testclient import TestClient
 
-    Fetching again would add a webapp round trip to every agent-side call for no
-    new information.
-    """
-    import api
+    monkeypatch.delenv("INTERNAL_API_KEY", raising=False)
+    monkeypatch.delenv("SCANNER_API_KEY", raising=False)
+    with patch.object(api, "fetch_user_providers",
+                      return_value=[{"providerType": "kimi", "apiKey": "sk-caller"}]), \
+         patch("project_settings.get_settings", return_value={"USER_LLM_PROVIDERS": [
+             {"providerType": "kimi", "apiKey": "sk-someone-else"}]}), \
+         patch("orchestrator_helpers.llm_setup.setup_llm", return_value=_Llm()) as setup, \
+         patch.object(api, "_prompt_skew", return_value=None):
+        TestClient(api.app).post("/roe/parse", json={
+            "text": "t", "model": "kimi/kimi-k2", "user_id": "user-123"})
 
-    fetched: list[str] = []
-
-    with patch.object(api, "_fetch_user_llm_providers", lambda u: fetched.append(u) or []), \
-         patch(
-             "project_settings.get_settings",
-             return_value={"USER_LLM_PROVIDERS": [
-                 {"providerType": "kimi", "apiKey": "sk-loaded", "name": "Kimi"}
-             ]},
-         ), \
-         patch("orchestrator_helpers.llm_setup.setup_llm") as setup:
-        api._setup_llm_for_endpoint("kimi/kimi-k2", "user-123")
-
-    assert fetched == [], "re-fetched providers the loaded project already had"
-    assert setup.call_args.kwargs.get("kimi_api_key") == "sk-loaded"
+    assert setup.call_args.kwargs.get("kimi_api_key") == "sk-caller"
 
 
-def test_no_user_id_means_no_fetch_rather_than_a_crash():
-    """An older client that does not send the id must still behave as before."""
-    import api
-
-    with patch.object(api, "_fetch_user_llm_providers") as fetch, \
-         patch("project_settings.get_settings", return_value={"USER_LLM_PROVIDERS": []}), \
-         patch("orchestrator_helpers.llm_setup.setup_llm"):
-        api._setup_llm_for_endpoint("deepseek/deepseek-chat", None)
-
-    fetch.assert_not_called()
-
-
-def test_an_unreachable_webapp_is_an_empty_list_not_an_exception():
-    """The caller turns an empty list into a 503 naming the model.
-
-    A raise here would surface as a 500 with a stack trace instead, which tells
-    an operator nothing about the missing provider.
-    """
-    import api
-
-    with patch("requests.get", side_effect=OSError("webapp down")):
-        assert api._fetch_user_llm_providers("user-123") == []
+def test_the_old_project_scoped_helper_is_gone(api):
+    """Its fallback to the loaded project's providers is the cross-user leak."""
+    assert not hasattr(api, "_setup_llm_for_endpoint")

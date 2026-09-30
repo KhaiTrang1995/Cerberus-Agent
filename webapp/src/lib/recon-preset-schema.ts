@@ -278,7 +278,6 @@ export const reconPresetSchema = z.object({
   graphqlRateLimit: int,
   graphqlConcurrency: int,
   graphqlAuthType: str,
-  graphqlAuthValue: str,
   graphqlAuthHeader: str,
   graphqlEndpoints: str,
   graphqlDepthLimit: int,
@@ -431,7 +430,6 @@ export const reconPresetSchema = z.object({
   vhostSniUseDefaultWordlist: bool,
   vhostSniUseGraphCandidates: bool,
   vhostSniMaxCandidatesPerIp: int,
-  vhostSniCustomWordlist: str,
 
   // -- tlsx TLS Certificate Grab --
   tlsxEnabled: bool,
@@ -825,7 +823,6 @@ export const RECON_PARAMETER_CATALOG = `
 - graphqlRateLimit: integer - Requests per second, capped by ROE_GLOBAL_MAX_RPS (default 10)
 - graphqlConcurrency: integer - Parallel endpoint tests (default 5)
 - graphqlAuthType: string - "", "bearer", "basic", "cookie", "custom"
-- graphqlAuthValue: string - Auth credential (token / user:pass / cookie string)
 - graphqlAuthHeader: string - Header name when graphqlAuthType = "custom"
 - graphqlEndpoints: string - Comma-separated custom GraphQL endpoints (empty = auto-discover)
 - graphqlDepthLimit: integer - Max introspection query nesting depth (default 10)
@@ -979,7 +976,6 @@ export const RECON_PARAMETER_CATALOG = `
 - vhostSniUseDefaultWordlist: boolean - Use the bundled vhost-common.txt wordlist (~2,300 admin/dev/staging/internal/modern-stack prefixes, expanded as {prefix}.{target_apex}). Default true.
 - vhostSniUseGraphCandidates: boolean - Pull hostnames from existing Subdomain, ExternalDomain, TLS SAN list, CNAME targets and reverse-DNS PTR records resolving to each target IP. Highest signal source. Default true.
 - vhostSniMaxCandidatesPerIp: integer - Hard cap on candidates per IP to bound run time. Default 2000.
-- vhostSniCustomWordlist: string - Optional newline-separated custom prefixes/hostnames (per-project file/text). Bare prefixes expand as {prefix}.{target_apex}; full hostnames are used as-is. Default "".
 - tlsxEnabled: boolean - Master switch for the tlsx TLS certificate grab (GROUP 3.6). One TLS handshake per open non-HTTP port. Active but quiet; net-zero on the 5 SSL ports httpx already dials. Default TRUE. Passive/zero-packet presets MUST set this false.
 - tlsxScanMode: string - TLS stack: ctls|ztls|openssl|auto. Default auto.
 - tlsxConcurrency: integer - Concurrent TLS connections. Default 50 (tlsx's own default is 300).

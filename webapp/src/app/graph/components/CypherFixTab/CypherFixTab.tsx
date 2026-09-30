@@ -9,6 +9,7 @@ import { RemediationDashboard } from './RemediationDashboard/RemediationDashboar
 import { RemediationDetail } from './RemediationDetail/RemediationDetail'
 import { DiffViewer } from './DiffViewer/DiffViewer'
 import { TriageProgress } from './TriageProgress/TriageProgress'
+import { TriageRunBanner } from '@/components/triage/TriageRunBanner'
 import type { Remediation, RemediationSeverity, RemediationStatus } from '@/lib/cypherfix-types'
 import styles from './CypherFixTab.module.css'
 
@@ -20,6 +21,8 @@ interface CypherFixTabProps {
   triage: UseCypherFixTriageWSReturn
   showTriageProgress: boolean
   onStartTriage: () => void
+  /** Open the progress panel over a run that is only shown as the banner. */
+  onOpenTriageProgress?: () => void
   onCloseTriageProgress: () => void
 }
 
@@ -29,6 +32,7 @@ export function CypherFixTab({
   triage,
   showTriageProgress,
   onStartTriage,
+  onOpenTriageProgress,
   onCloseTriageProgress,
 }: CypherFixTabProps) {
   const [subView, setSubView] = useState<SubView>('dashboard')
@@ -96,9 +100,31 @@ export function CypherFixTab({
 
   const showEmpty = !isLoading && remediations.length === 0 && !severityFilter && !statusFilter
 
+  const running = triage.status === 'running'
+  // A live run this page is not showing in the panel: one re-attached after a
+  // reload, or started on the Priority Board or over MCP.
+  const banner = running && !showTriageProgress ? (
+    <TriageRunBanner
+      projectId={projectId || null}
+      label="Triage running"
+      phase={triage.currentPhase}
+      hint="The fix list updates when it publishes; you can leave this page"
+      notice={triage.notice}
+      onDetails={onOpenTriageProgress}
+      onStop={triage.stopTriage}
+    />
+  ) : null
+
   const renderContent = () => {
     if (showEmpty) {
-      return <EmptyState onStartTriage={onStartTriage} projectId={projectId || null} />
+      return (
+        <EmptyState
+          onStartTriage={onStartTriage}
+          projectId={projectId || null}
+          running={running}
+          banner={banner}
+        />
+      )
     }
     if (subView === 'diffviewer' && selectedRemediation) {
       return (
@@ -140,6 +166,8 @@ export function CypherFixTab({
         onDelete={handleDelete}
         onRefresh={refetch}
         onStartTriage={onStartTriage}
+        running={running}
+        banner={banner}
         projectId={projectId}
         userId={userId}
       />
@@ -156,6 +184,7 @@ export function CypherFixTab({
         findings={triage.findings}
         thinking={triage.thinking}
         error={triage.error}
+        notice={triage.notice}
         status={triage.status}
         onClose={onCloseTriageProgress}
         onStop={triage.stopTriage}

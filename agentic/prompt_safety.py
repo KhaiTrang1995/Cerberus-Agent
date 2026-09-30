@@ -69,6 +69,39 @@ def wrap_untrusted_inline(text, label: str = "PREVIEW") -> str:
     return f"<<<UNTRUSTED_{label} id={nonce}>>>{body}<<<END_UNTRUSTED_{label} id={nonce}>>>"
 
 
+#: The envelope `webapp/src/lib/agentQueryEnvelope.ts` wraps a node-scoped
+#: question in ("Ask agent about this node").
+_NODE_CONTEXT_PREFIX = "[Graph Node Context: "
+_USER_QUERY_MARKER = "\n\n[User Query]\n"
+
+
+def fence_node_context(message):
+    """Fence the node-context section of a node-scoped question as untrusted.
+
+    "Ask agent about this node" sends the node's properties as plain user text,
+    and those are scanner output (and, since triage reviews over MCP, text an
+    external agent wrote). The agent has tools, so that section is wrapped
+    like tool output; the person's own request after `[User Query]` is not.
+    `lastIndexOf` semantics, as in the webapp: a property may itself contain
+    the marker text, and the request is always the final section.
+
+    Anything that is not exactly that envelope is returned unchanged.
+    """
+    if not isinstance(message, str) or not message.startswith(_NODE_CONTEXT_PREFIX):
+        return message
+    header_end = message.find("]\n", len(_NODE_CONTEXT_PREFIX))
+    marker_at = message.rfind(_USER_QUERY_MARKER)
+    if header_end == -1 or marker_at == -1 or marker_at < header_end:
+        return message
+    # The label is the node's name, built from its properties, so it is as
+    # untrusted as the context: it goes inside the fence, and the header that
+    # stays outside says only what the section is.
+    label = message[len(_NODE_CONTEXT_PREFIX):header_end]
+    context = message[header_end + 2:marker_at]
+    fenced = wrap_untrusted(f"Node: {label}\n{context}", "GRAPH_NODE_CONTEXT")
+    return f"[Graph Node Context]\n{fenced}{message[marker_at:]}"
+
+
 # One standing instruction, added once to the agent's system prompt, that tells the
 # model how to treat the markers above. Kept short and unambiguous.
 UNTRUSTED_OUTPUT_GUIDANCE = """\

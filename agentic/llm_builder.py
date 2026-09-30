@@ -1,0 +1,175 @@
+"""Build an LLM for one user and one exact model.
+
+Used by every "Models by feature" caller: the RoE parse, report narratives and
+command whisperer endpoints, Multi mute, and the tradecraft section picker. Two
+things differ from the older `_build_llm_with_model_for_user` in `api.py`, which
+keeps serving the recon planners unchanged:
+
+- A provider list that cannot be fetched RAISES `ProvidersUnreachable`. The old
+  helper swallowed the failure and built with no keys, so a webapp hiccup read
+  as "your model is broken" and sent the person to re-pick a model that works.
+- A `custom/<id>` model resolves to that exact provider or to none. The old
+  `_pick_custom_provider` falls back to the first custom provider, so deleting
+  a provider silently moved the feature onto a different endpoint and key.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import urllib.parse
+
+logger = logging.getLogger(__name__)
+
+PROVIDER_FETCH_TIMEOUT_S = 10
+
+#: Fixed text for a model that could not be built or called. The provider's own
+#: message never reaches the browser: a 401 body can quote part of the key.
+MODEL_UNAVAILABLE_MESSAGE = "Your model {model} could not be used"
+
+_BUILTIN_PROVIDERS = ("openai", "anthropic", "openrouter", "bedrock", "deepseek",
+                      "gemini", "glm", "kimi", "qwen", "xai", "mistral")
+
+#: Provider answers that mean "this model, with these keys, cannot be used" -
+#: a bad or revoked key, no access, or a model id the provider does not have.
+#: Anything else (rate limit, a 5xx, a dropped connection) is transient and
+#: must not send the person to pick another model.
+_UNAVAILABLE_STATUS = frozenset({401, 403, 404})
+_UNAVAILABLE_CLASS_NAMES = frozenset({
+    "AuthenticationError", "PermissionDeniedError", "NotFoundError",
+    # langchain_core's provider-neutral family, raised by newer integrations.
+    "ModelAuthenticationError", "ModelPermissionDeniedError", "ModelNotFoundError",
+})
+_UNAVAILABLE_AWS_CODES = frozenset({
+    "AccessDeniedException", "UnrecognizedClientException",
+    "ResourceNotFoundException", "ExpiredTokenException",
+    "InvalidSignatureException",
+})
+#: Gemini answers a bad key with a plain 400 INVALID_ARGUMENT; only the reason
+#: tells it from any other bad request.
+_BAD_KEY_MARKERS = ("API_KEY_INVALID", "API key not valid")
+#: Bedrock answers an unknown model id with the generic ValidationException,
+#: which also covers transient-looking request errors, so the message decides.
+_BAD_MODEL_ID_MARKER = "model identifier is invalid"
+
+
+class ProvidersUnreachable(RuntimeError):
+    """The user's provider list could not be loaded from the webapp."""
+
+
+def fetch_user_providers(user_id: str) -> list:
+    """This user's LLM providers, with keys. Raises `ProvidersUnreachable`.
+
+    Blocking (requests); async callers run it through `asyncio.to_thread`.
+    """
+    import requests
+
+    if not user_id:
+        raise ValueError("user_id is required")
+    webapp_url = os.environ.get("WEBAPP_API_URL", "http://webapp:3000").rstrip("/")
+    key = os.environ.get("INTERNAL_API_KEY", "")
+    url = (f"{webapp_url}/api/users/{urllib.parse.quote(str(user_id), safe='')}"
+           f"/llm-providers?internal=true")
+    try:
+        resp = requests.get(url, headers={"X-Internal-Key": key},
+                            timeout=PROVIDER_FETCH_TIMEOUT_S)
+        resp.raise_for_status()
+        providers = resp.json()
+    except Exception as exc:                                      # noqa: BLE001
+        raise ProvidersUnreachable(exc.__class__.__name__) from exc
+    if providers is None:
+        return []
+    if not isinstance(providers, list):
+        raise ProvidersUnreachable("the provider list is not a list")
+    return providers
+
+
+def exact_custom_provider(providers: list, model: str):
+    """The provider a `custom/<id>` model names, or None. Never another one."""
+    if not model or not model.startswith("custom/"):
+        return None
+    wanted = model[len("custom/"):]
+    for provider in providers or []:
+        if isinstance(provider, dict) and provider.get("id") == wanted:
+            return provider
+    return None
+
+
+def build_llm_from_providers(model: str, providers: list):
+    """An LLM for exactly `model`, keyed from `providers`. Raises on any failure.
+
+    A `custom/<id>` whose provider is gone raises in `setup_llm` rather than
+    falling back to another custom provider.
+    """
+    from orchestrator_helpers.llm_setup import setup_llm, _resolve_provider_key
+
+    if not model:
+        raise ValueError("a model is required")
+    keys = {name: (_resolve_provider_key(providers or [], name) or {})
+            for name in _BUILTIN_PROVIDERS}
+    bedrock = keys["bedrock"]
+    return setup_llm(
+        model,
+        openai_api_key=keys["openai"].get("apiKey"),
+        anthropic_api_key=keys["anthropic"].get("apiKey"),
+        openrouter_api_key=keys["openrouter"].get("apiKey"),
+        deepseek_api_key=keys["deepseek"].get("apiKey"),
+        gemini_api_key=keys["gemini"].get("apiKey"),
+        glm_api_key=keys["glm"].get("apiKey"),
+        kimi_api_key=keys["kimi"].get("apiKey"),
+        qwen_api_key=keys["qwen"].get("apiKey"),
+        xai_api_key=keys["xai"].get("apiKey"),
+        mistral_api_key=keys["mistral"].get("apiKey"),
+        aws_access_key_id=bedrock.get("awsAccessKeyId"),
+        aws_secret_access_key=bedrock.get("awsSecretKey"),
+        aws_bearer_token=bedrock.get("awsBearerToken"),
+        aws_region=bedrock.get("awsRegion") or "us-east-1",
+        custom_llm_config=exact_custom_provider(providers, model),
+    )
+
+
+def is_model_unavailable_error(exc: BaseException) -> bool:
+    """True when a call failed because the model or its key cannot be used.
+
+    Walks the cause chain: LangChain wraps SDK errors, and the SDKs wrap the
+    HTTP response, so the status can sit two levels down.
+    """
+    seen = set()
+    current = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if type(current).__name__ in _UNAVAILABLE_CLASS_NAMES:
+            return True
+        status = getattr(current, "status_code", None)
+        if status is None:
+            status = getattr(getattr(current, "response", None), "status_code", None)
+        if status is None:
+            # google-genai errors carry the HTTP status as `.code`.
+            code = getattr(current, "code", None)
+            status = code if isinstance(code, int) and not isinstance(code, bool) else None
+        if status in _UNAVAILABLE_STATUS:
+            return True
+        if status == 400 and any(marker in str(current) for marker in _BAD_KEY_MARKERS):
+            return True
+        response = getattr(current, "response", None)
+        if isinstance(response, dict):
+            error = response.get("Error") or {}
+            code = error.get("Code")
+            if code in _UNAVAILABLE_AWS_CODES:
+                return True
+            if (code == "ValidationException"
+                    and _BAD_MODEL_ID_MARKER in str(error.get("Message") or "").lower()):
+                return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def log_provider_error(feature: str, model: str, exc: BaseException) -> None:
+    """Log a provider failure with secrets redacted; the browser gets a fixed text."""
+    try:
+        from logging_config import redact_text
+        detail = redact_text(str(exc))
+    except Exception:                                             # noqa: BLE001
+        detail = exc.__class__.__name__
+    logger.warning(f"{feature}: model {model} failed: "
+                   f"{exc.__class__.__name__}: {detail[:500]}")

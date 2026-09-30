@@ -62,6 +62,10 @@ export const PRESET_EXCLUDED_FIELDS: ReadonlySet<string> = new Set([
   ...fieldsWhere(f => f.tool === 'engagement').map(f => f.key),
   ...fieldsWhere(f => f.deny_reason === 'upload-managed').map(f => f.key),
   ...fieldsWhere(f => f.read_deny_reason === 'credential').map(f => f.key),
+  // A preset that does not name one of these resets it to its default, and the
+  // default of `mcpKaliExecEnabled` is ON: carrying it let applying any preset
+  // quietly re-enable the MCP sandbox a person had switched off.
+  ...fieldsWhere(f => f.deny_reason === 'escalation' || f.deny_reason === 'not-tuning').map(f => f.key),
   // reconPresetId is internal too, but it is what the "Started from" badge is
   // restored from when a user preset is loaded, so it travels.
   ...fieldsWhere((f, key) =>
@@ -80,7 +84,7 @@ export const PRESET_FIELD_KEYS: readonly string[] = fieldKeys().filter(k => !PRE
  * provider for, which is why the create form makes them pick these two
  * explicitly. Built-in and AI-generated presets never name them.
  */
-const KEPT_WHEN_ABSENT: ReadonlySet<string> = new Set(['agentOpenaiModel', 'aiPipelineModel'])
+export const KEPT_WHEN_ABSENT: ReadonlySet<string> = new Set(['agentOpenaiModel', 'aiPipelineModel'])
 
 type Lookup = { found: true; value: unknown } | { found: false }
 
@@ -193,26 +197,88 @@ export function pickPresetFields(data: Record<string, unknown>): Record<string, 
  * `loadedPreset` column). The badge shows `name` only while the saved settings
  * still hash to `fingerprint`, so ANY later change to a preset field hides it,
  * whichever door it came through: the form, a workflow toggle, or MCP.
+ *
+ * `presetId` and `source` say which preset it was, so renaming a user preset
+ * renames its badges and deleting one clears them. A badge written before they
+ * existed carries neither and keeps its name.
  */
 export interface LoadedPreset {
   name: string
   fingerprint: string
+  presetId?: string
+  source?: 'builtin' | 'user'
 }
 
 export function readLoadedPreset(value: unknown): LoadedPreset | null {
   if (!value || typeof value !== 'object') return null
-  const { name, fingerprint } = value as Record<string, unknown>
-  return typeof name === 'string' && typeof fingerprint === 'string' ? { name, fingerprint } : null
+  const { name, fingerprint, presetId, source } = value as Record<string, unknown>
+  if (typeof name !== 'string' || typeof fingerprint !== 'string') return null
+  return {
+    name,
+    fingerprint,
+    ...(typeof presetId === 'string' ? { presetId } : {}),
+    ...(source === 'builtin' || source === 'user' ? { source } : {}),
+  }
 }
 
-/** A digest of every preset field in `data`, missing ones at their Prisma default. */
+const FINGERPRINT_PREFIX = 'v2:'
+
+function atRegistryDefault(key: string, value: unknown): boolean {
+  const d = registryDefault(key)
+  return d.found && canonicalJson(d.value) === canonicalJson(value)
+}
+
+/**
+ * A digest of every preset field in `data` that is NOT at its Prisma default,
+ * missing ones counting as their default.
+ *
+ * Leaving the defaults out is what lets a badge outlive a registry change: a
+ * column added later reaches every existing row at its default, and a column
+ * that stops being a preset field only matters where the project held something
+ * else. A digest of every field changed with each of those and hid every badge
+ * at once, as removing two fields from presets did.
+ */
 export function presetFingerprint(data: Record<string, unknown>): string {
   const settings = extractPresetSettings(data)
-  return cyrb53(PRESET_FIELD_KEYS.map(k => `${k}=${canonicalJson(settings[k])}`).join('\n'))
+  const lines = [...PRESET_FIELD_KEYS].sort()
+    .filter(k => !atRegistryDefault(k, settings[k]))
+    .map(k => `${k}=${canonicalJson(settings[k])}`)
+  return FINGERPRINT_PREFIX + cyrb53(lines.join('\n'))
+}
+
+/**
+ * The two preset fields that became escalation settings and left presets.
+ * The unversioned digest a badge saved before then covered them too.
+ */
+const LEFT_PRESETS = new Set(['mcpKaliExecEnabled', 'updateGraphDb'])
+
+/**
+ * The unversioned digests a badge written before `presetFingerprint` skipped
+ * defaults may hold: every preset field in registry order, over the field set
+ * of the time. Accepting them is the backfill: those badges still show, and the
+ * next preset load writes the current form.
+ */
+function unversionedFingerprints(data: Record<string, unknown>): string[] {
+  const valueOf = (k: string) => {
+    if (hasOwn(data, k)) return data[k]
+    const d = registryDefault(k)
+    return d.found ? d.value : undefined
+  }
+  const digest = (keys: readonly string[]) =>
+    cyrb53(keys.map(k => `${k}=${canonicalJson(valueOf(k))}`).join('\n'))
+  const current = new Set(PRESET_FIELD_KEYS)
+  return [
+    digest(PRESET_FIELD_KEYS),
+    digest(fieldKeys().filter(k => current.has(k) || LEFT_PRESETS.has(k))),
+  ]
 }
 
 /** The name of the loaded preset, if `data` still holds exactly the settings it produced. */
 export function appliedPresetName(data: Record<string, unknown>): string | null {
   const loaded = readLoadedPreset(data.loadedPreset)
-  return loaded && presetFingerprint(data) === loaded.fingerprint ? loaded.name : null
+  if (!loaded) return null
+  const matches = loaded.fingerprint.startsWith(FINGERPRINT_PREFIX)
+    ? presetFingerprint(data) === loaded.fingerprint
+    : unversionedFingerprints(data).includes(loaded.fingerprint)
+  return matches ? loaded.name : null
 }

@@ -51,7 +51,7 @@ from typing import Any, Iterable, Optional
 
 #: Bump on ANY change to a table, a threshold or a rule below. Stored with each
 #: run so two runs are only comparable when this matches.
-SCORE_MODEL_VERSION = "v3.1.0"
+SCORE_MODEL_VERSION = "v3.2.0"
 
 
 # ===========================================================================
@@ -612,6 +612,7 @@ class ScoreResult:
     proven: bool = False
     host: str = ""
     warnings: list = field(default_factory=list)
+    tier_inputs: "TierInputs" = None
 
     @property
     def explanation(self) -> str:
@@ -655,11 +656,14 @@ RESOLVED_STATES = frozenset({STATE_FIXED, STATE_GONE, STATE_INACTIVE})
 # State (3.2.2): decided before anything is scored
 # ===========================================================================
 def finding_state(finding: dict, facts: ProjectFacts) -> tuple[str, str]:
-    """(state, why). Only `open` findings are ranked."""
-    if _lower(finding.get("triage_status")) == "likely_noise" and \
-            _lower(finding.get("triage_source")) in ("human", "ai"):
-        return STATE_FALSE_POSITIVE, "marked a false positive"
+    """(state, why). Only `open` findings are ranked.
 
+    Never `false_positive`: that is an outcome of `combine_layers` (a person's
+    decision or a valid review), not a fact about the finding. A legacy node
+    still carrying `triage_status = 'likely_noise'` with `triage_source = 'ai'`
+    is therefore read as open here, and its old verdict comes back, if at all,
+    as an adopted built-in review.
+    """
     if _truthy(finding.get("remediated")):
         return STATE_FIXED, "the scanner confirmed it is patched"
 
@@ -1173,9 +1177,35 @@ def reach(finding: dict, facts: ProjectFacts, cvss: Cvss) -> Factor:
 # ===========================================================================
 # Tiers (3.2.7): fixed rules, checked top to bottom
 # ===========================================================================
-def tier_for(finding: dict, facts: ProjectFacts, intel: dict,
-             c: float, l: float, i: float, r: float) -> tuple[str, str]:
-    if is_proven(finding, facts):
+@dataclass
+class TierInputs:
+    """What the tier rules read besides the four factors.
+
+    Stored on the node as `triage_tier_inputs`, so a finding can be re-tiered
+    after a verdict or a review without re-reading the graph. `validated` is not
+    here: a validated credential already makes `is_proven` true.
+    """
+    proven: bool = False
+    kev: bool = False
+
+    def as_dict(self) -> dict:
+        return {"proven": bool(self.proven), "kev": bool(self.kev)}
+
+    @classmethod
+    def from_dict(cls, value) -> "TierInputs":
+        value = value if isinstance(value, dict) else {}
+        return cls(proven=bool(value.get("proven")), kev=bool(value.get("kev")))
+
+
+def tier_inputs(finding: dict, facts: ProjectFacts, intel: dict) -> TierInputs:
+    cves = [str(x).upper() for x in _as_list((finding or {}).get("cve_ids"))]
+    kev = _truthy((finding or {}).get("cisa_kev")) or _best_cve_intel(cves, intel or {}).get("kev")
+    return TierInputs(proven=is_proven(finding or {}, facts), kev=bool(kev))
+
+
+def tier_rule(inputs: TierInputs, c: float, l: float, i: float, r: float) -> tuple[str, str]:
+    """The tier rules, from stored inputs rather than the graph."""
+    if inputs.proven:
         return "T1", "proven"
 
     # Guarantee 2. Without this, a KEV-listed CVE whose own vector says
@@ -1185,13 +1215,8 @@ def tier_for(finding: dict, facts: ProjectFacts, intel: dict,
     if i <= SEVERITY_IMPACT["info"]:
         return "T4", "nothing here has any impact"
 
-    cves = [str(x).upper() for x in _as_list(finding.get("cve_ids"))]
-    kev = _truthy(finding.get("cisa_kev")) or _best_cve_intel(cves, intel).get("kev")
-    if kev and c >= 0.75 and r >= 0.7:
+    if inputs.kev and c >= 0.75 and r >= 0.7:
         return "T1", "KEV-listed, confidently detected and reachable"
-
-    if _lower(finding.get("validation_status")) == "validated":
-        return "T1", "a validated credential"
 
     if c >= 0.75 and l >= 0.6 and i >= 0.45 and r >= 0.7:
         return "T2", "likely real, likely exploited, real impact, reachable"
@@ -1200,6 +1225,11 @@ def tier_for(finding: dict, facts: ProjectFacts, intel: dict,
         return "T3", "credible, with impact worth planning for"
 
     return "T4", "no rule placed this higher"
+
+
+def tier_for(finding: dict, facts: ProjectFacts, intel: dict,
+             c: float, l: float, i: float, r: float) -> tuple[str, str]:
+    return tier_rule(tier_inputs(finding, facts, intel), c, l, i, r)
 
 
 def score_for(tier: str, risk: float) -> float:
@@ -1239,29 +1269,32 @@ def score(finding: dict, facts: Optional[ProjectFacts] = None,
     if source and source not in CONFIDENCE_BY_SOURCE:
         warnings.append(f"source {source!r} has no confidence row")
 
+    inputs = tier_inputs(finding, facts, intel)
+
     if state != STATE_OPEN:
         # Not ranked, but the facts are kept so the finding can come back.
         return ScoreResult(
             state=state, confidence=c, likelihood=l, impact=i, reach=r,
             risk=0.0, tier="T4", tier_rule=state_why, score=0.0,
             signals=_signals(finding, facts, intel, c, l, i, r, cvss, klass),
-            proven=is_proven(finding, facts),
+            proven=inputs.proven,
             host=str(finding.get("triage_host") or finding.get("host") or ""),
             warnings=warnings,
+            tier_inputs=inputs,
         )
 
     risk = min(1.0, c.value * l.value * i.value * r.value)
-    tier, tier_rule = tier_for(finding, facts, intel,
-                               c.value, l.value, i.value, r.value)
+    tier, rule = tier_rule(inputs, c.value, l.value, i.value, r.value)
 
     return ScoreResult(
         state=state, confidence=c, likelihood=l, impact=i, reach=r,
-        risk=round(risk, 6), tier=tier, tier_rule=tier_rule,
+        risk=round(risk, 6), tier=tier, tier_rule=rule,
         score=score_for(tier, risk),
         signals=_signals(finding, facts, intel, c, l, i, r, cvss, klass),
-        proven=is_proven(finding, facts),
+        proven=inputs.proven,
         host=str(finding.get("triage_host") or finding.get("host") or ""),
         warnings=warnings,
+        tier_inputs=inputs,
     )
 
 
@@ -1353,3 +1386,224 @@ def best_tier(tiers: Iterable[str]) -> str:
         if level == top:
             return tier
     return "T4"                                            # pragma: no cover
+
+
+# ===========================================================================
+# The three layers, and the one function that combines them
+# ===========================================================================
+# A finding's final score is never written by anyone. Each layer is stored on
+# the node on its own, and `combine_layers` is the only thing that turns them
+# into the values the board sorts by:
+#
+#   BASE      the rules, from a run's facts          rewritten by every run
+#   REVIEW    a machine read the evidence and        valid while its evidence
+#             corrected factors (the built-in AI,    hash equals the current one
+#             or an external agent over MCP)
+#   DECISION  a person: Real or False positive       lasts until a person changes it
+#
+# The higher layer wins. A review is only ever a correction of factors with a
+# quote behind it; the tier and the score come from the same rules as the base.
+
+REVIEW_CHANNELS = ("builtin", "mcp")
+REVIEW_VERDICTS = ("real", "doubtful", "false_positive", "unclear")
+DECISION_STATUSES = ("confirmed", "likely_noise")
+
+DECIDED_BY_RULES = "rules"
+DECIDED_BY_REVIEW = "review"
+DECIDED_BY_PERSON = "person"
+
+
+@dataclass
+class BaseLayer:
+    """The rules-only result of a run, as stored in `triage_base_*`."""
+    factors: dict
+    tier: str
+    tier_rule: str
+    state: str
+    inputs: TierInputs = field(default_factory=TierInputs)
+    score: float = 0.0
+    risk: float = 0.0
+
+    @classmethod
+    def from_result(cls, result: ScoreResult) -> "BaseLayer":
+        return cls(
+            factors=result.as_factors_dict(), tier=result.tier,
+            tier_rule=result.tier_rule, state=result.state,
+            inputs=result.tier_inputs or TierInputs(proven=result.proven),
+            score=result.score, risk=result.risk,
+        )
+
+
+@dataclass
+class ReviewLayer:
+    """One review. Valid only while `evidence_hash` is the finding's current one."""
+    verdict: str
+    evidence_hash: str
+    channel: str = "builtin"
+    impact_multiplier: float = 1.0
+    impact_quote: str = ""
+    disputed_facts: list = field(default_factory=list)
+
+
+@dataclass
+class DecisionLayer:
+    """A person's decision. `unreviewed` is the absence of one, not a decision."""
+    status: str
+
+
+@dataclass
+class Final:
+    score: float
+    tier: str
+    tier_rule: str
+    risk: float
+    factors: dict
+    state: str
+    decided_by: str
+
+    def as_dict(self) -> dict:
+        return {
+            "score": self.score, "tier": self.tier, "tier_rule": self.tier_rule,
+            "risk": self.risk, "factors": self.factors, "state": self.state,
+            "decided_by": self.decided_by,
+        }
+
+
+def factor_values(factors: dict) -> dict:
+    """{C, L, I, R} as floats from a stored factors dict. Missing is 0."""
+    out = {}
+    for key in ("C", "L", "I", "R"):
+        entry = (factors or {}).get(key)
+        value = entry.get("value") if isinstance(entry, dict) else entry
+        out[key] = as_float(value) or 0.0
+    return out
+
+
+def review_is_valid(review: Optional[ReviewLayer], evidence_hash: str) -> bool:
+    """A review answers the evidence it read, and nothing newer."""
+    return bool(review is not None and review.evidence_hash and evidence_hash
+                and review.evidence_hash == evidence_hash
+                and review.verdict in REVIEW_VERDICTS)
+
+
+def apply_corrections(values: dict, review: ReviewLayer, proven: bool) -> dict:
+    """The factor corrections one review makes. Pure.
+
+    On a PROVEN finding a review may only raise: a doubtful verdict, every
+    dispute and a multiplier below 1 are ignored, because a sentence in a
+    response body does not outweigh an exploit that ran.
+
+    The multiplier needs its own verified `impact_quote`; without one it does
+    nothing, so the one numeric correction cannot move a score unquoted.
+    """
+    c, l, i, r = values["C"], values["L"], values["I"], values["R"]
+
+    if review.verdict == "real":
+        c = max(c, 0.95)
+    elif review.verdict == "doubtful" and not proven:
+        c = min(c, 0.25)
+
+    if not proven:
+        seen = set()
+        for dispute in review.disputed_facts or []:
+            fact = dispute.get("fact") if isinstance(dispute, dict) else None
+            if not fact or fact in seen:
+                continue
+            seen.add(fact)
+            if fact == "reachable":
+                # Only ever lowers: disputing a reach the rules never relied on
+                # must not raise it to the unknown default.
+                r = min(r, REACH_UNKNOWN)
+            elif fact in ("tool_confirmed", "extracted_proof"):
+                c = min(c, 0.75)
+            elif fact in ("dast_confirmed", "exploitable_class", "public_poc",
+                          "credential_in_response"):
+                l = min(l, 0.3)
+            elif fact == "sensitive_asset":
+                i = i / 1.2
+
+    multiplier = as_float(review.impact_multiplier)
+    if multiplier is not None and str(review.impact_quote or "").strip():
+        multiplier = min(1.5, max(0.5, multiplier))
+        if proven:
+            multiplier = max(1.0, multiplier)
+        i = min(1.2, max(0.0, i * multiplier))
+
+    return {"C": c, "L": l, "I": i, "R": r}
+
+
+def _review_fp_rule(review: ReviewLayer) -> str:
+    if review.channel == "mcp":
+        return "an external agent's review found it a false positive"
+    return "the AI review found it a false positive"
+
+
+def combine_layers(base: BaseLayer, review: Optional[ReviewLayer],
+                   decision: Optional[DecisionLayer], evidence_hash: str,
+                   proven_now: bool = False) -> Final:
+    """The final values, from the three layers. Pure, total, idempotent.
+
+    `proven_now` is proof read live when the combine happens outside a run (a
+    verdict or a review write), so a finding proven after the last run can
+    still not be talked down.
+    """
+    proven = bool(base.inputs.proven or proven_now)
+    inputs = TierInputs(proven=proven, kev=base.inputs.kev)
+    evidence = {k: ((base.factors or {}).get(k) or {}).get("evidence", "")
+                if isinstance((base.factors or {}).get(k), dict) else ""
+                for k in ("C", "L", "I", "R")}
+    base_values = factor_values(base.factors)
+
+    def factors_of(values: dict) -> dict:
+        return {k: {"value": round(values[k], 4), "evidence": evidence[k]}
+                for k in ("C", "L", "I", "R")}
+
+    # 0. A resolved finding leaves the ranking whatever anyone said about it.
+    if base.state in RESOLVED_STATES:
+        return Final(score=0.0, tier="T4", tier_rule=base.tier_rule, risk=0.0,
+                     factors=factors_of(base_values), state=base.state,
+                     decided_by=DECIDED_BY_RULES)
+
+    status = decision.status if decision is not None else None
+    if status not in DECISION_STATUSES:
+        status = None
+
+    # 1. A person's False positive.
+    if status == "likely_noise":
+        return Final(score=0.0, tier="T4", tier_rule="marked a false positive by you",
+                     risk=0.0, factors=factors_of(base_values),
+                     state=STATE_FALSE_POSITIVE, decided_by=DECIDED_BY_PERSON)
+
+    # 2. A valid review.
+    values = dict(base_values)
+    moved_by_review = False
+    if review_is_valid(review, evidence_hash):
+        if review.verdict == "false_positive" and status != "confirmed" and not proven:
+            return Final(score=0.0, tier="T4", tier_rule=_review_fp_rule(review),
+                         risk=0.0, factors=factors_of(base_values),
+                         state=STATE_FALSE_POSITIVE, decided_by=DECIDED_BY_REVIEW)
+        values = apply_corrections(values, review, proven)
+        moved_by_review = any(abs(values[k] - base_values[k]) > 1e-9 for k in values)
+
+    # 3. A person's Real.
+    if status == "confirmed":
+        values["C"] = 1.0
+
+    decided_by = (DECIDED_BY_PERSON if status
+                  else DECIDED_BY_REVIEW if moved_by_review else DECIDED_BY_RULES)
+
+    unchanged = (all(abs(values[k] - base_values[k]) <= 1e-9 for k in values)
+                 and inputs == base.inputs)
+    if unchanged:
+        # Identity: the base as stored, not re-derived from rounded factors.
+        return Final(score=base.score, tier=base.tier, tier_rule=base.tier_rule,
+                     risk=base.risk, factors=factors_of(base_values),
+                     state=STATE_OPEN, decided_by=decided_by)
+
+    # 4. The same rules as the base, on the corrected factors.
+    c, l, i, r = values["C"], values["L"], values["I"], values["R"]
+    risk = min(1.0, max(0.0, c * l * i * r))
+    tier, rule = tier_rule(inputs, c, l, i, r)
+    return Final(score=score_for(tier, risk), tier=tier, tier_rule=rule,
+                 risk=round(risk, 6), factors=factors_of(values),
+                 state=STATE_OPEN, decided_by=decided_by)

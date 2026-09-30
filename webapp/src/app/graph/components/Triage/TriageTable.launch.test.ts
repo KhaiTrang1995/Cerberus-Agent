@@ -27,6 +27,7 @@ const BUTTON = readFileSync(
 const CYPHERFIX_EMPTY = readFileSync(
   join(__dirname, '..', 'CypherFixTab', 'EmptyState', 'EmptyState.tsx'), 'utf8'
 )
+const MUTE_HOOK = readFileSync(join(__dirname, '..', 'MuteNode', 'useMuteNode.ts'), 'utf8')
 const CYPHERFIX_DASH = readFileSync(
   join(__dirname, '..', 'CypherFixTab', 'RemediationDashboard',
        'RemediationDashboard.tsx'), 'utf8'
@@ -65,6 +66,17 @@ describe('the Triage tab can actually launch a run', () => {
 
   test('page.tsx mounts the tab (so the wiring above is reachable)', () => {
     expect(PAGE).toMatch(/<TriageTable\s+projectId=\{projectId\}/)
+  })
+
+  test('the detail panel lives inside the board, which a past version never mounts', () => {
+    // Decisions are live, never version-scoped: a panel offering Real / Reset
+    // over an old snapshot would write to the current graph under an old label.
+    expect(SRC).toContain('<TriageDetailPanel')
+    expect(PAGE).not.toContain('TriageDetailPanel')
+    const guard = PAGE.indexOf("isViewingPastVersion && tableViewMode !== 'nodeDetails'")
+    const board = PAGE.indexOf("tableViewMode === 'triage' ?")
+    expect(guard).toBeGreaterThan(-1)
+    expect(board).toBeGreaterThan(guard)
   })
 })
 
@@ -129,7 +141,9 @@ describe('the board reloads on every terminal state', () => {
 
   test('a mute that matched nothing reloads instead of silently failing', () => {
     // X13: a rescan or an activation replaces the node an open tab is holding
-    // an id for.
-    expect(SRC).toContain('res.status === 409')
+    // an id for. The board's Mute is the shared useMuteNode, which handles it.
+    expect(SRC).toContain('useMuteNode')
+    expect(MUTE_HOOK).toContain('res.status === 409')
+    expect(SRC).toMatch(/onStale:\s*load/)
   })
 })

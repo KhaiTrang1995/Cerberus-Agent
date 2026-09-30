@@ -5,9 +5,10 @@
  * exclusive with the four things that write it:
  *   - a full recon scan          (orchestrator recon status)
  *   - a partial recon run        (orchestrator partial-run list)
- *   - an agent / LATS session    (Conversation.agentRunning - the agent writes
- *                                 AttackChain-family nodes and reasons over the
- *                                 graph; swapping it mid-run changes its world)
+ *   - an agent / LATS session    (Conversation.agentRunning, confirmed with the
+ *                                 agent - it writes AttackChain-family nodes and
+ *                                 reasons over the graph; swapping it mid-run
+ *                                 changes its world)
  *   - a triage run               (TriageRun.status running|publishing with a
  *                                 fresh heartbeat - it reads the whole graph,
  *                                 then writes the ranking back at the end)
@@ -19,8 +20,8 @@
  * assume idle, because guessing wrong here means swapping the graph under a
  * running scan.
  */
-import prisma from '@/lib/prisma'
 import { orchestratorFetch } from '@/lib/orchestrator'
+import { checkAgentSessions, describeAgentSessionState } from '@/lib/agentSessions'
 import { findLiveTriageRun } from '@/lib/triageRun'
 import { describeNodeFilterWriter } from '@/lib/nodeFilterRun'
 
@@ -52,13 +53,11 @@ export async function describeLiveGraphWriters(projectId: string): Promise<strin
     return 'the triage run state could not be verified'
   }
 
-  // Agent sessions next: also a plain DB read, no network.
+  // Agent sessions next: a DB read, plus a question to the agent only when a
+  // flag is set, so a flag a restarted agent left behind is cleared, not obeyed.
   try {
-    const agent = await prisma.conversation.findFirst({
-      where: { projectId, agentRunning: true },
-      select: { id: true },
-    })
-    if (agent) return 'an agent session is running'
+    const agent = describeAgentSessionState(await checkAgentSessions(projectId))
+    if (agent) return agent
   } catch (err) {
     console.error('[graphWriters] agent-session check failed (treating as busy):', err)
     return 'the agent session state could not be verified'

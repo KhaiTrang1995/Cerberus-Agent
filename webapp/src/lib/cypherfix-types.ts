@@ -25,23 +25,37 @@ export enum CypherFixTriageMessageType {
   STOPPED = 'stopped',
 }
 
-export type TriagePhase =
-  | 'collecting_vulnerabilities'
-  | 'collecting_cve_chains'
-  | 'collecting_secrets'
-  | 'collecting_exploits'
-  | 'collecting_assets'
-  | 'collecting_chain_findings'
-  | 'collecting_attack_chains'
-  | 'collecting_certificates'
-  | 'collecting_security_checks'
-  // Between collection and correlation: a real/noise verdict per finding,
-  // written back onto the graph nodes.
-  | 'classifying'
-  | 'correlating'
-  | 'prioritizing'
-  | 'generating_remediations'
-  | 'saving'
+/** The phases a triage run reports, in the order it runs them
+ *  (agentic/cypherfix_triage/orchestrator.py). */
+export const TRIAGE_PHASES = [
+  'authorizing',
+  'scoring',
+  'grouping',
+  'reviewing',
+  'writing_remediations',
+  'publishing',
+] as const
+
+export type TriagePhase = (typeof TRIAGE_PHASES)[number]
+
+export const TRIAGE_PHASE_LABELS: Record<TriagePhase, string> = {
+  authorizing: 'Checking the project',
+  scoring: 'Scoring findings',
+  grouping: 'Grouping findings by fix',
+  reviewing: 'Reviewing the evidence',
+  writing_remediations: 'Writing fix items',
+  publishing: 'Publishing the results',
+}
+
+/** A phase id from an agent newer than this build falls back to the raw id. */
+export function triagePhaseLabel(phase: string | null | undefined): string {
+  if (!phase) return ''
+  return TRIAGE_PHASE_LABELS[phase as TriagePhase] ?? phase
+}
+
+/** The agent refuses a Stop while the run publishes: a cancel then would
+ *  leave the board and the fix list disagreeing. */
+export const PUBLISHING_STOP_REFUSAL = 'The run is publishing and will finish in moments.'
 
 export interface TriagePhasePayload {
   phase: TriagePhase

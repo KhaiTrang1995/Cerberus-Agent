@@ -116,10 +116,41 @@ describe('the registry', () => {
     }
   })
 
-  test('the never-auto-ticked list is exactly recon:overwrite', () => {
+  test('the never-auto-ticked list is exactly recon:overwrite, triage:mute and project:rescope', () => {
     // Guards against the list being quietly emptied, which would turn the
     // assertion above into a tautology.
-    expect([...NEVER_AUTO_TICKED]).toEqual(['recon:overwrite'])
+    expect([...NEVER_AUTO_TICKED]).toEqual(['recon:overwrite', 'triage:mute', 'project:rescope'])
+  })
+
+  test('project:rescope is an opt-in on the monitoring profile only, and recommended by none', () => {
+    // It reopens scope on an existing project. It may be offered, never ticked.
+    for (const p of PROFILE_LIST) {
+      expect(p.recommendedScopes, `${p.id} recommends project:rescope`).not.toContain('project:rescope')
+      if (p.id !== 'asm') expect(p.optInScopes, `${p.id} offers project:rescope`).not.toContain('project:rescope')
+    }
+    expect(PROFILES.asm.optInScopes).toContain('project:rescope')
+  })
+
+  test('the preset scopes are ticked by research alone, and apply is offered to the engagement jobs', () => {
+    // Writing the library is a stored instruction a person applies later, so
+    // only the throwaway-project profile ticks it.
+    for (const scope of ['preset:write', 'preset:apply'] as const) {
+      const ticking = PROFILE_LIST.filter(p => p.recommendedScopes.includes(scope)).map(p => p.id)
+      expect(ticking, scope).toEqual(['research'])
+    }
+    for (const id of ['pentest', 'bug_bounty', 'asm'] as const) {
+      expect(PROFILES[id].optInScopes, id).toContain('preset:apply')
+      expect(PROFILES[id].optInScopes, id).not.toContain('preset:write')
+    }
+  })
+
+  test('triage:mute is an opt-in on the Triage profile only, and recommended by none', () => {
+    // A mute hides a finding from every read. It may be offered, never ticked.
+    for (const p of PROFILE_LIST) {
+      expect(p.recommendedScopes, `${p.id} recommends triage:mute`).not.toContain('triage:mute')
+      if (p.id !== 'triage') expect(p.optInScopes, `${p.id} offers triage:mute`).not.toContain('triage:mute')
+    }
+    expect(PROFILES.triage.optInScopes).toContain('triage:mute')
   })
 
   test('EVERY profile auto-ticks kali:exec, and none offers it as opt-in', () => {
@@ -159,7 +190,10 @@ describe('the registry', () => {
     // Read-only by default wherever the job allows it. These seven jobs never
     // need to change anything, so a write scope appearing here is a regression.
     // kali:exec is not counted: every profile carries it by design (see above).
-    const WRITES: McpScope[] = ['recon:scan', 'recon:queue', 'recon:overwrite', 'recon:settings', 'triage:write']
+    const WRITES: McpScope[] = [
+      'recon:scan', 'recon:queue', 'recon:overwrite', 'recon:settings', 'triage:write', 'triage:mute',
+      'triage:review', 'triage:run', 'preset:write', 'preset:apply', 'project:rescope',
+    ]
     for (const id of ['vuln_mgmt', 'inventory', 'compliance', 'reporting', 'threat_intel', 'soc', 'custom'] as const) {
       const granted = PROFILES[id].recommendedScopes.filter(s => WRITES.includes(s))
       expect(granted, `${id} should be read-only but grants ${granted.join(', ')}`).toEqual([])
@@ -182,6 +216,15 @@ describe('the registry', () => {
   test('settings tuning goes to exactly one profile', () => {
     const withSettings = PROFILE_LIST.filter(p => p.recommendedScopes.includes('recon:settings')).map(p => p.id)
     expect(withSettings).toEqual(['research'])
+  })
+
+  test('the engagement profiles offer settings tuning, unticked', () => {
+    // Tuning an engagement's scans is part of those jobs, but it changes what
+    // reaches a third party, so the operator ticks it rather than the dropdown.
+    for (const id of ['pentest', 'bug_bounty'] as const) {
+      expect(PROFILES[id].optInScopes, id).toContain('recon:settings')
+      expect(PROFILES[id].recommendedScopes, id).not.toContain('recon:settings')
+    }
   })
 })
 

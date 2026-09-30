@@ -1,0 +1,165 @@
+/* Doubled class: it has to beat the Modal's own single-class rules whatever
+   order the two modules load in. */
+.dialog.dialog {
+  max-width: 460px;
+  overflow: visible;
+}
+
+/* The model dropdown is absolutely positioned, and the Modal's scrolling body
+   would clip it to a couple of rows. This dialog is short, so its parts may
+   overflow instead. */
+.dialog.dialog > div {
+  overflow: visible;
+}
+
+/* With overflow visible the header's fill no longer inherits the dialog's
+   rounded corners from the clip. */
+.dialog.dialog > div:first-child {
+  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.featureName {
+  font-size: var(--text-sm);
+  font-weight: var(--font-semibold);
+  color: var(--text-primary);
+}
+
+.featureDescription {
+  margin: var(--space-0-5) 0 0;
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.message {
+  padding: var(--space-2) var(--space-2-5);
+  font-size: var(--text-xs);
+  color: var(--status-warning-text);
+  background: var(--status-warning-bg);
+  border-radius: var(--radius-default);
+  line-height: 1.4;
+}
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1-5);
+  font-size: var(--text-xs);
+  color: var(--text-tertiary);
+}
+
+.emptyBox {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1-5);
+  padding: var(--space-3);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-default);
+}
+
+.emptyTitle {
+  font-size: var(--text-sm);
+  font-weight: var(--font-medium);
+  color: var(--text-primary);
+}
+
+.inlineActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.pickerField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1-5);
+}
+
+.hint {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  line-height: 1.4;
+}
+
+.error {
+  font-size: var(--text-xs);
+  color: var(--status-error-text);
+}
+
+.note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.inline {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.inlineFooter {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.line {
+  display: inline-flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  min-width: 0;
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+.lineValue {
+  min-width: 0;
+  max-width: 28ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+}
+
+/* The -text status tokens are set per theme (400 on dark, 700 on light), so
+   the link reads on both without a light override. */
+.lineChange {
+  padding: 0;
+  background: none;
+  border: none;
+  font: inherit;
+  color: var(--status-info-text);
+  cursor: pointer;
+}
+
+.lineChange:hover {
+  text-decoration: underline;
+}
+
+.lineChange:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+}

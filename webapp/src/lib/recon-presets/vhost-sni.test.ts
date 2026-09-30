@@ -65,11 +65,14 @@ const ALL_VHOSTSNI_FIELDS = [
   'vhostSniCustomWordlist',
 ] as const
 
+/** The per-project wordlist is text tied to one target, so a preset never carries it (B-8). */
+const PRESETABLE_VHOSTSNI_FIELDS = ALL_VHOSTSNI_FIELDS.filter(f => f !== 'vhostSniCustomWordlist')
+
 // ===========================================================================
 // 1. Zod schema acceptance / rejection
 // ===========================================================================
 describe('reconPresetSchema -- vhostSni fields', () => {
-  test('accepts all 11 fields with valid values', () => {
+  test('accepts the 10 preset fields, and strips the per-project wordlist', () => {
     const result = reconPresetSchema.safeParse({
       vhostSniEnabled: true,
       vhostSniTimeout: 5,
@@ -87,7 +90,7 @@ describe('reconPresetSchema -- vhostSni fields', () => {
     if (result.success) {
       expect(result.data.vhostSniEnabled).toBe(true)
       expect(result.data.vhostSniTimeout).toBe(5)
-      expect(result.data.vhostSniCustomWordlist).toBe('admin\nstaging')
+      expect((result.data as Record<string, unknown>).vhostSniCustomWordlist).toBeUndefined()
     }
   })
 
@@ -101,9 +104,10 @@ describe('reconPresetSchema -- vhostSni fields', () => {
     expect(result.success).toBe(false)
   })
 
-  test('rejects non-string for vhostSniCustomWordlist', () => {
+  test('the per-project wordlist is stripped whatever its type', () => {
     const result = reconPresetSchema.safeParse({ vhostSniCustomWordlist: ['admin', 'staging'] })
-    expect(result.success).toBe(false)
+    expect(result.success).toBe(true)
+    expect((result.data as Record<string, unknown>).vhostSniCustomWordlist).toBeUndefined()
   })
 
   test('strips unknown vhost-related fields silently', () => {
@@ -117,8 +121,8 @@ describe('reconPresetSchema -- vhostSni fields', () => {
     }
   })
 
-  test('all 11 fields are optional (each works in isolation)', () => {
-    for (const field of ALL_VHOSTSNI_FIELDS) {
+  test('all 10 preset fields are optional (each works in isolation)', () => {
+    for (const field of PRESETABLE_VHOSTSNI_FIELDS) {
       const result = reconPresetSchema.safeParse({ [field]: getTestValueFor(field) })
       expect(result.success, `Field "${field}" should be optional and accept its test value`).toBe(true)
     }
@@ -136,10 +140,11 @@ function getTestValueFor(field: string): unknown {
 // 2. RECON_PARAMETER_CATALOG documents every vhostSni* param
 // ===========================================================================
 describe('RECON_PARAMETER_CATALOG -- vhostSni coverage', () => {
-  test('catalog mentions every vhostSni* param', () => {
-    for (const field of ALL_VHOSTSNI_FIELDS) {
+  test('catalog mentions every vhostSni* param a preset carries, and not the wordlist', () => {
+    for (const field of PRESETABLE_VHOSTSNI_FIELDS) {
       expect(RECON_PARAMETER_CATALOG, `catalog missing entry: ${field}`).toContain(field)
     }
+    expect(RECON_PARAMETER_CATALOG).not.toContain('vhostSniCustomWordlist')
   })
 
   test('catalog has dedicated VHost & SNI section header', () => {
@@ -267,7 +272,7 @@ describe('Catalog descriptions are non-trivial', () => {
   test('every vhostSni* line has a description body', () => {
     const lines = RECON_PARAMETER_CATALOG.split('\n')
     const vhostLines = lines.filter(l => l.includes('vhostSni'))
-    expect(vhostLines.length).toBeGreaterThanOrEqual(ALL_VHOSTSNI_FIELDS.length)
+    expect(vhostLines.length).toBeGreaterThanOrEqual(PRESETABLE_VHOSTSNI_FIELDS.length)
     for (const line of vhostLines) {
       // Pattern is: "- fieldName: type - description"
       expect(line, `catalog line too terse: "${line}"`).toMatch(/[A-Za-z]/)

@@ -19,11 +19,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { isInternalRequest } from '@/lib/session'
-import { settingsFingerprint, nextBackoff, CAPACITY_RECHECK_MS } from '@/lib/jobQueue'
-import { resolveTrufflehogFingerprintExtra } from '@/lib/trufflehogStart'
-import { authProfileFingerprintExtra } from '@/lib/authProfileFingerprint'
+import { nextBackoff, CAPACITY_RECHECK_MS } from '@/lib/jobQueue'
+import { currentFingerprintFor } from '@/lib/jobFingerprint'
 import { classifyStartFailure, isCapacityWait } from '@/lib/scanStartOutcome'
 import { dispatchStart, stopScan } from '@/lib/startScan'
+import { checkAgentSessions, describeAgentSessionState } from '@/lib/agentSessions'
 
 export const runtime = 'nodejs'
 
@@ -99,15 +99,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     // 4. Settings fingerprint (C-4). A change between enqueue and dispatch means the
     // operator changed where/what this job scans; never silently run the new config.
-    const currentHash = settingsFingerprint(
-      row.kind, project as unknown as Record<string, unknown>,
-      {
-        ...(await resolveTrufflehogFingerprintExtra(
-          row.kind, row.projectId, (row.payload ?? {}) as Record<string, unknown>,
-        )),
-        ...(await authProfileFingerprintExtra(row.kind, row.projectId)),
-      },
-    )
+    const currentHash = await currentFingerprintFor(row, project as unknown as Record<string, unknown>)
     if (currentHash !== row.settingsHash) {
       await prisma.jobQueue.updateMany({
         where: { id, status: 'dispatching' },
@@ -123,17 +115,14 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     // 5. Agent running + full_recon (C-5). Stricter than the manual path on purpose:
     // an unattended dispatcher must not wipe the graph under a live agent session.
     if (row.kind === 'full_recon') {
-      const agent = await prisma.conversation.findFirst({
-        where: { projectId: row.projectId, agentRunning: true },
-        select: { id: true },
-      })
+      const agent = describeAgentSessionState(await checkAgentSessions(row.projectId))
       if (agent) {
         await prisma.jobQueue.updateMany({
           where: { id, status: 'dispatching' },
           data: {
             status: 'queued',
             blockedCode: 'agent_running',
-            blockedReason: 'an agent session is running for this project; a full recon would wipe its graph',
+            blockedReason: `${agent} for this project; a full recon would wipe its graph`,
             // Capacity/contention wait: short fixed recheck, no attempt spent.
             notBefore: new Date(Date.now() + CAPACITY_RECHECK_MS),
           },

@@ -66,6 +66,13 @@ const hasWikiCheckout = () => existsSync(path.join(WIKI_DIR, 'Home.md'))
 const CONDITIONAL_TRIGGERS: Record<string, Record<string, unknown>> = {
   'query_graph/graph:cypher': { question: undefined, cypher: 'MATCH (n) RETURN n LIMIT 1' },
   'start_recon/recon:overwrite': { mode: 'overwrite' },
+  'update_project_scope/engagement:authorize': {
+    authorization: {
+      documentSha256: '0'.repeat(64),
+      documentKind: 'hackerone_program',
+      issuedAt: '2026-01-01T00:00:00.000Z',
+    },
+  },
 }
 
 /**
@@ -76,13 +83,15 @@ const CONDITIONAL_TRIGGERS: Record<string, Record<string, unknown>> = {
 const REACHED_THE_BACKEND = 'The request could not be completed.'
 
 /**
- * Tools that have NO backend to fail on.
+ * Tools that SUCCEED with every backend absent.
  *
- * `describe_recon_settings` and `list_recon_presets` are projections of frozen
- * constants - the same property that makes them answer when Neo4j and Postgres
- * are down. So "it got past every check" shows up here as a SUCCESS rather than
- * as the generic database failure, and asserting the generic message for them
- * would be asserting that they are broken.
+ * `describe_recon_settings` is a projection of frozen constants - the same
+ * property that makes it answer when Neo4j and Postgres are down.
+ * `list_recon_presets` reads the user's presets from Postgres too, but it lists
+ * the built-ins without it and reports the user presets as "unavailable" rather
+ * than failing. So "it got past every check" shows up here as a SUCCESS rather
+ * than as the generic database failure, and asserting the generic message for
+ * them would be asserting that they are broken.
  *
  * Listed explicitly, not detected: a tool that stopped reading tenant data by
  * accident must fail this file, not quietly join the exemption.
@@ -127,6 +136,9 @@ beforeEach(async () => {
   // backend is reached. This file is about scopes matching what each tool
   // enforces, so the switch is turned on; kaliTools.test.ts owns the off case.
   vi.stubEnv('MCP_KALI_EXEC_ENABLED', 'true')
+  // One test calls every write tool with the same token, which is more than the
+  // real 10-a-minute write bucket allows. This file is about scopes, not rates.
+  vi.stubEnv('MCP_RATE_WRITE_PER_MIN', '1000')
   vi.spyOn(console, 'error').mockImplementation(() => undefined)
   tools = await listAdvertisedTools()
 })

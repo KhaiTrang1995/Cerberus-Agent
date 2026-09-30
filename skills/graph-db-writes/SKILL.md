@@ -11,7 +11,7 @@ description: >
 license: MIT
 metadata:
   author: redamon
-  version: "1.0.0"
+  version: "1.1.0"
   scope: [root]
   auto_invoke:
     - "Writing to the Neo4j graph or editing a graph_db mixin"
@@ -47,6 +47,11 @@ graph-write rules it depends on.
 - **NEVER collect a field in a tool and not write it to the graph.** Every field
   in the tool's output dict must land on a node property or relationship, or it is
   silent data loss. If it fits no node, map it to the closest property or say why it is dropped.
+- **NEVER put a map, or a list of maps, in a property.** Neo4j rejects it, so
+  `SET v += $props` fails the whole node write and the mixin's per-finding
+  `except` turns that into a silently dropped finding. Flatten first: nuclei's
+  `cves` arrive as `{id,cvss,url}` maps and are stored as id strings via
+  `nuclei_cve_ids` in [graph_db/mixins/recon/vuln_mixin.py](../../graph_db/mixins/recon/vuln_mixin.py).
 - **NEVER delete a finding a person has touched, and NEVER clear findings up
   front.** A scan MERGEs its findings (which refreshes `updated_at`) and
   afterwards prunes the ones it did not touch - ingest-then-prune, never
@@ -59,7 +64,12 @@ graph-write rules it depends on.
   is not a person's decision and is pruned like any stale finding.
   Reference: `prune_unseen_findings` in
   [graph_db/mixins/base_mixin.py](../../graph_db/mixins/base_mixin.py), and the
-  four clears that spare them.
+  four clears that spare them. A delete that spares muted findings takes the
+  node's write lock (`SET n._prune_lock = true REMOVE n._prune_lock`) BEFORE it
+  reads `n:Muted`, or a mute committing in between is deleted with the node.
+  An external agent's MCP mute keeps the owner's id in `muted_by`, so it is kept
+  like a person's; its `muted_channel`/`muted_token` stamp must be REMOVEd by
+  every unmute and cleared by every other mute, or a later mute inherits it.
 - **NEVER prune a source or host the run could not re-check (circuit breakers).**
   When a data provider was paused or a scan host was skipped, "not seen this run"
   does NOT mean "gone". The caller passes `keep_hosts` (anchored regexes, matched
@@ -89,6 +99,12 @@ graph-write rules it depends on.
   splices the catalog in at `__GRAPH_SCHEMA__`, and GRAPH.SCHEMA.md deliberately
   no longer lists labels at all. Three copies is what drifted, and four tests
   now fail if you make a fourth.
+  Editing or removing a line there fails
+  `test_the_composed_document_still_contains_the_baseline` in
+  [recon/tests/test_schema_catalog.py](../../recon/tests/test_schema_catalog.py)
+  (additions pass: it is a CONTAINS check, so a stale golden file can sit
+  unnoticed). Refresh the fixture in the same commit with the command in that
+  test's docstring, then read the fixture diff.
   Still update `NODE_COLORS` in
   [webapp/src/app/graph/config/colors.ts](../../webapp/src/app/graph/config/colors.ts),
   which is presentation, not schema.

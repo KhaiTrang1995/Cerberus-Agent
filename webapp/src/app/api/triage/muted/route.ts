@@ -1,7 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
-import prisma from '@/lib/prisma'
 import { requireProjectOwner, graphTriage } from '@/lib/triageClient'
-import { coerceDoc, describeMutedBy, liveRuleMutedBy, type NodeFilterDoc } from '@/lib/nodeFilters/model'
+import { liveRuleMutedBy } from '@/lib/nodeFilters/model'
+import { MULTI_BATCH_PATTERN } from '@/lib/multiMute'
+import {
+  annotateMutedFacets,
+  annotateMutedRow,
+  loadMutedRuleDoc,
+  MUTED_TOKEN_PATTERN,
+} from '@/lib/nodeFilters/mutedAnnotate'
 
 /**
  * GET /api/triage/muted?projectId= - the Muted Nodes table, one page at a time.
@@ -10,9 +16,11 @@ import { coerceDoc, describeMutedBy, liveRuleMutedBy, type NodeFilterDoc } from 
  * explicitly non-agent: the agent's Cypher chokepoint refuses any query that
  * even names the `Muted` label, and nothing here is reachable from it.
  *
- * Query: offset, limit (default 50), label, mutedVia (person | rule |
- * deleted_rule), rule (an exact muted_by), search, order (recent |
- * person_first), facets=1 for the per-kind and per-rule counts.
+ * Query: offset, limit (default 50), label, mutedVia (person | multi | mcp |
+ * rule | deleted_rule), rule (an exact muted_by), token (an MCP token prefix,
+ * one token's mutes, or a Multi mute batch id, one batch's), search, order
+ * (recent | person_first), facets=1 for the per-kind, per-rule and per-token
+ * counts.
  *
  * Rule mutes are annotated from the project's rule document here, server-side:
  * `rule_name` for a rule that still exists, `rule_deleted` for one that does not.
@@ -21,28 +29,13 @@ const MUTED_PAGE_DEFAULT = 50
 /** Export reads the whole filtered view in one request. */
 const MUTED_PAGE_MAX = 5000
 
-const MUTED_VIA = new Set(['person', 'rule', 'deleted_rule'])
+const MUTED_VIA = new Set(['person', 'multi', 'mcp', 'rule', 'deleted_rule'])
 const ORDERS = new Set(['recent', 'person_first'])
 
 function intParam(raw: string | null, fallback: number, min: number, max: number): number {
   const n = Number.parseInt(raw ?? '', 10)
   if (!Number.isFinite(n)) return fallback
   return Math.max(min, Math.min(max, n))
-}
-
-async function loadDoc(projectId: string): Promise<NodeFilterDoc> {
-  try {
-    const row = await prisma.projectNodeFilter.findUnique({
-      where: { projectId },
-      select: { rules: true },
-    })
-    return coerceDoc(row?.rules)
-  } catch (e) {
-    // The table still lists every mute without the rule names; failing the
-    // whole list over an annotation would hide the mutes themselves.
-    console.error('[muted] could not load node filters:', e)
-    return coerceDoc(null)
-  }
 }
 
 export async function GET(request: NextRequest) {
@@ -52,7 +45,8 @@ export async function GET(request: NextRequest) {
 
   const mutedVia = q.get('mutedVia')
   const order = q.get('order')
-  const doc = await loadDoc(caller.projectId)
+  const doc = await loadMutedRuleDoc(caller.projectId)
+  const token = q.get('token')
 
   const extra: Record<string, unknown> = {
     offset: intParam(q.get('offset'), 0, 0, 10_000_000),
@@ -62,6 +56,8 @@ export async function GET(request: NextRequest) {
     rule: q.get('rule')?.slice(0, 200) || undefined,
     search: q.get('search')?.slice(0, 200) || undefined,
     order: order && ORDERS.has(order) ? order : undefined,
+    // Dropped, not refused, when it is neither: the agent refuses one.
+    token: token && (MUTED_TOKEN_PATTERN.test(token) || MULTI_BATCH_PATTERN.test(token)) ? token : undefined,
   }
   if (extra.muted_via === 'deleted_rule') extra.live_rules = liveRuleMutedBy(doc)
 
@@ -69,12 +65,7 @@ export async function GET(request: NextRequest) {
   if (list.status !== 200) return NextResponse.json(list.body, { status: list.status })
 
   const rows = Array.isArray(list.body.findings) ? list.body.findings : []
-  const findings = rows.map((row: Record<string, unknown>) => {
-    const state = describeMutedBy(doc, String(row.muted_by ?? ''))
-    return state.via === 'rule'
-      ? { ...row, rule_kind: state.kind, rule_id: state.ruleId, rule_name: state.ruleName, rule_deleted: state.deleted }
-      : { ...row, rule_kind: null, rule_id: null, rule_name: null, rule_deleted: false }
-  })
+  const findings = rows.map((row: Record<string, unknown>) => annotateMutedRow(doc, row))
 
   const out: Record<string, unknown> = {
     findings,
@@ -85,21 +76,7 @@ export async function GET(request: NextRequest) {
 
   if (q.get('facets') === '1') {
     const facets = await graphTriage('muted_facets', caller)
-    if (facets.status === 200) {
-      const live = new Set(liveRuleMutedBy(doc))
-      const rules = Array.isArray(facets.body.rules) ? facets.body.rules : []
-      out.facets = {
-        ...facets.body,
-        rules: rules.map((r: Record<string, unknown>) => {
-          const state = describeMutedBy(doc, String(r.muted_by ?? ''))
-          return {
-            ...r,
-            rule_name: state.via === 'rule' ? state.ruleName : null,
-            rule_deleted: !live.has(String(r.muted_by ?? '')),
-          }
-        }),
-      }
-    }
+    if (facets.status === 200) out.facets = annotateMutedFacets(doc, facets.body)
   }
   return NextResponse.json(out)
 }

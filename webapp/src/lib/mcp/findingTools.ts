@@ -23,7 +23,8 @@ import { assertMcpProjectAccess } from '@/lib/mcpAuth'
 import { McpToolError } from '@/lib/mcp/errors'
 import { listMutedFindings, listTriageFindings, type TriageFinding } from '@/lib/mcp/triageGraph'
 import { enforceRate, type McpContext } from '@/lib/mcp/tools'
-import { coerceDoc, describeMutedBy, isRuleMute } from '@/lib/nodeFilters/model'
+import { describeMutedBy } from '@/lib/nodeFilters/model'
+import { loadMutedRuleDoc, mutedViaOf, MUTED_TOKEN_PATTERN, type MutedVia } from '@/lib/nodeFilters/mutedAnnotate'
 
 export const FINDINGS_DEFAULT_LIMIT = 25
 export const FINDINGS_MAX_LIMIT = 100
@@ -62,6 +63,9 @@ const FINDING_FIELDS = [
   'id', 'label', 'name', 'severity', 'source', 'location', 'host', 'section',
   'triage_state', 'triage_status', 'triage_priority_score', 'triage_tier',
   'triage_ai_verdict', 'triage_group_key', 'triage_run_id', 'triaged_at',
+  // The layers behind the score: the rules-only score, the rule that tiered
+  // it, and which layer set the final value.
+  'triage_math_score', 'triage_tier_rule', 'triage_decided_by',
 ] as const
 
 const SECTION_NAMES: Record<number, string> = {
@@ -93,22 +97,38 @@ function projectFinding(raw: TriageFinding, includeQuote: boolean): Record<strin
   if (nodeId) out.nodeId = nodeId
   const section = typeof raw.section === 'number' ? raw.section : null
   if (section !== null) out.sectionName = SECTION_NAMES[section] ?? 'unknown'
+  // Reviewer text, which an external agent may have written: only on request,
+  // like the quote.
   if (includeQuote && raw.triage_ai_quote) out.triage_ai_quote = raw.triage_ai_quote
+  if (includeQuote && raw.triage_fix_lever) out.triage_fix_lever = raw.triage_fix_lever
+  // Who reviewed it, whether that review still describes the evidence, and
+  // how a person's decision arrived. Absent when there is none of each.
+  if (raw.reviewed_via === 'builtin' || raw.reviewed_via === 'mcp') {
+    out.reviewedBy = raw.reviewed_via
+    out.reviewCurrent = raw.review_state === 'current'
+  }
+  if (raw.decided_via === 'app' || raw.decided_via === 'mcp') out.decidedVia = raw.decided_via
   return out
 }
 
-export type TriageState = 'never_run' | 'partial' | 'current'
+export type TriageState = 'never_run' | 'partial' | 'current' | 'imported'
 
 /**
- * Which of the three triage worlds this project is in.
+ * Which of the triage worlds this project is in.
  *
  * Read from the `TriageRun` table rather than inferred from the returned page:
  * a page is at most 100 rows out of potentially thousands, so "every row I can
  * see carries a run id" is not evidence about the project. A database failure
  * degrades to `never_run`, which is the conservative direction - it claims less
  * ranking than there may be, rather than more.
+ *
+ * An import carries its findings' scores but not the runs that produced them,
+ * so a project with no runs whose findings were ranked is `imported`, not
+ * `never_run` (C17). `hasTriagedFindings` is the caller's evidence of that.
  */
-async function resolveTriageState(projectId: string): Promise<TriageState> {
+export async function resolveTriageState(
+  projectId: string, hasTriagedFindings = false,
+): Promise<TriageState> {
   try {
     const runs = await prisma.triageRun.findMany({
       where: { projectId },
@@ -116,7 +136,7 @@ async function resolveTriageState(projectId: string): Promise<TriageState> {
       orderBy: { startedAt: 'desc' },
       take: 5,
     })
-    if (runs.length === 0) return 'never_run'
+    if (runs.length === 0) return hasTriagedFindings ? 'imported' : 'never_run'
     if (runs.some(r => r.status === 'completed')) return 'current'
     return 'partial'
   } catch (err) {
@@ -134,6 +154,8 @@ const TRIAGE_STATE_NOTE: Record<TriageState, string> = {
     'is absent.',
   current: 'A triage run has completed, so findings are ordered by the computed priority score ' +
     'first and scanner severity second.',
+  imported: 'This project was imported with its findings\' scores but without the runs that ' +
+    'produced them. The order is the imported ranking; the next triage run here re-ranks it.',
 }
 
 export interface ListFindingsArgs {
@@ -142,6 +164,10 @@ export interface ListFindingsArgs {
   severity?: string
   section?: string
   includeQuotes?: boolean
+  /** Pushed down to the graph, before the cap: an exact total. */
+  decidedBy?: 'person' | 'review' | 'rules'
+  reviewedVia?: 'builtin' | 'mcp' | 'none'
+  reviewCurrent?: 'current' | 'stale' | 'none'
 }
 
 function clampLimit(raw: number | undefined): number {
@@ -187,10 +213,14 @@ export async function listFindings(
   const filtering = Boolean(section || severity)
   const want = filtering ? TRIAGE_FETCH_CEILING : Math.min(offset + limit, TRIAGE_FETCH_CEILING)
 
-  const [{ findings: raw, total }, triageState] = await Promise.all([
-    listTriageFindings(ctx.token.userId, projectId, want),
-    resolveTriageState(projectId),
-  ])
+  const pushed = {
+    ...(args.decidedBy ? { decided_by: args.decidedBy } : {}),
+    ...(args.reviewedVia ? { reviewed_via: args.reviewedVia } : {}),
+    ...(args.reviewCurrent ? { review_current: args.reviewCurrent } : {}),
+  }
+  const { findings: raw, total } = await listTriageFindings(ctx.token.userId, projectId, want, pushed)
+  const triageState = await resolveTriageState(
+    projectId, raw.some(f => typeof f.triage_run_id === 'string' && f.triage_run_id !== ''))
 
   let rows = raw
   if (severity) rows = rows.filter(f => String(f.severity ?? '').toLowerCase() === severity)
@@ -241,23 +271,17 @@ export async function listFindings(
 // --- the suppressed half --------------------------------------------------------
 
 interface MutedGroup {
-  /** A person's mute is a judgement of the finding; a rule's is project policy. */
-  muted_via: 'person' | 'rule'
+  /**
+   * A person's mute is a judgement of the finding; a Multi mute is a person's
+   * too, but chosen in bulk from AI suggestions, so not one-by-one; an agent's
+   * (MCP) was made on a person's token and is NOT one; a rule's is project policy.
+   */
+  muted_via: MutedVia
   label: string
   severity: string
   count: number
   /** Distinct reasons, capped: the point is why, not who said it how often. */
   reasons: string[]
-}
-
-async function loadRuleDoc(projectId: string) {
-  try {
-    const row = await prisma.projectNodeFilter.findUnique({ where: { projectId }, select: { rules: true } })
-    return coerceDoc(row?.rules)
-  } catch {
-    // Rule names are an annotation; the mutes themselves are still reported.
-    return coerceDoc(null)
-  }
 }
 
 /**
@@ -286,7 +310,7 @@ export async function listMuted(
 
   const { findings: all, total: exactTotal } =
     await listMutedFindings(ctx.token.userId, projectId, MUTED_FETCH_CEILING)
-  const doc = await loadRuleDoc(projectId)
+  const doc = await loadMutedRuleDoc(projectId)
   // With the agent's uncapped count the total is exact; without it (an older
   // agent), a full window can only say "at least". Saying "42 muted" when
   // there are 4000 is the same false negative as reporting a clean project,
@@ -296,11 +320,10 @@ export async function listMuted(
   const floorOnly = typeof exactTotal !== 'number' && windowFull
   const groupsPartial = typeof exactTotal === 'number' && exactTotal > all.length
 
-  const via = (f: TriageFinding): 'person' | 'rule' =>
-    (f as { muted_via?: string }).muted_via === 'rule' || isRuleMute(String(f.muted_by ?? '')) ? 'rule' : 'person'
+  const via = (f: TriageFinding): MutedVia => mutedViaOf(f as Record<string, unknown>)
 
   const groups = new Map<string, MutedGroup>()
-  const byVia = { person: 0, rule: 0 }
+  const byVia: Record<MutedVia, number> = { person: 0, multi: 0, rule: 0, mcp: 0 }
   for (const f of all) {
     const v = via(f)
     byVia[v] += 1
@@ -344,6 +367,8 @@ export async function listMuted(
           findings: all.slice(0, MUTED_MAX_ROWS).map(f => {
             const state = describeMutedBy(doc, String(f.muted_by ?? ''))
             const nodeId = graphNodeId(f.node_id)
+            const token = typeof f.muted_token === 'string' && MUTED_TOKEN_PATTERN.test(f.muted_token)
+              ? f.muted_token : null
             return {
               id: f.id,
               ...(nodeId ? { nodeId } : {}),
@@ -354,6 +379,7 @@ export async function listMuted(
               muted_at: f.muted_at,
               muted_by: f.muted_by,
               muted_via: via(f),
+              ...(via(f) === 'mcp' && token ? { mutedByToken: token } : {}),
               rule_name: state.via === 'rule' ? state.ruleName : null,
               ...(state.via === 'rule' && state.deleted ? { rule_deleted: true } : {}),
               muted_reason: f.muted_reason,

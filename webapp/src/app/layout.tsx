@@ -6,6 +6,7 @@ import { AuthProvider } from '@/providers/AuthProvider'
 import { ProjectProvider } from '@/providers/ProjectProvider'
 import { ToastProvider, AlertProvider } from '@/components/ui'
 import { NavigationGuardProvider } from '@/context/NavigationGuardContext'
+import { FeatureModelGateProvider } from '@/components/shared/FeatureModelGate'
 import { AppLayout } from '@/components/layout'
 import { ThemeDbBridge } from '@/components/ThemeDbBridge'
 import { resolveWsHint } from '@/hooks/agentWsUrl'
@@ -86,9 +87,11 @@ export default function RootLayout({
               <ProjectProvider>
                 <ToastProvider>
                   <AlertProvider>
-                    <NavigationGuardProvider>
-                      <AppLayout>{children}</AppLayout>
-                    </NavigationGuardProvider>
+                    <FeatureModelGateProvider>
+                      <NavigationGuardProvider>
+                        <AppLayout>{children}</AppLayout>
+                      </NavigationGuardProvider>
+                    </FeatureModelGateProvider>
                   </AlertProvider>
                 </ToastProvider>
               </ProjectProvider>

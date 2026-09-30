@@ -21,7 +21,7 @@ Both agents run inside the existing `agent` container and communicate with the f
 2. [End-to-End Workflow](#end-to-end-workflow)
 3. [Triage Agent](#triage-agent)
    - [File Structure](#triage-file-structure)
-   - [The five steps](#the-five-steps-and-why-only-one-of-them-writes)
+   - [The run steps](#the-run-steps-and-why-only-the-publish-writes)
    - [Collection](#collection)
    - [Persistence](#persistence)
    - [Tools](#triage-tools)
@@ -172,11 +172,13 @@ sequenceDiagram
 ```
 agentic/cypherfix_triage/
 ├── __init__.py
-├── orchestrator.py            # The five steps: score, group, review, remediate, publish
-├── score_model.py             # The risk model. C x L x I x R -> tier -> 0-100. Pure
+├── orchestrator.py            # score, read layers, group, review, combine, remediate, publish
+├── score_model.py             # The risk model and combine_layers(): the ONLY producer of a final score. Pure
+├── layers.py                  # Stored properties <-> BaseLayer / ReviewLayer / DecisionLayer. Pure
+├── finding_ops.py             # One finding's evidence, and an external (MCP) review's eligibility
 ├── fact_queries.py            # Project fact sets + one row per finding
 ├── grouping.py                # Deterministic group keys (one problem, one fix)
-├── evidence.py                # The evidence bundle, redaction, the review cache key
+├── evidence.py                # The bundle: normalised, secret-redacted, capped; its hash is what a review is valid for
 ├── remediation.py             # Fix-item fields, every one computed in code
 ├── intel.py                   # KEV / EPSS / PoC via the vulnx MCP tool
 ├── run_client.py              # authorize, heartbeat, publish, finish
@@ -191,17 +193,19 @@ agentic/cypherfix_triage/
     └── cypher_queries.py      # the mute-enforcing collection queries
 ```
 
-### The five steps, and why only one of them writes
+### The run steps, and why only the publish writes
 
 ```mermaid
 flowchart LR
     subgraph Mem["In memory: nothing is written"]
         direction TB
-        A["A. Score: fact sets + one row per finding, score_model v3, no LLM"]
+        A["A. Score: fact sets + one row per finding = the BASE layer, no LLM"]
+        L["Read stored reviews and decisions; adopt unchanged v3.1 reviews"]
         B["B. Group: deterministic keys, no LLM"]
-        C["C. Review: LLM corrects factors, every quote verified"]
-        D["D. Remediate: fields in code, prose by LLM"]
-        A --> B --> C --> D
+        C["C. Review: only findings with no still-valid review; every quote verified"]
+        X["Combine: combine_layers(base, review, decision); groups re-scored"]
+        D["D. Remediate: fields in code, prose by LLM, text from builtin reviews only"]
+        A --> L --> B --> C --> X --> D
     end
 
     R["R. Authorize, before reading anything"] --> Mem
@@ -211,8 +215,10 @@ flowchart LR
     E --> DB[(PostgreSQL)]
 ```
 
-**Steps A to D happen entirely in memory; Step E is the only thing that
-writes.** That single property is what makes a run safe to stop, safe to refuse
+**Steps A to D happen entirely in memory; Step E is the only thing a run
+writes.** (A person's verdict and an external agent's review write one finding
+each, outside any run, and a publish that follows reads them rather than
+overwriting them.) That single property is what makes a run safe to stop, safe to refuse
 and safe to run beside a scan: until the publish is claimed, the previous
 ranking is still what an operator sees, and a run that is killed halfway has
 changed nothing at all.
@@ -222,8 +228,22 @@ It also gives the design its failure posture:
 - the run authorises BEFORE it reads, so a run that will not be allowed to
   publish does not first spend minutes and LLM budget discovering that;
 - a publish that is refused writes nothing, rather than part of a result;
-- the LLM being unreachable costs detail, never the ranking: those findings
-  publish as "Not reviewed" with their maths intact.
+- the LLM being unreachable costs detail, never the ranking: a finding keeps
+  whatever review it had, and one with none publishes as "Not reviewed" with its
+  maths intact;
+- a Stop is refused once the run is publishing, and the publish and the fix-list
+  save run under `asyncio.shield`, so a cancel never splits them;
+- a batch the driver cannot land after its retries is counted in
+  `publish_failed`, and the run finishes `completed_partial`.
+
+**The three layers.** BASE is written only by a publish; REVIEW by a run (the
+built-in AI, `triage_ai_channel = 'builtin'`) or by `write_review` for an external
+agent (`'mcp'`); DECISION only by `set_human_verdict`. A review is valid while its
+`triage_ai_evidence_hash` equals the finding's `triage_evidence_hash`. A run never
+reviews over a valid `mcp` review, and re-reviews its own only after a model or
+prompt change. The final values (`triage_priority_score`, `triage_tier`,
+`triage_state`, `triage_factors`, `triage_decided_by`) come from
+`combine_layers` and nothing else.
 
 ### Collection
 
@@ -255,8 +275,15 @@ agent query gets for free is absent here.
 
 ### Persistence
 
-Findings are published through `apply_triage_scores` in batches of 500, each row
-guarded by the `updated_at` it was read at. Remediations are upserted by
+Findings are published through `publish_triage_layers`, one managed transaction
+(`execute_write`, retried on deadlocks) per batch of 500. Each batch locks its
+nodes, re-reads their current review, decision and live proof, skips a node whose
+`updated_at` moved since the run read it, and calls the orchestrator's `combine`
+with the node as it is NOW, so a decision or an external review written mid-run
+wins. It never writes a decision, `updated_at` or `:Muted`, and skips muted nodes.
+A person's verdict (`set_human_verdict`) and an MCP review (`write_review`)
+rescore their finding in their own managed transaction, locked before read, with
+a 15-second timeout that surfaces as `busy`. Remediations are upserted by
 `(projectId, groupKey)` in ONE transaction through
 `POST /api/internal/triage-runs/[runId]/remediations`.
 
@@ -370,9 +397,12 @@ import and delete can see one. Four calls, all fail-closed:
 | `.../publish` | A conditional `running -> publishing` transition. A run that lost its claim writes nothing |
 | `.../finish` | Always, from a `finally`. A run left `running` blocks activation until its heartbeat expires |
 
-Steps A to D are entirely in memory; Step E is the only thing that writes, in
-batches of 500, each row guarded by the `updated_at` it was read at, so a
-finding a scan re-ingested mid-run is skipped and picked up next time.
+Steps A to D are entirely in memory; Step E is the only thing that writes
+findings, in batches of 500, each row guarded by the `updated_at` it was read at,
+so a finding a scan re-ingested mid-run is skipped and picked up next time. The
+heartbeat keeps a `publishing` run alive (and records its phase and progress),
+and `finish` updates the status only from `running` or `publishing`: a run
+already marked lost stays lost and is audited `triage.finish.late`.
 
 **Beside Mute Rules.** A triage run and an "apply to current graph" of
 [Mute Rules](../../redamon.wiki/Mute-Rules.md) are both tracked graph writers.
@@ -385,12 +415,13 @@ triage run.
 A verdict is also a Mute Rules **guard**. A rule never mutes a finding with
 `triage_source = 'human'`, `triage_status = 'confirmed'` or a `triage_proof`, and
 a rule mute already on one is released by the next apply, or by the next scan
-that finds it again. The collection queries skip muted findings, but
-`apply_triage_scores` and `set_human_verdict` match them, so a confirmation
-published over a finding a rule muted in the meantime releases it the same way.
-The exception is a verdict over MCP: `set_human_verdict(refuse_muted=True)`
-refuses a muted finding, because from an access token that release would be an
-unmute.
+that finds it again. The collection queries and the publish skip muted findings,
+but `set_human_verdict` matches them, so a person's confirmation on a finding a
+rule muted releases it the same way. The exception is a verdict over MCP:
+`set_human_verdict(refuse_muted=True)` refuses a muted finding, because from an
+access token that release would be an unmute. A **Reset** removes
+`triage_source`, and with it the guard: a reset finding may be rule-muted, and
+pruned like any stale finding.
 The rule's mute write re-checks the guards, so a verdict set between the
 sweep's read and its write is never hidden.
 
@@ -467,6 +498,18 @@ erDiagram
 | `error` | `{message, recoverable}` | Error occurred |
 | `stopped` | — | Triage cancelled |
 | `pong` | — | Keepalive response |
+
+`stop` while the run is publishing is refused (`{stopped: false, reason:
+"publishing"}`): the publish finishes, then the run ends normally.
+
+**Headless start and stop (MCP).** `POST /triage/runs` and
+`POST /triage/runs/stop` (webapp-internal, `X-Internal-Key`) start and stop the
+same run through `start_detached_run`, with no socket attached. The webapp calls
+them for MCP `start_triage_run` / `stop_triage_run` after its own checks (scope,
+ownership, preflight, the 30-minute cooldown and the 12-runs-per-day cap). The
+run records `trigger: "mcp"` and the token id, so the board and
+`get_triage_status` show who started it. A browser that opens the dialog while a
+headless run is live attaches to it rather than starting another.
 
 ---
 

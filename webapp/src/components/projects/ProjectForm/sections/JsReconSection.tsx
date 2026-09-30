@@ -7,6 +7,7 @@ import type { Project } from '@prisma/client'
 import styles from '../ProjectForm.module.css'
 import { NodeInfoTooltip } from '../NodeInfoTooltip'
 import { RegistryFields } from '../RegistryFields'
+import { announceProjectWrite } from '@/lib/projectVersion'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -319,6 +320,7 @@ export function JsReconSection({ data, updateField, projectId, mode, onRun }: Js
         setUploadError(data.error || 'Upload failed')
         return
       }
+      announceProjectWrite(projectId, (await res.json()).projectUpdatedAt)
       await fetchUploadedFiles()
     } catch {
       setUploadError('Upload failed')
@@ -331,7 +333,8 @@ export function JsReconSection({ data, updateField, projectId, mode, onRun }: Js
   const handleJsFileDelete = async (filename: string) => {
     if (!canUpload) return
     try {
-      await fetch(`/api/js-recon/${projectId}/upload?name=${encodeURIComponent(filename)}`, { method: 'DELETE' })
+      const res = await fetch(`/api/js-recon/${projectId}/upload?name=${encodeURIComponent(filename)}`, { method: 'DELETE' })
+      if (res.ok) announceProjectWrite(projectId, (await res.json()).projectUpdatedAt)
       await fetchUploadedFiles()
     } catch { /* ignore */ }
   }
@@ -371,6 +374,7 @@ export function JsReconSection({ data, updateField, projectId, mode, onRun }: Js
         setUploadError(data.error || 'Upload failed')
         return
       }
+      announceProjectWrite(projectId, (await res.json()).projectUpdatedAt)
       await fetchCustomFiles()
     } catch {
       setUploadError('Upload failed')
@@ -384,7 +388,8 @@ export function JsReconSection({ data, updateField, projectId, mode, onRun }: Js
   const handleCustomFileDelete = async (fileType: string) => {
     if (!canUpload) return
     try {
-      await fetch(`/api/js-recon/${projectId}/custom-files?type=${fileType}`, { method: 'DELETE' })
+      const res = await fetch(`/api/js-recon/${projectId}/custom-files?type=${fileType}`, { method: 'DELETE' })
+      if (res.ok) announceProjectWrite(projectId, (await res.json()).projectUpdatedAt)
       await fetchCustomFiles()
     } catch { /* ignore */ }
   }

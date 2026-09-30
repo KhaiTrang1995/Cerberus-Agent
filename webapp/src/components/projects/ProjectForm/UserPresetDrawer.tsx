@@ -5,8 +5,15 @@ import { X, Trash2, Loader2, FolderOpen } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { useAlertModal, useToast } from '@/components/ui'
 import styles from './UserPresetDrawer.module.css'
+import provenanceStyles from './presetProvenance.module.css'
+import {
+  PRESET_FILTER_THRESHOLD,
+  filterPresetsByName,
+  mcpEditedLabel,
+  type PresetProvenance,
+} from './presetProvenance'
 
-interface PresetListItem {
+interface PresetListItem extends PresetProvenance {
   id: string
   name: string
   description: string
@@ -28,6 +35,7 @@ export function UserPresetDrawer({ isOpen, onClose, onLoad, userId }: UserPreset
   const [isLoading, setIsLoading] = useState(false)
   const [loadingPresetId, setLoadingPresetId] = useState<string | null>(null)
   const [deletingPresetId, setDeletingPresetId] = useState<string | null>(null)
+  const [nameFilter, setNameFilter] = useState('')
 
   useEffect(() => {
     if (!isOpen || !userId) return
@@ -124,9 +132,23 @@ export function UserPresetDrawer({ isOpen, onClose, onLoad, userId }: UserPreset
               <p>Use &quot;Save as Preset&quot; to create one.</p>
             </div>
           ) : (
-            presets.map(preset => (
+            <>
+            {presets.length > PRESET_FILTER_THRESHOLD && (
+              <input
+                type="search"
+                className={`textInput ${provenanceStyles.filter}`}
+                placeholder="Filter by name"
+                aria-label="Filter presets by name"
+                value={nameFilter}
+                onChange={e => setNameFilter(e.target.value)}
+              />
+            )}
+            {filterPresetsByName(presets, nameFilter).map(preset => (
               <div key={preset.id} className={styles.card}>
                 <h3 className={styles.cardName}>{preset.name}</h3>
+                {mcpEditedLabel(preset) && (
+                  <span className={provenanceStyles.mcpBadge}>{mcpEditedLabel(preset)}</span>
+                )}
                 {preset.description && (
                   <p className={styles.cardDescription}>{preset.description}</p>
                 )}
@@ -158,7 +180,8 @@ export function UserPresetDrawer({ isOpen, onClose, onLoad, userId }: UserPreset
                   </button>
                 </div>
               </div>
-            ))
+            ))}
+            </>
           )}
         </div>
       </div>

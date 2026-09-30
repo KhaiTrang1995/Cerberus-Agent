@@ -30,6 +30,7 @@ import { ApiUsageControls } from '@/components/settings/api-usage/ApiUsageContro
 import { ApiUsageReportModal } from '@/components/settings/api-usage/ApiUsageReportModal'
 import { ApiUsageLlmChip } from '@/components/settings/api-usage/ApiUsageLlmChip'
 import { llmInventoryHint } from '@/lib/apiUsage/inventory'
+import { FeatureModelsSection } from '@/components/settings/FeatureModelsSection'
 
 /** A Secret Multiscanner credential column (TRUFFLEHOG_KEY_FIELDS). */
 type TrufflehogField = `trufflehog${string}`
@@ -693,8 +694,11 @@ export default function SettingsPage() {
 
       // TrafficMind capture settings are edited from the /traffic page modal, not
       // here - strip them so a stale save on this page can't clobber those edits.
+      // featureModels likewise: the Models by feature tiles save their own keys,
+      // and a stale copy riding this save would put back models changed since.
       const settingsPayload = Object.fromEntries(
-        Object.entries(settings).filter(([k]) => !k.startsWith('captureProxy') && !k.startsWith('captureEgress'))
+        Object.entries(settings).filter(([k]) =>
+          !k.startsWith('captureProxy') && !k.startsWith('captureEgress') && k !== 'featureModels')
       )
       const resp = await fetch(`/api/users/${userId}/settings`, {
         method: 'PUT',
@@ -1186,6 +1190,14 @@ export default function SettingsPage() {
               })}
             </div>
           )
+        )}
+
+        {!showProviderForm && !editingProvider && (
+          <FeatureModelsSection
+            userId={userId}
+            providersCount={providers.length}
+            providersLoading={providersLoading}
+          />
         )}
       </div>}
 

@@ -1,5 +1,6 @@
 'use client'
 
+import type { ReactNode } from 'react'
 import { Shield, Scan, ArrowDown, Brain } from 'lucide-react'
 import { TriageRunButton } from '@/components/triage/TriageRunButton'
 import styles from './EmptyState.module.css'
@@ -7,12 +8,17 @@ import styles from './EmptyState.module.css'
 interface EmptyStateProps {
   onStartTriage: () => void
   projectId: string | null
+  /** A run is live, so the button says so instead of offering a second one. */
+  running?: boolean
+  /** The live-run banner, when a run this page did not start is going. */
+  banner?: ReactNode
 }
 
-export function EmptyState({ onStartTriage, projectId }: EmptyStateProps) {
+export function EmptyState({ onStartTriage, projectId, running = false, banner }: EmptyStateProps) {
   return (
     <div className={styles.wrapper}>
       <div className={styles.card}>
+        {banner && <div className={styles.bannerSlot}>{banner}</div>}
         <div className={styles.iconWrapper}>
           <Shield size={48} strokeWidth={1.5} />
         </div>
@@ -41,6 +47,7 @@ export function EmptyState({ onStartTriage, projectId }: EmptyStateProps) {
         <TriageRunButton
           projectId={projectId}
           onConfirm={onStartTriage}
+          running={running}
           className={styles.startButton}
         />
       </div>

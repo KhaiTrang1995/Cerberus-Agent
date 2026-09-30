@@ -1,5 +1,5 @@
 /**
- * describe_recon_settings and list_recon_presets.
+ * describe_recon_settings, and the registry properties the presets rest on.
  *
  * Both are projections of constants this build already ships, so the things
  * that can go wrong are not "the data is missing" but:
@@ -25,12 +25,10 @@ import { engagementLimitFields, field } from '@/lib/reconSettings/registry'
 import {
   __resetCatalogCache,
   describeReconSettings,
-  listReconPresets,
-  presetApplicability,
   settingGroups,
 } from './catalogTools'
 import type { McpContext } from './tools'
-import { RECON_PRESETS, getPresetById } from '@/lib/recon-presets'
+import { RECON_PRESETS } from '@/lib/recon-presets'
 
 const ctx = (scopes: string[] = ['recon:read']): McpContext => ({
   token: {
@@ -230,55 +228,13 @@ describe('describe_recon_settings teaches the two-level model', () => {
   })
 })
 
-describe('list_recon_presets', () => {
-  test('lists every curated preset with its choosing metadata', async () => {
-    const r = await listReconPresets(ctx()) as { presets: { id: string; shortDescription: string; targetProfile: string; environment: string }[] }
-    expect(r.presets).toHaveLength(RECON_PRESETS.length)
-    for (const p of r.presets) {
-      expect(p.id).toBeTruthy()
-      expect(p.shortDescription.length).toBeGreaterThan(10)
-      expect(['domain', 'ip', 'both']).toContain(p.targetProfile)
-      expect(['external', 'internal', 'either']).toContain(p.environment)
-    }
-  })
+// list_recon_presets moved to presetTools.ts with its tests (presetTools.test.ts).
+// What stays here are the registry properties the presets rest on.
 
-  test('the list withholds fullDescription, which a named preset returns', async () => {
-    const list = await listReconPresets(ctx())
-    expect(JSON.stringify(list)).not.toContain('Pipeline Goal')
-
-    const one = await listReconPresets(ctx(), { presetId: 'stealth-recon' }) as { preset: { fullDescription: string } }
-    expect(one.preset.fullDescription.length).toBeGreaterThan(200)
-  })
-
-  test('an unknown preset id is an error that says how to recover', async () => {
-    await expect(listReconPresets(ctx(), { presetId: 'nope' })).rejects.toBeInstanceOf(McpToolError)
-    await expect(listReconPresets(ctx(), { presetId: 'nope' })).rejects.toThrow(/list them/i)
-  })
-
-  test('it needs recon:read', async () => {
-    await expect(listReconPresets(ctx([]))).rejects.toBeInstanceOf(McpScopeError)
-  })
-})
-
-describe('applicability is the field that stops a half-applied preset', () => {
-  test('stealth-recon is no longer half-applicable, which was the trap', () => {
-    // The trap this field existed for: applying "Stealth Recon" over MCP used
-    // to apply everything EXCEPT the stealth, because the rate limits, passive
-    // mode and brute-force toggles were all denied by class. The caller ended up
-    // LOUDER than the preset it asked for while believing it was quieter.
-    //
-    // Opening those fields is what removes the trap, so the assertion inverts:
-    // the preset's quiet half now applies, and nothing refused makes a scan
-    // louder.
-    const a = presetApplicability(getPresetById('stealth-recon')!)
-    expect(a.stealthCritical).toBe(false)
-    expect(a.stealthCriticalFields).toEqual([])
-    expect(a.appliedCount).toBeGreaterThan(a.deniedCount)
-  })
-
-  test('the quiet half of every stealth preset is applicable', () => {
-    // Named fields rather than a count: these are the ones whose absence made a
-    // half-applied preset dangerous.
+describe('the built-in presets fit the settable surface', () => {
+  test('the quiet half of every stealth preset is settable', () => {
+    // Named fields rather than a count: these are the ones whose absence once
+    // made a half-applied stealth preset LOUDER than the preset asked for.
     const QUIET = [
       'naabuRateLimit', 'nucleiRateLimit', 'httpxRateLimit', 'katanaRateLimit',
       'ffufRate', 'arjunRateLimit', 'naabuPassiveMode', 'amassActive', 'amassBrute',
@@ -307,21 +263,6 @@ describe('applicability is the field that stops a half-applied preset', () => {
     }
   })
 
-  test('applied + denied accounts for every key the preset sets', () => {
-    for (const p of RECON_PRESETS) {
-      const a = presetApplicability(p)
-      expect(a.appliedCount + a.deniedCount, p.id).toBe(Object.keys(p.parameters ?? {}).length)
-    }
-  })
-
-  test('a counted-as-applied key really is writable', () => {
-    const settable = new Set(permittedKeys('update'))
-    for (const p of RECON_PRESETS) {
-      const writable = Object.keys(p.parameters ?? {}).filter(k => settable.has(k))
-      expect(presetApplicability(p).appliedCount, p.id).toBe(writable.length)
-    }
-  })
-
   test('T46: every preset value a caller could write passes its registry bound', () => {
     // A preset carrying an out-of-bounds value would otherwise fail only at
     // apply time, in front of a user.
@@ -335,27 +276,5 @@ describe('applicability is the field that stops a half-applied preset', () => {
       }
     }
     expect(problems).toEqual([])
-  })
-
-  test('the tool says plainly that it describes rather than applies', async () => {
-    const notes = (await listReconPresets(ctx()) as { notes: string[] }).notes.join(' ')
-    expect(notes).toMatch(/read-only here/i)
-    expect(notes).toMatch(/update_recon_settings/)
-  })
-
-  test('the notes make no claim the registry contradicts', async () => {
-    // The old copy said a preset "cannot be applied from here" because "this
-    // surface may only write recon tuning". Recon tuning is now the whole
-    // pipeline, so that sentence would overstate the restriction.
-    const notes = (await listReconPresets(ctx()) as { notes: string[] }).notes.join(' ')
-    expect(notes).not.toMatch(/may only write recon tuning/i)
-    expect(notes).not.toMatch(/narrow allowlist/i)
-  })
-
-  test('no preset parameter VALUES are echoed, only counts', async () => {
-    // The payload describes coverage, not configuration: a preset's parameter
-    // values are not this tool's business and would bloat every call.
-    const r = await listReconPresets(ctx())
-    expect(JSON.stringify(r)).not.toContain('"parameters"')
   })
 })

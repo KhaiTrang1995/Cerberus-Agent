@@ -110,7 +110,7 @@ describe('P1a: MCP cannot reach a field the form cannot', () => {
 
   test('every writable field has an input somewhere in the form', () => {
     const problems = writable()
-      .filter(f => !INPUTS.has(f.key))
+      .filter(f => !INPUTS.has(f.key) && !RETIRED_WRITABLE.has(f.key))
       .map(f => `${f.key} (${f.form_section}) is writable over MCP and has no input`)
     expect(problems).toEqual([])
   })
@@ -125,6 +125,17 @@ describe('P1a: MCP cannot reach a field the form cannot', () => {
     expect(problems).toEqual([])
   })
 })
+
+/**
+ * Columns still writable over MCP that nothing reads any more, so the form
+ * rightly has no input for them. Kept writable rather than closed so an older
+ * export or preset that carries one still imports; the registry's `meaning`
+ * says "No longer used", which is what an agent reading the catalog sees.
+ *
+ * cypherfixLlmModel: the Triage review and CodeFix models are per user now
+ * (Global Settings > LLM Providers > Models by feature).
+ */
+const RETIRED_WRITABLE = new Set(['cypherfixLlmModel'])
 
 /**
  * Columns the FORM may write that the MCP surface refuses, each for a stated

@@ -30,6 +30,21 @@ export interface MuteCallbacks {
   onStale?: () => void | Promise<void>
 }
 
+/** The confirm every mute asks, for one named finding or for several at once. */
+export function muteConfirmText(what: { name: string } | { count: number }): string {
+  if ('name' in what) {
+    return `Mute "${what.name}"?\n\n` +
+      'It will be hidden from the graph, from reports, and from the AI agent, ' +
+      'which will no longer be able to see or reason about it. You can restore ' +
+      'it from Muted Nodes (in the All Nodes menu) at any time.'
+  }
+  const n = what.count
+  return `Mute ${n} finding${n === 1 ? '' : 's'}?\n\n` +
+    `${n === 1 ? 'It' : 'They'} will be hidden from the graph, from reports, and from the AI agent, ` +
+    `which will no longer be able to see or reason about ${n === 1 ? 'it' : 'them'}. You can restore ` +
+    `${n === 1 ? 'it' : 'them'} from Muted Nodes (in the All Nodes menu) at any time.`
+}
+
 export function useMuteNode(
   projectId: string | null | undefined,
   /** Switch the page to Muted Nodes; offered on the toast after a mute. */
@@ -45,10 +60,7 @@ export function useMuteNode(
       const key = target.nodeId ?? target.graphId
       if (!projectId || !key) return
       const ok = await dangerConfirm(
-        `Mute "${target.name || key}"?\n\n` +
-          'It will be hidden from the graph, from reports, and from the AI agent, ' +
-          'which will no longer be able to see or reason about it. You can restore ' +
-          'it from Muted Nodes (in the All Nodes menu) at any time.',
+        muteConfirmText({ name: target.name || key }),
         'Mute finding',
         { confirmLabel: 'Mute' },
       )
@@ -67,7 +79,9 @@ export function useMuteNode(
           },
         )
         const body = await res.json().catch(() => ({}))
-        if (res.status === 409) {
+        // A 409 that says so is the route refusing while a version activation
+        // holds the graph: the node is fine, and reloading would not help.
+        if (res.status === 409 && !body.activationInProgress) {
           // A rescan or a version activation replaced the node this view is
           // holding an id for. Silently doing nothing looked like success.
           await callbacks.onStale?.()
@@ -82,7 +96,11 @@ export function useMuteNode(
         callbacks.onMuted?.()
         toast.addToast({
           type: 'success',
-          message: 'Finding muted. It is now hidden from the agent.',
+          // Muted meanwhile by a rule, an agent or another tab: left exactly
+          // as it was, so it is not this person's mute.
+          message: body.already
+            ? 'This finding was already muted, so it was left as it was.'
+            : 'Finding muted. It is now hidden from the agent.',
           ...(onViewMuted ? { action: { label: 'View muted', onClick: onViewMuted } } : {}),
         })
       } catch (e) {

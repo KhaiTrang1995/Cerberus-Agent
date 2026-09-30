@@ -128,14 +128,39 @@ describe('T45 each disposition behaves the way it is documented', () => {
     for (const f of fieldsWhere(s => s.mcp === 'create_only')) {
       const value = legalValue(f.key, f)
       const update = filterReconSettings({ [f.key]: value }, { mode: 'update' })
+      // A target list the form lets a person edit points at the tool that may
+      // change it; the rest of the scope points at a new project.
+      const rightTool = f.rescope ? /update_project_scope/ : /create_project/
       if (update.ok) problems.push(`${f.key}: settable on an existing project`)
-      else if (!/create_project/.test(update.error)) {
+      else if (!rightTool.test(update.error)) {
         problems.push(`${f.key}: refused without naming the right tool`)
       }
       const create = filterReconSettings({ [f.key]: value }, { mode: 'create' })
       if (!create.ok) problems.push(`${f.key}: refused at CREATE too (${create.error})`)
     }
     expect(problems).toEqual([])
+  })
+
+  test('rescope mode passes exactly the rescope target lists', () => {
+    const problems: string[] = []
+    for (const f of fieldsWhere(s => s.mcp !== 'never')) {
+      const r = filterReconSettings({ [f.key]: legalValue(f.key, f) }, { mode: 'rescope' })
+      const wanted = f.mcp === 'create_only' && f.rescope === true
+      if (wanted && !r.ok) problems.push(`${f.key}: a target list refused (${r.error})`)
+      if (!wanted && r.ok) problems.push(`${f.key}: accepted, but it is not a rescope target list`)
+      if (!wanted && !r.ok && f.mcp === 'create_only' && !/stays fixed/.test(r.error)) {
+        problems.push(`${f.key}: refused without saying it stays fixed`)
+      }
+    }
+    expect(problems).toEqual([])
+    expect(fieldsWhere(s => s.rescope === true).map(f => f.key).sort()).toEqual([
+      'domainBatchHosts', 'githubTargetOrg', 'githubTargetRepos', 'gvmScanTargets',
+      'supplyChainOrgName', 'supplyChainRepoRef', 'supplyChainRepoScope', 'supplyChainRepoUrl',
+    ])
+  })
+
+  test('every rescope field is create_only, so no other tool can widen it', () => {
+    expect(fieldsWhere(s => s.rescope === true && s.mcp !== 'create_only')).toEqual([])
   })
 
   test('every never field is refused in both modes, by name', () => {
@@ -169,8 +194,8 @@ describe('T45 each disposition behaves the way it is documented', () => {
   test('the rate ceiling moves in both directions and is enforced at scan start', () => {
     // Lowering it and raising it are equally permitted and equally auditable.
     // preflight_scope_check is where a caller sees what will actually run.
-    expect(filterReconSettings({ roeGlobalMaxRps: 1 }, { current: { roeGlobalMaxRps: 3 } }).ok).toBe(true)
-    expect(filterReconSettings({ roeGlobalMaxRps: 10 }, { current: { roeGlobalMaxRps: 3 } }).ok).toBe(true)
+    expect(filterReconSettings({ roeGlobalMaxRps: 1 }).ok).toBe(true)
+    expect(filterReconSettings({ roeGlobalMaxRps: 10 }).ok).toBe(true)
     // 0 is still accepted and still means NO ceiling; the bound is what is
     // enforced, and the meaning says so where a caller reads it.
     expect(filterReconSettings({ roeGlobalMaxRps: 0 }).ok).toBe(true)

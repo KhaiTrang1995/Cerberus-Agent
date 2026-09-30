@@ -25,7 +25,9 @@ class CodeFixSettings(BaseModel):
     default_branch: str = "main"
     branch_prefix: str = "cypherfix/"
     require_approval: bool = True
-    model: str = "gpt-4o"
+    # The owner's CodeFix model from "Models by feature". Empty means none was
+    # chosen, and the session refuses to start rather than guess one.
+    model: str = ""
     max_iterations: int = 100
     tool_output_max_chars: int = 20000
     model_context_window: int = 200000

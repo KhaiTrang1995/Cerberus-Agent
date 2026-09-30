@@ -31,7 +31,9 @@ from cypherfix_triage import score_model as sm  # noqa: E402
 from cypherfix_triage.fact_queries import (  # noqa: E402
     FINDING_QUERIES,
     PROJECT_FACT_QUERIES,
+    STORED_LAYERS,
     build_project_facts,
+    finding_query_by_id,
     normalise_finding_row,
 )
 
@@ -92,6 +94,31 @@ class TestQueryInvariants(unittest.TestCase):
         graphs, and reading one spelling loses half the hosts."""
         joined = " ".join(q["query"] for q in PROJECT_FACT_QUERIES)
         self.assertIn("HAS_BASE_URL|HAS_BASEURL", joined)
+
+    @staticmethod
+    def _aliases(label):
+        query = next(q["query"] for q in FINDING_QUERIES if q["label"] == label)
+        return set(re.findall(r"\bAS\s+([A-Za-z_][A-Za-z0-9_]*)", query))
+
+    def test_the_vulnerability_query_selects_the_request(self):
+        """Without it the reviewer never saw what nuclei sent, and the request's
+        redaction never ran on live data."""
+        self.assertIn("raw_request", self._aliases("Vulnerability"))
+
+    def test_bundle_fields_the_query_never_selects(self):
+        """Every field the evidence bundle prints for a nuclei or GVM finding
+        must be selected: a field the query omits is a line that is always
+        empty, so neither the built-in reviewer nor an agent ever sees it."""
+        wanted = {
+            "Vulnerability": {"template_id", "matched_at", "matcher_name", "fuzzing_parameter",
+                              "extracted_results", "raw_request", "raw_response",
+                              "description", "qod", "qod_type", "cve_ids",
+                              "target_port", "solution_type"},
+            "ExploitGvm": {"description", "qod", "qod_type", "cve_ids", "target_port"},
+        }
+        for label, fields in wanted.items():
+            with self.subTest(label=label):
+                self.assertEqual(fields - self._aliases(label), set())
 
     def test_no_finding_query_uses_optional_match(self):
         """The row-multiplication this layer exists to fix."""
@@ -272,3 +299,74 @@ class TestTheDetectorFieldsReachTheModel(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# The layered model's reads
+# ---------------------------------------------------------------------------
+class TestTheByIdRender(unittest.TestCase):
+    """One finding, read exactly as the run reads it (2.10)."""
+
+    WRITE_CLAUSES = re.compile(
+        r"\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|LOAD\s+CSV)\b", re.I)
+
+    def test_every_finding_query_can_be_narrowed_to_one_id(self):
+        for query_def in FINDING_QUERIES:
+            with self.subTest(query=query_def["name"]):
+                cypher = finding_query_by_id(query_def)
+                self.assertIn(f"{query_def['id_expr']} = $findingId", cypher)
+
+    def test_the_narrowed_query_keeps_the_tenant_and_the_mute_exclusion(self):
+        for query_def in FINDING_QUERIES:
+            with self.subTest(query=query_def["name"]):
+                cypher = finding_query_by_id(query_def)
+                self.assertIn("user_id: $userId, project_id: $projectId", cypher)
+                self.assertRegex(cypher, r"NOT \w+:Muted")
+                self.assertIsNone(self.WRITE_CLAUSES.search(cypher))
+
+    def test_a_mal_package_is_addressed_by_its_finding_id(self):
+        mal = [q for q in FINDING_QUERIES if q["label"] == "MalPackageFinding"][0]
+        self.assertIn("coalesce(f.finding_id, f.id) = $findingId", finding_query_by_id(mal))
+
+    def test_the_scope_filters_survive_the_narrowing(self):
+        """A board row the run does not score is out of triage scope, not missing."""
+        js = [q for q in FINDING_QUERIES if q["label"] == "JsReconFinding"][0]
+        self.assertIn("<> 'js_file'", finding_query_by_id(js))
+        mal = [q for q in FINDING_QUERIES if q["label"] == "MalPackageFinding"][0]
+        self.assertIn("[:FLAGGED_AS]", finding_query_by_id(mal))
+
+
+class TestStoredLayers(unittest.TestCase):
+    Q = STORED_LAYERS["query"]
+
+    def test_it_reads_only(self):
+        self.assertIsNone(TestTheByIdRender.WRITE_CLAUSES.search(self.Q))
+
+    def test_it_is_tenant_scoped_and_skips_muted_nodes(self):
+        self.assertIn("{user_id: $userId, project_id: $projectId}", self.Q)
+        self.assertIn("NOT n:Muted", self.Q)
+
+    def test_it_returns_both_layers_and_the_legacy_cache_key(self):
+        for column in ("triage_status", "triage_source", "triage_verdict_channel",
+                       "triage_ai_verdict", "triage_ai_channel", "triage_ai_evidence_hash",
+                       "triage_ai_prompt_version", "triage_ai_model", "triage_fix_lever",
+                       "triage_evidence_hash"):
+            with self.subTest(column=column):
+                self.assertIn(f"AS {column}", self.Q)
+
+    def test_a_mal_package_joins_on_its_finding_id(self):
+        self.assertIn("coalesce(n.finding_id, n.id)", self.Q)
+
+
+class TestDetectorLearningFilters(unittest.TestCase):
+    """C13 / P1: whose clicks may teach this user's detectors."""
+    Q = [q for q in PROJECT_FACT_QUERIES if q["name"] == "detector_labels"][0]["query"]
+
+    def test_only_this_user_s_own_decisions_count(self):
+        """An imported project keeps its previous owner's decisions."""
+        self.assertIn("coalesce(n.triage_verdict_by, n.user_id) = $userId", self.Q)
+
+    def test_only_decisions_made_in_the_app_count(self):
+        """An unattended agent over MCP must not retune detectors everywhere."""
+        self.assertIn("coalesce(n.triage_verdict_channel, 'app') = 'app'", self.Q)
+

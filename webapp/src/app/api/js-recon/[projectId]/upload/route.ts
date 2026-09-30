@@ -122,7 +122,10 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     const buffer = Buffer.from(await file.arrayBuffer())
     await writeFileFs(filePath, buffer)
 
-    // Update jsReconUploadedFiles in the project (skip if project doesn't exist yet -- during creation)
+    // Update jsReconUploadedFiles in the project (skip if project doesn't exist yet -- during creation).
+    // Its new updatedAt goes back to the settings form, whose save is a
+    // compare-and-swap on it.
+    let projectUpdatedAt: Date | null = null
     try {
       const currentFiles = (await prisma.project.findUnique({
         where: { id: projectId },
@@ -130,10 +133,12 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       }))?.jsReconUploadedFiles || []
 
       if (!currentFiles.includes(filename)) {
-        await prisma.project.update({
+        const updated = await prisma.project.update({
           where: { id: projectId },
-          data: { jsReconUploadedFiles: [...currentFiles, filename] }
+          data: { jsReconUploadedFiles: [...currentFiles, filename] },
+          select: { updatedAt: true },
         })
+        projectUpdatedAt = updated.updatedAt
       }
     } catch {
       // Project may not exist yet (pre-generated ID during creation) -- file is on disk, DB update will happen on save
@@ -141,6 +146,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
 
     return NextResponse.json({
       uploaded: { name: filename, size: file.size, path: filePath },
+      projectUpdatedAt,
     })
   } catch (error) {
     console.error('Error uploading JS file:', error)
@@ -180,12 +186,13 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
 
     // Remove from jsReconUploadedFiles
     const updatedFiles = (project.jsReconUploadedFiles || []).filter(f => f !== safeName)
-    await prisma.project.update({
+    const updated = await prisma.project.update({
       where: { id: projectId },
-      data: { jsReconUploadedFiles: updatedFiles }
+      data: { jsReconUploadedFiles: updatedFiles },
+      select: { updatedAt: true },
     })
 
-    return NextResponse.json({ deleted: safeName })
+    return NextResponse.json({ deleted: safeName, projectUpdatedAt: updated.updatedAt })
   } catch (error) {
     console.error('Error deleting JS file:', error)
     return NextResponse.json({ error: 'Failed to delete file' }, { status: 500 })

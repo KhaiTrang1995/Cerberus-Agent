@@ -99,7 +99,9 @@ def deterministic_prose(group: dict) -> dict:
     key = str(group.get("key") or "")
     row = best.get("_row") or {}
 
-    solution = str(best.get("fix_lever") or "").strip()
+    # Only a built-in review's fix lever: an external agent's text must never
+    # reach Remediation.solution, which the CodeFix agent acts on.
+    solution = "" if best.get("review_channel") == "mcp" else str(best.get("fix_lever") or "").strip()
     if not solution and key.startswith("pkg:"):
         package = key.split(":", 1)[1]
         fixed = row.get("fixed_version")
@@ -171,6 +173,8 @@ def build_remediation(group: dict, rank: int, run_id: str, target_repo: str,
 
     quote = ""
     for member in members:
+        if member.get("review_channel") == "mcp":
+            continue
         candidate = str(member.get("ai_quote") or "").strip()
         if candidate:
             quote = candidate

@@ -9,7 +9,7 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
-from typing import Dict, Optional, Any, Callable
+from typing import Dict, List, Optional, Any, Callable
 from enum import Enum
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -416,6 +416,21 @@ class WebSocketManager:
     def clear_task(self, session_key: str):
         """Remove task from registry"""
         self._active_tasks.pop(session_key, None)
+
+    def live_session_ids(self, project_id: str) -> List[str]:
+        """Session ids of PROJECT whose agent task is still running.
+
+        The webapp's Conversation.agentRunning flag is cleared by a fire-and-forget
+        PATCH that a restarted or killed agent never sends; this registry is what
+        the webapp checks a set flag against before treating the project as busy.
+        """
+        live = []
+        for key in list(self._active_tasks):
+            _user, _, rest = key.partition(":")
+            key_project, _, session_id = rest.partition(":")
+            if key_project == project_id and self.get_task(key) is not None:
+                live.append(session_id)
+        return live
 
     def register_callback(self, session_key: str, callback: 'StreamingCallback'):
         """Register the live StreamingCallback for a session (survives reconnect)."""

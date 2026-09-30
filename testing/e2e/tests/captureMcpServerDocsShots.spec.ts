@@ -33,7 +33,7 @@ const TOKENS = [
   },
   {
     id: 'doc-token-3', name: 'triage assistant (old)', tokenPrefix: 'rdmn_mcp_09e6d4b1',
-    scopes: ['recon:read', 'triage:read', 'triage:write'],
+    scopes: ['recon:read', 'triage:read', 'triage:write', 'triage:mute'],
     lastUsedAt: iso(-12), expiresAt: iso(30), revokedAt: iso(-10), createdAt: iso(-60),
   },
 ]
@@ -83,7 +83,9 @@ test.beforeEach(async ({ context, baseURL, page }) => {
     }))
     localStorage.setItem('redamon-github-star-dismissed', '1')
   })
-  await page.setViewportSize({ width: 1400, height: 1400 })
+  // Tall enough for the whole token form: an element shot of anything past the
+  // viewport renders blank under the fixed status bar.
+  await page.setViewportSize({ width: 1400, height: 2800 })
   await stubTokenApi(page)
 })
 
@@ -98,7 +100,7 @@ test('every row keeps its Edit and Revoke buttons inside the panel', async ({ pa
   // and pushed the row actions past its right edge, behind a scrollbar.
   await page.setViewportSize({ width: 1280, height: 900 })
   await page.route(`**/api/users/${USER}/mcp-tokens`, route => route.fulfill({
-    json: { tokens: [{ ...TOKENS[0], name: 'e2e full', scopes: ['recon:read', 'recon:scan', 'recon:overwrite', 'recon:settings', 'triage:read', 'recon:queue', 'triage:write', 'graph:cypher', 'kali:exec'] }, ...TOKENS] },
+    json: { tokens: [{ ...TOKENS[0], name: 'e2e full', scopes: ['recon:read', 'recon:scan', 'recon:overwrite', 'recon:settings', 'triage:read', 'recon:queue', 'triage:write', 'triage:mute', 'graph:cypher', 'preset:write', 'preset:apply', 'project:rescope', 'kali:exec'] }, ...TOKENS] },
   }))
   await openTab(page)
   const wrap = await page.locator('[class*="__tableWrap"]').boundingBox()
@@ -110,7 +112,9 @@ test('every row keeps its Edit and Revoke buttons inside the panel', async ({ pa
 
 test('Edit token panel', async ({ page }) => {
   await openTab(page)
-  await page.getByTitle('Edit').nth(1).click()
+  // Row actions live behind each row's kebab menu.
+  await page.getByLabel('Actions for CI nightly rescan').click()
+  await page.getByRole('menuitem', { name: 'Edit' }).click()
   await page.getByLabel('Expires').selectOption('date')
   await page.getByLabel('Expiry date').fill('2027-03-31')
   await page.locator('label', { hasText: 'graph:cypher' }).locator('input[type="checkbox"]').check()
@@ -124,9 +128,9 @@ test('Edit token panel', async ({ page }) => {
 test('New token form with its permissions', async ({ page }) => {
   await openTab(page)
   await page.getByRole('button', { name: 'New token' }).click()
-  await page.getByLabel('Name').fill('CI nightly rescan')
+  await page.getByLabel('Name', { exact: true }).fill('CI nightly rescan')
   await page.getByLabel('Expires').selectOption('365')
-  for (const scope of ['recon:scan', 'recon:settings', 'triage:read']) {
+  for (const scope of ['recon:scan', 'recon:settings', 'triage:read', 'triage:mute']) {
     await page.locator('label', { hasText: scope }).locator('input[type="checkbox"]').check()
   }
   const form = page.getByRole('heading', { name: 'New access token' })
@@ -136,10 +140,25 @@ test('New token form with its permissions', async ({ page }) => {
   await form.screenshot({ path: join(OUT, 'mcp-server-new-token.png') })
 })
 
+test('Agent Profile picker offering an opt-in permission', async ({ page }) => {
+  // Triage assistance ticks its permissions and offers triage:mute unticked:
+  // the opt-in convention the wiki describes next to this image.
+  await openTab(page)
+  await page.getByRole('button', { name: 'New token' }).click()
+  await page.getByLabel('Name', { exact: true }).fill('triage assistant')
+  await page.getByLabel('Agent Profile').selectOption('triage')
+  await expect(page.locator('label', { hasText: 'triage:mute' }).locator('input[type="checkbox"]')).not.toBeChecked()
+  const form = page.getByRole('heading', { name: 'New access token' })
+    .locator('xpath=ancestor::div[contains(@class,"__formBlock")][1]')
+  await form.scrollIntoViewIfNeeded()
+  await page.waitForTimeout(300)
+  await form.screenshot({ path: join(OUT, 'mcp-server-profile-picker.png') })
+})
+
 test('Token shown once with the client snippet', async ({ page }) => {
   await openTab(page)
   await page.getByRole('button', { name: 'New token' }).click()
-  await page.getByLabel('Name').fill('Claude Code (laptop)')
+  await page.getByLabel('Name', { exact: true }).fill('Claude Code (laptop)')
   await page.getByLabel('Confirm your password').fill('not-a-real-password')
   await page.getByRole('button', { name: 'Create token' }).click()
   const panel = page.getByText('Copy this token now', { exact: false })

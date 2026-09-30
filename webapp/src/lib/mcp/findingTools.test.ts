@@ -126,11 +126,25 @@ describe('list_findings tells the caller whether a ranking exists', () => {
     expect((await listFindings(ctx(), 'p1')).triageState).toBe('partial')
   })
 
-  test('the state comes from the run table, not from the page', async () => {
+  test('the state comes from the run table: a ranked page never makes it current', async () => {
     // A page is at most 100 rows out of thousands, so "every row I can see
-    // carries a run id" is not evidence about the project.
+    // carries a run id" is not evidence that a run completed here.
+    h.triageRuns.mockResolvedValue([{ status: 'failed', finishedAt: new Date() }])
+    agentReturns({ findings: [finding({ section: 0, triage_run_id: 'r1' })], total: 900 })
+    expect((await listFindings(ctx(), 'p1')).triageState).toBe('partial')
+  })
+
+  test('no runs but ranked findings is an imported project, not never_run (C17)', async () => {
     h.triageRuns.mockResolvedValue([])
     agentReturns({ findings: [finding({ section: 0, triage_run_id: 'r1' })], total: 900 })
+    const out = await listFindings(ctx(), 'p1')
+    expect(out.triageState).toBe('imported')
+    expect(out.triageStateNote).toMatch(/imported/)
+  })
+
+  test('no runs and nothing ranked is never_run', async () => {
+    h.triageRuns.mockResolvedValue([])
+    agentReturns({ findings: [finding({ section: 1, triage_run_id: '' })], total: 1 })
     expect((await listFindings(ctx(), 'p1')).triageState).toBe('never_run')
   })
 
@@ -138,6 +152,53 @@ describe('list_findings tells the caller whether a ranking exists', () => {
     h.triageRuns.mockRejectedValue(new Error('db down'))
     agentReturns({ findings: [finding()], total: 1 })
     expect((await listFindings(ctx(), 'p1')).triageState).toBe('never_run')
+  })
+})
+
+describe('list_findings carries the layers', () => {
+  test('the rules-only score, the layer that decided, and who reviewed it', async () => {
+    agentReturns({ findings: [finding({
+      triage_math_score: 62.5, triage_tier_rule: 'likely real', triage_decided_by: 'review',
+      triage_fix_lever: 'remove the file', reviewed_via: 'mcp', review_state: 'stale',
+      decided_via: '', triage_ai_why: 'AGENT-WHY', triage_base_factors: '{"C":{}}',
+    })], total: 1 })
+    const [row] = (await listFindings(ctx(), 'p1')).findings as Array<Record<string, unknown>>
+    expect(row).toMatchObject({ triage_math_score: 62.5, triage_tier_rule: 'likely real',
+                                triage_decided_by: 'review',
+                                reviewedBy: 'mcp', reviewCurrent: false })
+    expect(row.decidedVia).toBeUndefined()
+    expect(JSON.stringify(row)).not.toMatch(/AGENT-WHY|triage_base_factors/)
+  })
+
+  test('an agent\'s fix lever reaches another agent only on request', async () => {
+    // It is reviewer text an external agent may have written, and it went out
+    // to every recon:read token by default.
+    const review = { triage_fix_lever: 'AGENT-LEVER', reviewed_via: 'mcp', review_state: 'current' }
+    agentReturns({ findings: [finding(review)], total: 1 })
+    const [plain] = (await listFindings(ctx(), 'p1')).findings as Array<Record<string, unknown>>
+    expect(JSON.stringify(plain)).not.toMatch(/AGENT-LEVER/)
+    agentReturns({ findings: [finding(review)], total: 1 })
+    const [asked] = (await listFindings(ctx(), 'p1', { includeQuotes: true }))
+      .findings as Array<Record<string, unknown>>
+    expect(asked.triage_fix_lever).toBe('AGENT-LEVER')
+  })
+
+  test('a person\'s decision says how it arrived', async () => {
+    agentReturns({ findings: [finding({ decided_via: 'app', reviewed_via: 'none' })], total: 1 })
+    const [row] = (await listFindings(ctx(), 'p1')).findings as Array<Record<string, unknown>>
+    expect(row.decidedVia).toBe('app')
+    expect(row.reviewedBy).toBeUndefined()
+  })
+
+  test('the layer filters are pushed down, so the total is exact', async () => {
+    agentReturns({ findings: [finding()], total: 7 })
+    const out = await listFindings(ctx(), 'p1', { decidedBy: 'person', reviewedVia: 'builtin',
+                                                   reviewCurrent: 'current' })
+    const sent = JSON.parse(h.fetch.mock.calls[0][1].body)
+    expect(sent).toMatchObject({ decided_by: 'person', reviewed_via: 'builtin',
+                                 review_current: 'current' })
+    expect(out.total).toBe(7)
+    expect(out).not.toHaveProperty('totalIsPartial')
   })
 })
 
@@ -435,14 +496,50 @@ describe('list_muted_findings: people and filter rules', () => {
   test('people and rules are grouped and counted apart', async () => {
     agentReturns({ findings: [muted(), ruleMuted(), ruleMuted({ id: 'r2' })], total: 3 })
     const r = await listMuted(ctx(), 'p1')
-    expect(r.mutedVia).toEqual({ person: 1, rule: 2 })
+    expect(r.mutedVia).toEqual({ person: 1, multi: 0, rule: 2, mcp: 0 })
     expect(r.groups[0]).toMatchObject({ muted_via: 'rule', count: 2, reasons: ['Filter rule: Informational templates'] })
     expect(r.groups[1]).toMatchObject({ muted_via: 'person', count: 1 })
   })
 
   test('a rule mute is recognised by its muted_by even from an older agent', async () => {
     agentReturns({ findings: [muted({ muted_by: 'rule:secret/p81c0d' })] })
-    expect((await listMuted(ctx(), 'p1')).mutedVia).toEqual({ person: 0, rule: 1 })
+    expect((await listMuted(ctx(), 'p1')).mutedVia).toEqual({ person: 0, multi: 0, rule: 1, mcp: 0 })
+  })
+
+  test('an agent\'s (MCP) mute is counted apart from a person\'s, with its token', async () => {
+    // It keeps its owner's user id in muted_by, so without the channel it would
+    // read as that person's own judgement.
+    const agentMute = muted({
+      id: 'a1', muted_via: 'mcp', muted_channel: 'mcp', muted_token: 'rdmn_mcp_ab12cd34',
+    })
+    agentReturns({ findings: [muted(), agentMute], total: 2 })
+    const r = await listMuted(ctx(), 'p1', { detail: true })
+    expect(r.mutedVia).toEqual({ person: 1, multi: 0, rule: 0, mcp: 1 })
+    expect(r.groups.map(g => g.muted_via).sort()).toEqual(['mcp', 'person'])
+    const row = r.findings!.find(f => f.id === 'a1')!
+    expect(row).toMatchObject({ muted_via: 'mcp', mutedByToken: 'rdmn_mcp_ab12cd34' })
+    expect(r.findings!.find(f => f.id !== 'a1')).not.toHaveProperty('mutedByToken')
+  })
+
+  test('a Multi mute is a person\'s, counted apart from one judged one by one', async () => {
+    const bulk = muted({ id: 'b1', muted_via: 'multi', muted_channel: 'multi', muted_token: 'mm-0123abcd' })
+    agentReturns({ findings: [muted(), bulk], total: 2 })
+    const r = await listMuted(ctx(), 'p1', { detail: true })
+    expect(r.mutedVia).toEqual({ person: 1, multi: 1, rule: 0, mcp: 0 })
+    const row = r.findings!.find(f => f.id === 'b1')!
+    expect(row).toMatchObject({ muted_via: 'multi' })
+    // A batch id is not an access token and is never reported as one.
+    expect(row).not.toHaveProperty('mutedByToken')
+  })
+
+  test('an older agent\'s row with only the multi channel is still a Multi mute', async () => {
+    agentReturns({ findings: [muted({ muted_channel: 'multi' })], total: 1 })
+    expect((await listMuted(ctx(), 'p1')).mutedVia).toEqual({ person: 0, multi: 1, rule: 0, mcp: 0 })
+  })
+
+  test('an older agent\'s row with only the channel is still an agent mute', async () => {
+    agentReturns({ findings: [muted({ muted_channel: 'mcp' })], total: 1 })
+    expect((await listMuted(ctx(), 'p1')).mutedVia).toEqual({ person: 0, multi: 0, rule: 0, mcp: 1 })
   })
 
   test('rows name their rule, or say it was deleted', async () => {

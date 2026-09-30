@@ -184,6 +184,31 @@ describe('create_project fixes scope, and only here', () => {
   })
 })
 
+describe('B-3: create_project runs the hard guardrail the form runs', () => {
+  // Scan start refuses these anyway, but a project nobody may ever scan should
+  // not be created either, least of all with an authorization record attached.
+  test('a permanently blocked single domain is refused and nothing is written', async () => {
+    await expect(createProject(ctx(), {
+      name: 'test', engagementKind: 'internal', targetDomain: 'portal.example.gov',
+    })).rejects.toThrow(/permanently blocked: portal\.example\.gov/)
+    expect(h.createProject).not.toHaveBeenCalled()
+  })
+
+  test('a wildcard is stripped before the check, not used to slip past it', async () => {
+    await expect(createProject(ctx(), {
+      name: 'test', engagementKind: 'internal', targetDomain: '*.example.gov',
+    })).rejects.toThrow(/permanently blocked/)
+  })
+
+  test('one blocked root refuses the whole batch', async () => {
+    await expect(createProject(ctx(), {
+      name: 'test', engagementKind: 'internal',
+      domainBatchHosts: ['a.example.com', 'portal.example.gov'],
+    })).rejects.toThrow(/permanently blocked: example\.gov/)
+    expect(h.createProject).not.toHaveBeenCalled()
+  })
+})
+
 describe('create_project enforces the third-party rule before writing anything', () => {
   test('third_party with no ceiling is refused', async () => {
     await expect(createProject(ctx(), {
@@ -379,8 +404,8 @@ describe('an engagement limit is changed with update_recon_settings', () => {
   test('lowering the ceiling is accepted', async () => {
     h.findProject.mockResolvedValue(projectRow({ roeGlobalMaxRps: 3 }))
     await updateReconSettings(ctx(['recon:settings']), 'p1', { roeGlobalMaxRps: 1 })
-    expect(h.updateProject).toHaveBeenCalled()
-    expect(h.updateProject.mock.calls[0][0].data).toEqual({ roeGlobalMaxRps: 1 })
+    expect(h.updateManyProject).toHaveBeenCalled()
+    expect(h.updateManyProject.mock.calls[0][0].data).toEqual({ roeGlobalMaxRps: 1 })
   })
 
   test('raising the ceiling is ALSO accepted, and audited', async () => {
@@ -390,7 +415,7 @@ describe('an engagement limit is changed with update_recon_settings', () => {
     // the resolved rates. The audit row is what records the move.
     h.findProject.mockResolvedValue(projectRow({ roeGlobalMaxRps: 3 }))
     await updateReconSettings(ctx(['recon:settings']), 'p1', { roeGlobalMaxRps: 10 })
-    expect(h.updateProject.mock.calls[0][0].data).toEqual({ roeGlobalMaxRps: 10 })
+    expect(h.updateManyProject.mock.calls[0][0].data).toEqual({ roeGlobalMaxRps: 10 })
     const row = h.audit.mock.calls[0][0]
     expect(row.before).toEqual({ roeGlobalMaxRps: 3 })
   })

@@ -1,58 +1,51 @@
 /**
- * The one write to a finding on this surface: a triage verdict.
+ * A person's decision on a finding, over MCP: Real, False positive, or Reset.
  *
- * It closes the loop for an external triage assistant, whose judgement would
- * otherwise be recomputed from scratch by the next nightly run.
+ * It closes the loop for an external triage assistant. The decision layer
+ * always wins over the rules and any review, and the agent rescores the finding
+ * in the same transaction, so the answer carries the score before and after.
  *
  * THE PROVENANCE DESIGN IS NOT THE OBVIOUS ONE. The instinct is to write a
  * third `triage_source` value so an agent's verdict is not laundered as a
- * human's. That is wrong, and it was checked across every site that reads the
- * field: `triage_source` is a closed two-value set four separate behaviours
- * branch on. A third value makes the finding prune-eligible, so the next scan
- * DELETES it rather than stamping `stale_since`; it lets a later AI run
- * overwrite the verdict, because the publish guard tests equality with
- * 'human'; it stops `likely_noise` producing a false-positive state, because
- * the scorer tests membership of ("human","ai"); and it renders as "Not
- * reviewed" in the board.
+ * human's. That is wrong: `triage_source = 'human'` is what the prune keeps and
+ * the Mute Rules guards read, so a third value would make the finding
+ * prune-eligible. The verdict stays `'human'` - the token is the operator's own
+ * delegated credential carrying their authority - and the CHANNEL is recorded
+ * separately (`triage_verdict_channel = 'mcp'`, with the token prefix).
  *
- * So the verdict stays `'human'` - honest in the sense that matters, since the
- * token is the operator's own delegated credential carrying their authority -
- * and the CHANNEL is recorded separately, on a property that no branch reads.
- *
- * MUTE AND UNMUTE ARE NOT HERE, in either direction. Mute is the one action
- * that makes a finding invisible to every other read on this surface, and
- * "this is a false positive, mute it" is an entirely plausible injection
- * against an agent whose context is full of target-controlled text. Unmute is
- * out for a less obvious reason: the triage subsystem's stated invariant is
- * that only a person mutes, which is precisely what bounds a prompt injection
- * in scanner output to "mislabel a verdict a human can overrule". Handing
- * unmute to an unattended token removes that bound, and reversing a
- * suppression is the same control operated in the direction that makes hidden
- * findings visible again.
- *
- * Which is also why a verdict on a MUTED finding is refused. A human verdict is
- * one of the Mute Rules guards, so on a rule-muted finding it releases the mute
- * at the next apply or scan: the same unmute, one step removed. The agent keys
- * the refusal on the MCP channel and checks it under the node's write lock, in
- * the same statement as the write.
+ * WHAT A TOKEN MAY NOT DO
+ * - Change or reset a decision a person made in the APP (`decided_in_app`). An
+ *   absent channel is the app: every decision made before channels existed was
+ *   a person's click. MCP creates, changes and resets MCP decisions only.
+ * - Decide a MUTED finding. A human verdict is one of the Mute Rules guards, so
+ *   on a rule-muted finding it would release the mute at the next apply: an
+ *   unmute by another name, reachable without the mute permission. A person
+ *   who wants a muted finding judged unmutes it first.
+ * - Write while a triage run is live UNLESS the agent acknowledges that its
+ *   publish honours decisions made meanwhile (`layered_publish`). An older
+ *   agent would re-file the finding from its pre-verdict analysis, so without
+ *   the acknowledgement the write is refused: version skew fails closed. That
+ *   check lives in `lib/triage/actions.ts`, shared with the UI door.
  */
 import { requireScope } from '@/lib/mcpAuth'
 import { assertMcpProjectAccess } from '@/lib/mcpAuth'
 import { writeAudit } from '@/lib/audit'
-import { findLiveTriageRun } from '@/lib/triageRun'
 import { McpToolError } from '@/lib/mcp/errors'
-import { callTriage } from '@/lib/mcp/triageGraph'
 import { enforceRate, type McpContext } from '@/lib/mcp/tools'
+import {
+  recordVerdict, TriageActionError, VERDICT_STATUSES as ACTION_STATUSES, type VerdictStatus,
+} from '@/lib/triage/actions'
 
-export const VERDICT_STATUSES = ['confirmed', 'likely_noise', 'unreviewed'] as const
-export type VerdictStatus = (typeof VERDICT_STATUSES)[number]
+export const VERDICT_STATUSES = ACTION_STATUSES
+export type { VerdictStatus }
 
 export async function setFindingVerdict(
   ctx: McpContext,
   projectId: string,
   nodeId: string,
   status: string,
-  reason?: string
+  reason?: string,
+  label?: string
 ) {
   requireScope(ctx.token, 'triage:write')
   enforceRate(ctx, 'write')
@@ -65,72 +58,57 @@ export async function setFindingVerdict(
     )
   }
 
-  // REFUSE WHILE A TRIAGE RUN IS LIVE, and fail closed if the run state cannot
-  // be read. A run reads the graph at its first step and publishes minutes
-  // later, and while its verdict-writing steps do protect a human verdict, its
-  // MEASUREMENT step is unconditional and rewrites `triage_state` - which is
-  // what files a finding into a board section. Worse, a verdict does not touch
-  // `updated_at`, so the publish-time "unchanged" guard still matches and the
-  // row is written. The concrete outcome: a verdict set at T+3min says
-  // confirmed, and the run publishing at T+8min files it under False Positive
-  // from its own pre-verdict analysis. Rare for a human, routine for an
-  // unattended agent.
-  let liveRun
+  let result
   try {
-    liveRun = await findLiveTriageRun(projectId)
+    result = await recordVerdict(
+      { userId: ctx.token.userId, projectId },
+      {
+        findingId: nodeId,
+        status: status as VerdictStatus,
+        reason: (reason ?? '').slice(0, 500),
+        label,
+        channel: 'mcp',
+        verdictBy: ctx.token.userId,
+        tokenPrefix: ctx.token.tokenPrefix,
+      },
+    )
   } catch (err) {
-    console.error('[mcp] triage run state unreadable:', err)
-    throw new McpToolError(
-      'Whether a triage run is in progress could not be determined, so the verdict was not ' +
-      'written. A run publishing over it would silently re-file the finding.',
-      'busy'
-    )
-  }
-  if (liveRun) {
-    throw new McpToolError(
-      `A triage run is ${liveRun.status} on this project. A verdict written now would be ` +
-      `silently re-filed when that run publishes. Retry once it has finished.`,
-      'busy'
-    )
-  }
-
-  const body = await callTriage('human_verdict', ctx.token.userId, projectId, {
-    node_id: nodeId,
-    status,
-    reason: (reason ?? '').slice(0, 500),
-    verdict_by: ctx.token.userId,
-  })
-
-  if (body.updated !== true && body.reason === 'muted') {
-    throw new McpToolError(
-      'The verdict was NOT recorded: this finding is muted, and judging a muted finding is left ' +
-      'to a person, in RedAmon. On a finding a Mute Rule muted, a verdict would release the mute. ' +
-      'Nothing was written.',
-      'muted'
-    )
-  }
-
-  // The op answers HTTP 200 in two other failure shapes, and both carry
-  // `updated: false`. Reporting either as success would tell a caller its
-  // judgement was recorded when nothing was written.
-  if (body.updated !== true) {
-    const why = typeof body.reason === 'string' ? ` (${body.reason})` : ''
-    // list_findings returns a graph `nodeId` beside the finding `id`, and the
-    // input here is also called nodeId, so the likeliest wrong value is that one.
-    const nodeIdHint = /^\d+$/.test(nodeId)
-      ? ` "${nodeId}" looks like a graph Node ID (the \`nodeId\` field); pass the finding's \`id\` instead.`
-      : ''
-    throw new McpToolError(
-      `The verdict was NOT recorded${why}. The finding no longer exists, was never in this ` +
-      `project, or is not a type a verdict can be set on. A finding id is only valid until the ` +
-      `next scan of that source, so re-read list_findings before retrying.${nodeIdHint}`,
-      'not_updated'
-    )
+    if (!(err instanceof TriageActionError)) throw err
+    if (err.code === 'muted') {
+      throw new McpToolError(
+        'Refused (muted): a verdict is refused on a muted finding. If a person wants it judged, ' +
+        'unmute it first with unmute_findings (needs the triage:mute permission), then record the ' +
+        'verdict. On a finding a Mute Rule muted, a verdict alone would release the mute. Nothing ' +
+        'was written.',
+        'muted'
+      )
+    }
+    if (err.code === 'decided_in_app') {
+      throw new McpToolError(
+        'Refused (decided_in_app): a person decided this in the app, and only the app can change ' +
+        'or reset that decision. Nothing was written. Report the disagreement instead.',
+        'decided_in_app'
+      )
+    }
+    if (err.code === 'not_found' || err.code === 'not_updated') {
+      const why = err.code === 'not_updated' ? ` ${err.message}` : ''
+      // list_findings returns a graph `nodeId` beside the finding `id`, and the
+      // input here is also called nodeId, so the likeliest wrong value is that one.
+      const nodeIdHint = /^\d+$/.test(nodeId)
+        ? ` "${nodeId}" looks like a graph Node ID (the \`nodeId\` field); pass the finding's \`id\` instead.`
+        : ''
+      throw new McpToolError(
+        `Refused (not_updated): the verdict was NOT recorded.${why} The finding no longer exists, ` +
+        'was never in this project, or is not a type a verdict can be set on. A finding id is only ' +
+        `valid until the next scan of that source, so re-read list_findings before retrying.${nodeIdHint}`,
+        'not_updated'
+      )
+    }
+    throw new McpToolError(`Refused (${err.code}): ${err.message}`, err.code,
+                           Object.keys(err.details).length ? { details: err.details } : undefined)
   }
 
-  // A verdict is durable and suppresses future AI review of that finding, and
-  // neither the webapp route nor the agent recorded an actor for one. The agent
-  // now logs it too; this is the half that ties it to a token.
+  // The agent logs the verdict too; this is the half that ties it to a token.
   void writeAudit({
     actorId: ctx.token.userId,
     action: 'mcp.set_finding_verdict',
@@ -139,10 +117,12 @@ export async function setFindingVerdict(
     after: {
       projectId,
       status,
-      label: body.label ?? null,
+      label: result.label,
       channel: 'mcp',
       tokenId: ctx.token.tokenId,
       tokenPrefix: ctx.token.tokenPrefix,
+      before: result.before,
+      after: result.after,
     },
     source: 'mcp',
   })
@@ -151,15 +131,21 @@ export async function setFindingVerdict(
     projectId,
     nodeId,
     status,
-    label: body.label ?? null,
+    label: result.label,
     recorded: true,
+    rescored: result.rescored,
+    ...(result.rescoreReason ? { rescoreReason: result.rescoreReason } : {}),
+    before: result.before,
+    after: result.after,
     notes: [
-      'This verdict is durable: it survives re-scans and a later AI triage run will not ' +
-        'overwrite it.',
-      'It is recorded as a human verdict, because it carries the authority of the operator whose ' +
-        'token this is. The node separately records that it arrived over MCP.',
-      'Nothing on this surface can undo it except another verdict, and nothing here can mute or ' +
-        'unmute a finding.',
+      status === 'confirmed'
+        ? 'Real: the finding\'s `real` factor is now 100%, and its score was recomputed.'
+        : status === 'likely_noise'
+          ? 'False positive: the finding moved to the false-positive section. It is still visible; hiding it is a mute, a separate permission.'
+          : 'Reset: the decision is gone. The finding is ranked from its rules and any review again, and is no longer protected from Mute Rules or from removal when a scan stops reporting it.',
+      'It is recorded as the operator\'s decision, because it carries their authority; the node ' +
+        'separately records that it arrived over MCP, with this token\'s prefix.',
+      'A decision outranks every review, including the built-in AI\'s, and survives re-scans.',
     ],
   }
 }

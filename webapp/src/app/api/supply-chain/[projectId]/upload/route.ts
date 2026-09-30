@@ -116,8 +116,15 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     // one, so reporting success would send the operator to Start and silently
     // scan the previous SBOM. The one benign case is a project row that does
     // not exist yet (the form saves it later), which Prisma reports as P2025.
+    // The row's new updatedAt goes back to the settings form, whose next save is a
+    // compare-and-swap on it: without it the form reads this upload as a
+    // concurrent change and refuses its own save.
+    let projectUpdatedAt: Date | null = null
     try {
-      await prisma.project.update({ where: { id: projectId }, data: { supplyChainSbomFile: filename } })
+      const updated = await prisma.project.update({
+        where: { id: projectId }, data: { supplyChainSbomFile: filename }, select: { updatedAt: true },
+      })
+      projectUpdatedAt = updated.updatedAt
     } catch (err) {
       const code = (err as { code?: string })?.code
       if (code !== 'P2025') {
@@ -128,7 +135,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       }
     }
 
-    return NextResponse.json({ success: true, filename, replaced })
+    return NextResponse.json({ success: true, filename, replaced, projectUpdatedAt })
   } catch (error) {
     console.error('Error uploading SBOM:', error)
     return NextResponse.json({ error: 'Failed to upload file' }, { status: 500 })
@@ -151,6 +158,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     const projectDir = path.join(SUPPLY_CHAIN_UPLOAD_PATH, projectId)
     const filePath = path.join(projectDir, filename)
     if (existsSync(filePath)) await unlink(filePath)
+    let projectUpdatedAt: Date | null = null
     try {
       const current = await prisma.project.findUnique({ where: { id: projectId }, select: { supplyChainSbomFile: true } })
       if (current?.supplyChainSbomFile === filename) {
@@ -158,10 +166,13 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
         // project with no upload at all - there is no older file to promote.
         // (This used to hunt for the most-recent survivor, which only made
         // sense while uploads accumulated.)
-        await prisma.project.update({ where: { id: projectId }, data: { supplyChainSbomFile: '' } })
+        const updated = await prisma.project.update({
+          where: { id: projectId }, data: { supplyChainSbomFile: '' }, select: { updatedAt: true },
+        })
+        projectUpdatedAt = updated.updatedAt
       }
     } catch { /* skip */ }
-    return NextResponse.json({ success: true })
+    return NextResponse.json({ success: true, projectUpdatedAt })
   } catch (error) {
     return NextResponse.json({ error: 'Failed to delete file' }, { status: 500 })
   }

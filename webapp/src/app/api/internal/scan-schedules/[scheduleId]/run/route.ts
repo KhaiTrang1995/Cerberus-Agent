@@ -53,13 +53,16 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
     })
 
     // A one-off schedule is spent after it fires; recurring ones roll forward.
+    // `enabled` is never written back for a recurring one: the value read above
+    // predates the start, and a pause made meanwhile (a rescope that widened the
+    // batch, or a person) must survive it.
     const nextRunAt = computeNextRun(schedule, now)
     await prisma.scanSchedule.update({
       where: { id: scheduleId },
       data: {
         lastRunAt: now,
         nextRunAt,
-        enabled: schedule.mode === 'once' ? false : schedule.enabled,
+        ...(schedule.mode === 'once' ? { enabled: false } : {}),
       },
     })
 

@@ -26,6 +26,7 @@ This guide is the single entry point for developers. It covers the technology st
    - [Common Commands](#54-common-commands)
    - [Important Rules](#55-important-rules)
    - [AI-Assisted Coding](#56-ai-assisted-coding)
+   - [Several Agent Sessions in One Checkout](#57-several-agent-sessions-in-one-checkout)
 6. [Feature Development Checklists](#6-feature-development-checklists)
 7. [Debugging & Testing](#7-debugging--testing)
 8. [Environment Variables](#8-environment-variables)
@@ -754,6 +755,34 @@ Other capable models (GPT-5, Gemini 2.5 Pro) can also work, but Opus 4.6 has bee
 6. **Keep diffs minimal** — Resist the temptation to let AI refactor, reformat, or "improve" surrounding code. PRs should only contain changes relevant to the task. Large AI-generated diffs that touch unrelated files are hard to review and will be rejected.
 7. **No AI-generated comments or docs unless requested** — Don't let AI litter the code with docstrings, inline comments, or type annotations that weren't there before. Follow the existing code style.
 8. **Validate Cypher queries and Prisma schemas** — AI models frequently hallucinate Neo4j node labels, relationship types, and Prisma field names. Always cross-check generated queries against [graph_db/schema_sections.md](../../graph_db/schema_sections.md) - the single declaration of every label, property and relationship - and the actual Prisma schema.
+
+### 5.7 Several Agent Sessions in One Checkout
+
+Parallel agent sessions in one working tree share its git index, so a plain
+`git add` / `git commit` sweeps in, or reverts, another session's work. Never
+`git add -A`, `git commit -a`, `stash`, `checkout` or `reset --hard` in a shared
+tree. Commit only your own paths through a private index, with a compare-and-swap
+on the branch:
+
+```bash
+old=$(git rev-parse HEAD)
+export GIT_INDEX_FILE="$(git rev-parse --absolute-git-dir)/priv.idx"
+git read-tree HEAD
+git add -- path/one path/two                 # your files, staged privately
+# a file that ALSO holds another session's hunks: stage HEAD + only your edits
+git update-index --add --cacheinfo 100644,$(git hash-object -w mine.tmp),path/three
+tree=$(git write-tree)
+new=$(git commit-tree "$tree" -p "$old" -F msg.txt)
+rm "$GIT_INDEX_FILE"; unset GIT_INDEX_FILE
+git update-ref refs/heads/<branch> "$new" "$old"   # refuses if HEAD moved meanwhile
+git reset -q -- path/one path/two path/three       # shared index follows YOUR paths only
+```
+
+Skip the final `reset` and the next session's commit silently reverts yours. To
+test the exact tree before committing, export it with
+`GIT_INDEX_FILE=... git checkout-index -a --prefix=<dir>/` and run the checks
+there. The same technique works in the `redamon.wiki` submodule; its gitlink in
+the parent repository uses mode `160000`.
 
 ---
 

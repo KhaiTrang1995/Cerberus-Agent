@@ -91,7 +91,7 @@ describe('PUT keeps only scalar columns', () => {
       nodeFilterExemptions: { deleteMany: {} },
     })
     expect(res.status).toBe(200)
-    expect(mockProjectUpdate.mock.calls[0][0].data).toEqual({ name: 'renamed' })
+    expect(mockProjectUpdate.mock.calls[0][0].data).toEqual({ name: 'renamed', updatedById: 'owner' })
   })
 
   test('any relation, and any key that is not a column, is dropped', async () => {
@@ -100,7 +100,7 @@ describe('PUT keeps only scalar columns', () => {
       name: 'x', nucleiSeverity: ['high'],
       scanJobs: { create: [{}] }, triageRuns: { deleteMany: {} }, notAColumn: 1,
     })
-    expect(mockProjectUpdate.mock.calls[0][0].data).toEqual({ name: 'x', nucleiSeverity: ['high'] })
+    expect(mockProjectUpdate.mock.calls[0][0].data).toEqual({ name: 'x', nucleiSeverity: ['high'], updatedById: 'owner' })
   })
 })
 

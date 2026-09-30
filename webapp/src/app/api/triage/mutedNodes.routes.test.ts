@@ -6,6 +6,8 @@
  *    with its rule's name, or as deleted when the rule no longer exists;
  *  - an unmute ALWAYS records an exemption, so no filter rule mutes that node
  *    again, and the audit row names the real actor behind an act-as session;
+ *  - a mute or unmute is refused while a version activation holds the graph,
+ *    and when that cannot be read, because activation would swallow it;
  *  - the mutating triage routes refuse a body that is not JSON (the CSRF
  *    control for a SameSite=lax cookie).
  *
@@ -17,7 +19,7 @@ import { NextRequest } from 'next/server'
 const mockRequireEff = vi.fn()
 const mockProjectFind = vi.fn()
 const mockFilterFind = vi.fn()
-const mockExemptionUpsert = vi.fn()
+const mockExemptionCreate = vi.fn()
 const mockAgentFetch = vi.fn()
 const mockAudit = vi.fn()
 const mockSession = vi.fn()
@@ -28,7 +30,7 @@ vi.mock('@/lib/prisma', () => ({
   default: {
     project: { findUnique: (...a: unknown[]) => mockProjectFind(...a) },
     projectNodeFilter: { findUnique: (...a: unknown[]) => mockFilterFind(...a) },
-    nodeFilterExemption: { upsert: (...a: unknown[]) => mockExemptionUpsert(...a) },
+    nodeFilterExemption: { createManyAndReturn: (...a: unknown[]) => mockExemptionCreate(...a) },
   },
 }))
 vi.mock('@/lib/agentFetch', () => ({
@@ -81,7 +83,8 @@ beforeEach(() => {
   mockProjectFind.mockResolvedValue({ id: PROJECT, userId: OWNER })
   mockFilterFind.mockResolvedValue({ rules: DOC })
   mockSession.mockResolvedValue({ userId: 'admin-bob', role: 'admin' })
-  mockExemptionUpsert.mockResolvedValue({})
+  mockExemptionCreate.mockImplementation(({ data }: { data: { label: string; nodeKey: string }[] }) =>
+    Promise.resolve(data.map(d => ({ label: d.label, nodeKey: d.nodeKey }))))
   mockNodeFilterWriter.mockResolvedValue(null)
 })
 
@@ -189,7 +192,7 @@ describe('POST /api/triage/unmute', () => {
     const res = await postUnmute(post(URL, { projectId: PROJECT, keys: ['v1'] }))
     expect(res.status).toBe(404)
     expect(mockAgentFetch).not.toHaveBeenCalled()
-    expect(mockExemptionUpsert).not.toHaveBeenCalled()
+    expect(mockExemptionCreate).not.toHaveBeenCalled()
   })
 
   test('unmutes the batch and exempts every finding it actually unmuted', async () => {
@@ -205,9 +208,13 @@ describe('POST /api/triage/unmute', () => {
     expect(sentBodies()[0]).toMatchObject({ op: 'unmute_many', keys: ['v1', 'f9', 'nope'] })
     expect(body).toMatchObject({ unmuted: 2, exempted: 2 })
     // A person's mute is exempted too: an operator's unmute always sticks.
-    expect(mockExemptionUpsert).toHaveBeenCalledTimes(2)
-    const created = mockExemptionUpsert.mock.calls.map(c => (c[0] as { create: Record<string, unknown> }).create)
-    expect(created[1]).toEqual({
+    expect(mockExemptionCreate).toHaveBeenCalledOnce()
+    const { data, skipDuplicates } = mockExemptionCreate.mock.calls[0][0] as {
+      data: Record<string, unknown>[]; skipDuplicates: boolean
+    }
+    expect(skipDuplicates).toBe(true)
+    expect(data).toHaveLength(2)
+    expect(data[1]).toEqual({
       projectId: PROJECT, label: 'MalPackageFinding', nodeKey: 'f9',
       createdBy: OWNER, realActorUserId: 'admin-bob',
     })
@@ -239,7 +246,20 @@ describe('POST /api/triage/unmute', () => {
     expect((await res.json()).error).toMatch(/mute rules are being applied/)
     expect(mockNodeFilterWriter).toHaveBeenCalledWith(PROJECT)
     expect(mockAgentFetch).not.toHaveBeenCalled()
-    expect(mockExemptionUpsert).not.toHaveBeenCalled()
+    expect(mockExemptionCreate).not.toHaveBeenCalled()
+  })
+
+  test('an unmute is refused while a version activation holds the graph', async () => {
+    // Activation freezes, clears and restores the graph: an unmute in between
+    // returns success and is gone.
+    mockProjectFind.mockResolvedValue({
+      id: PROJECT, userId: OWNER, activationState: 'activating', activationStartedAt: new Date(),
+    })
+    const res = await postUnmute(post(URL, { projectId: PROJECT, keys: ['v1'] }))
+    expect(res.status).toBe(409)
+    expect((await res.json()).activationInProgress).toBe(true)
+    expect(mockAgentFetch).not.toHaveBeenCalled()
+    expect(mockExemptionCreate).not.toHaveBeenCalled()
   })
 
   test('the audit names the effective user and the real actor', async () => {
@@ -259,7 +279,7 @@ describe('POST /api/triage/unmute', () => {
     const res = await postUnmute(post(URL, { projectId: PROJECT, nodeId: 'stale-id' }))
     expect((await res.json()).unmuted).toBe(0)
     expect(sentBodies()[0].keys).toEqual(['stale-id'])
-    expect(mockExemptionUpsert).not.toHaveBeenCalled()
+    expect(mockExemptionCreate).not.toHaveBeenCalled()
     expect(mockAudit).not.toHaveBeenCalled()
   })
 
@@ -267,7 +287,7 @@ describe('POST /api/triage/unmute', () => {
     mockAgentFetch.mockResolvedValue(agentReply({
       unmuted: 1, items: [{ key: 'v1', label: 'Vulnerability', muted_by: OWNER }],
     }))
-    mockExemptionUpsert.mockRejectedValue(new Error('db down'))
+    mockExemptionCreate.mockRejectedValue(new Error('db down'))
     const res = await postUnmute(post(URL, { projectId: PROJECT, keys: ['v1'] }))
     const body = await res.json()
     expect(res.status).toBe(200)
@@ -280,6 +300,66 @@ describe('POST /api/triage/unmute', () => {
     const many = Array.from({ length: 501 }, (_, i) => `v${i}`)
     expect((await postUnmute(post(URL, { projectId: PROJECT, keys: many }))).status).toBe(400)
     expect(mockAgentFetch).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /api/triage/mute', () => {
+  const URL = 'http://x/api/triage/mute'
+
+  test('refused while a version activation holds the graph, before the agent is called', async () => {
+    mockProjectFind.mockResolvedValue({
+      id: PROJECT, userId: OWNER, activationState: 'activating', activationStartedAt: new Date(),
+    })
+    const res = await postMute(post(URL, { projectId: PROJECT, nodeId: 'v1', reason: 'noise' }))
+    expect(res.status).toBe(409)
+    expect(mockAgentFetch).not.toHaveBeenCalled()
+  })
+
+  test('an activation state that cannot be read is treated as busy', async () => {
+    mockProjectFind
+      .mockResolvedValueOnce({ id: PROJECT, userId: OWNER })
+      .mockRejectedValueOnce(new Error('db down'))
+    const res = await postMute(post(URL, { projectId: PROJECT, nodeId: 'v1' }))
+    expect(res.status).toBe(409)
+    expect(mockAgentFetch).not.toHaveBeenCalled()
+  })
+
+  test('an already-muted finding is reported as such, and the agent was asked to leave it', async () => {
+    mockAgentFetch.mockResolvedValue(agentReply({ muted: true, already: true, label: 'Vulnerability' }))
+    const res = await postMute(post(URL, { projectId: PROJECT, nodeId: 'v1', reason: 'noise' }))
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ muted: true, already: true, label: 'Vulnerability' })
+    expect(sentBodies()[0]).toMatchObject({ op: 'mute', node_id: 'v1', muted_by: OWNER })
+  })
+})
+
+describe('the Muted Nodes list splits agents from people', () => {
+  test('mutedVia=mcp and a token prefix reach the agent', async () => {
+    mockAgentFetch.mockResolvedValue(agentReply({ findings: [], total: 0 }))
+    await getMuted(new NextRequest(
+      `http://x/api/triage/muted?projectId=${PROJECT}&mutedVia=mcp&token=rdmn_mcp_ab12cd34`))
+    expect(sentBodies()[0]).toMatchObject({ muted_via: 'mcp', token: 'rdmn_mcp_ab12cd34' })
+  })
+
+  test('a token that is not a prefix is dropped, never forwarded', async () => {
+    mockAgentFetch.mockResolvedValue(agentReply({ findings: [], total: 0 }))
+    for (const bad of ['rdmn_mcp_ab12cd34ef', 'x', 'rdmn_mcp_ZZ12cd34']) {
+      mockAgentFetch.mockClear()
+      await getMuted(new NextRequest(
+        `http://x/api/triage/muted?projectId=${PROJECT}&token=${encodeURIComponent(bad)}`))
+      expect(sentBodies()[0].token, bad).toBeUndefined()
+    }
+  })
+
+  test('an agent mute keeps its channel and token through the annotation', async () => {
+    mockAgentFetch.mockResolvedValue(agentReply({
+      total: 1,
+      findings: [{ id: 'v1', muted_by: OWNER, muted_via: 'mcp', muted_channel: 'mcp', muted_token: 'rdmn_mcp_ab12cd34' }],
+    }))
+    const body = await (await getMuted(new NextRequest(`http://x/api/triage/muted?projectId=${PROJECT}`))).json()
+    expect(body.findings[0]).toMatchObject({
+      muted_via: 'mcp', muted_token: 'rdmn_mcp_ab12cd34', rule_name: null, rule_deleted: false,
+    })
   })
 })
 

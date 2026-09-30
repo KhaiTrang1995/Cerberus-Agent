@@ -14,6 +14,12 @@ import { envelopeForKind } from '@/lib/jobQueue'
 import { allErrors, validateNodeFilters } from '@/lib/nodeFilters/validate'
 import { coerceDoc } from '@/lib/nodeFilters/model'
 import { muteRulesFingerprint, parseLoadedPresetInput, parsePresetText } from '@/lib/nodeFilters/presets'
+import {
+  PRESET_DESCRIPTION_MAX,
+  PRESET_NAME_MAX,
+  presetSettingsForStorage,
+  sanitizePresetText,
+} from '@/lib/reconPresets/server'
 import { MUTEABLE_FINDING_LABELS } from '@/lib/mcp/findingLabels'
 import { pickProjectColumns } from '@/lib/projectColumns'
 
@@ -465,18 +471,48 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    // Import user project presets (if present)
+    // Import user project presets (if present). Each one on its own: the project
+    // already exists by now, so one bad row must be skipped and reported rather
+    // than turn the whole import into a 500. Only preset fields are stored, and
+    // the bundle's own provenance is ignored - this door is the import.
     const presetsFile = zip.file('presets/user_project_presets.json')
     if (presetsFile) {
-      const presets = JSON.parse(await presetsFile.async('text'))
-      for (const preset of presets) {
-        // eslint-disable-next-line @typescript-eslint/no-unused-vars
-        const { id: _id, userId: _uid, createdAt: _ca, updatedAt: _ua, ...fields } = preset
-        await prisma.userProjectPreset.create({
-          data: { ...fields, userId },
-        })
+      let imported = 0
+      let skipped = 0
+      try {
+        const presets = JSON.parse(await presetsFile.async('text'))
+        for (const preset of Array.isArray(presets) ? presets : []) {
+          try {
+            const name = sanitizePresetText(preset?.name, PRESET_NAME_MAX)
+            const stored = presetSettingsForStorage(preset?.settings)
+            if (!name || !stored.ok) {
+              skipped++
+              continue
+            }
+            await prisma.userProjectPreset.create({
+              data: {
+                userId,
+                name,
+                description: sanitizePresetText(preset?.description, PRESET_DESCRIPTION_MAX, { multiline: true }),
+                settings: stored.settings as never,
+                createdVia: 'import',
+                updatedVia: 'import',
+              },
+            })
+            imported++
+          } catch (e) {
+            console.warn('Could not import a user project preset:', e)
+            skipped++
+          }
+        }
+      } catch (e) {
+        console.warn('Could not import the user project presets:', e)
+        ;(stats as Record<string, unknown>).userPresets = 'skipped: unreadable'
       }
-      (stats as Record<string, number>).userPresets = presets.length
+      if (typeof (stats as Record<string, unknown>).userPresets !== 'string') {
+        ;(stats as Record<string, number>).userPresets = imported
+        if (skipped > 0) (stats as Record<string, number>).userPresetsSkipped = skipped
+      }
     }
 
     // Mute Rules presets: each is checked like a save, and one this user already

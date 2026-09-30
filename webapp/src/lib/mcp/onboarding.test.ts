@@ -221,6 +221,25 @@ describe('the scope filter', () => {
     expect(withTriage).toContain('list_muted_findings')
   })
 
+  test('a pack without triage:mute never presents the mute tools as something to call', () => {
+    for (const scopes of [READ_ONLY, ['recon:read', 'triage:read', 'triage:write'] as McpScope[]]) {
+      const text = packText(scopes, 'triage')
+      expect(text, `${scopes.join('+')}`).not.toContain('### Suppress noise')
+      expect(text).not.toContain('### Restore muted findings')
+      expect(text).not.toContain('Muting has its own daily budget')
+      // Named only in the "you cannot call these" tail, with the permission it needs.
+      expect(text).toContain('`mute_findings` - needs `triage:mute`')
+    }
+  })
+
+  test('a triage:mute pack teaches the procedure and the daily budget', () => {
+    const text = packText(['recon:read', 'triage:read', 'triage:write', 'triage:mute'], 'triage')
+    expect(text).toContain('### Suppress noise')
+    expect(text).toContain('### Restore muted findings')
+    expect(text).toMatch(/Muting has its own daily budget: at most \d+ findings a day per token/)
+    expect(text).toContain('a mute or unmute outcome is unknown')
+  })
+
   test('a withdrawn tool is absent from the pack, because the pack reads tools/list', () => {
     // MCP_DISABLED_TOOLS filters at registration inside buildMcpServer, so a
     // withdrawn tool never reaches tools/list and therefore never reaches here.
@@ -570,6 +589,25 @@ describe('the inline onboarding (the MCP instructions string)', () => {
     }
   })
 
+  test('the write sentence follows the token\'s write permissions', () => {
+    const verdictOnly = renderInlineOnboarding(tools, ['recon:read', 'triage:write'], 'triage')
+    expect(verdictOnly).toContain('Your writes to a finding: a verdict of confirmed, likely_noise, unreviewed.')
+    expect(verdictOnly).toContain('You never set a score')
+    expect(verdictOnly).not.toContain('mute_findings')
+    expect(verdictOnly).not.toContain('evidence review')
+
+    const all = renderInlineOnboarding(
+      tools, ['recon:read', 'triage:read', 'triage:write', 'triage:review', 'triage:mute'], 'triage')
+    expect(all).toContain(
+      'Your writes to a finding: a verdict of confirmed, likely_noise, unreviewed, a quoted evidence review and a mute.')
+    expect(all).toContain('A mute (mute_findings) hides a finding from everyone.')
+    expect(all.length).toBeLessThanOrEqual(4000)
+
+    const muteOnly = renderInlineOnboarding(tools, ['recon:read', 'triage:mute'], 'custom')
+    expect(muteOnly).toContain('Your writes to a finding: a mute.')
+    expect(muteOnly).not.toContain('You never set a score')
+  })
+
   test('a null profile still produces usable instructions', () => {
     const text = renderInlineOnboarding(tools, READ_ONLY, null)
     expect(text).toContain('Custom')
@@ -752,3 +790,23 @@ describe('the Agent Onboarding documentation', () => {
   })
 })
 
+describe('the layered Priority Board in the pack', () => {
+  test('starting a triage run is no longer in the never-on-this-surface list', () => {
+    const text = packText(['recon:read', 'triage:read', 'triage:run'])
+    const never = text.slice(text.indexOf('never'), text.indexOf('## The tool-choice ladder'))
+    expect(never).not.toMatch(/^- start a triage run$/m)
+    expect(text).toMatch(/^- set a score, a tier or a factor directly$/m)
+    expect(text).toMatch(/^- change or reset a verdict a person made in the app$/m)
+  })
+
+  test('the pack explains the layers and that nobody writes a score', () => {
+    const text = packText(['recon:read', 'triage:read'])
+    expect(text).toContain('The score has three layers, and nobody writes it.')
+  })
+
+  test('the review and run workflows render only with their tools', () => {
+    expect(packText(['recon:read', 'triage:read', 'triage:review'])).toContain('Review the evidence behind a ranking')
+    expect(packText(['recon:read', 'triage:read'])).not.toContain('Review the evidence behind a ranking')
+    expect(packText(['recon:read', 'triage:read', 'triage:run'])).toContain('Re-rank after a scan')
+  })
+})

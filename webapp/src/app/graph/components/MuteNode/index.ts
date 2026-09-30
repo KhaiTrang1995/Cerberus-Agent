@@ -8,3 +8,5 @@ export {
   useMuteNodeContext,
   unmuteableReason,
 } from './MuteNodeContext'
+export { MultiMuteButton, MULTI_MUTE_TITLE } from './MultiMuteButton'
+export type { MultiMuteSeed, MultiMuteOptions } from './multiMuteModel'

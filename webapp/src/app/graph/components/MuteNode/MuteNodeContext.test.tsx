@@ -161,6 +161,31 @@ describe('what a click does', () => {
     expect(mockAddToast).not.toHaveBeenCalled()
   })
 
+  test('a mute refused during a version activation says so, and does not reload the page', async () => {
+    // The route's activation 409 is not a stale node: reloading would not
+    // help, and "this finding changed" would send the person looking for it.
+    fetchMock.mockImplementation(() => ok({
+      error: 'A version activation is in progress for this project.', activationInProgress: true,
+    }, 409))
+    const onMuted = vi.fn()
+    render(<Page><MuteNodeButton name="v" graphId="7" label="Vulnerability" onMuted={onMuted} /></Page>)
+    fireEvent.click(screen.getByRole('button', { name: /Mute/ }))
+    await waitFor(() => expect(mockAlertError).toHaveBeenCalled())
+    expect(mockAlertError.mock.calls[0][0]).toBe('A version activation is in progress for this project.')
+    expect(onGraphChanged).not.toHaveBeenCalled()
+    expect(onMuted).not.toHaveBeenCalled()
+  })
+
+  test('a finding already muted is not announced as this person\'s mute', async () => {
+    fetchMock.mockImplementation(() => ok({ muted: true, already: true, label: 'Vulnerability' }))
+    render(<Page><MuteNodeButton name="v" graphId="7" label="Vulnerability" /></Page>)
+    fireEvent.click(screen.getByRole('button', { name: /Mute/ }))
+    await waitFor(() => expect(mockAddToast).toHaveBeenCalled())
+    expect(mockAddToast.mock.calls[0][0].message).toBe('This finding was already muted, so it was left as it was.')
+    // The view was stale, so it is refreshed all the same.
+    expect(onGraphChanged).toHaveBeenCalledOnce()
+  })
+
   test('a server refusal is shown as the server worded it', async () => {
     fetchMock.mockImplementation(() => ok({ error: 'IP nodes cannot be muted.' }, 422))
     render(<Page><MuteNodeButton name="10.0.0.1:443" graphId="7" /></Page>)
@@ -182,6 +207,75 @@ describe('what a click does', () => {
     fireEvent.click(screen.getByRole('button', { name: /Mute/ }))
     await waitFor(() => expect(fetchMock).toHaveBeenCalled())
     expect(onRowClick).not.toHaveBeenCalled()
+  })
+})
+
+describe('Multi mute beside every Mute', () => {
+  const multi = () => screen.getByRole('button', { name: 'Multi mute' })
+
+  test('the pair renders Multi mute then Mute, compact in a table row', () => {
+    render(<Page><MuteNodeButton name="v" graphId="7" label="Vulnerability" /></Page>)
+    const buttons = screen.getAllByRole('button')
+    expect(buttons.map(b => b.getAttribute('aria-label') ?? b.textContent)).toEqual(['Multi mute', 'Mute'])
+    expect(multi()).toHaveTextContent(/^Multi$/)
+    expect(multi()).toBeEnabled()
+    expect(multi().getAttribute('title')).toBe('Find the findings like this one and mute them together')
+  })
+
+  test('outside the page provider, neither renders', () => {
+    const { container } = render(<MuteNodeButton name="x" graphId="12" label="Vulnerability" />)
+    expect(container.innerHTML).toBe('')
+  })
+
+  test('an asset and a saved version disable it with the same reasons as Mute', () => {
+    render(<Page><MuteNodeButton name="example.test" graphId="7" label="Domain" /></Page>)
+    expect(multi()).toBeDisabled()
+    expect(multi().getAttribute('title')).toMatch(/^Domain nodes cannot be muted/)
+    cleanup()
+    render(<Page readOnly><MuteNodeButton name="v" graphId="7" label="Vulnerability" /></Page>)
+    expect(multi()).toBeDisabled()
+    expect(multi().getAttribute('title')).toMatch(/saved version/)
+  })
+
+  test('ExploitGvm: Mute works, Multi mute does not look for others', () => {
+    render(<Page><MuteNodeButton name="exploit" graphId="7" nodeId="ex-1" label="ExploitGvm" /></Page>)
+    expect(multi()).toBeDisabled()
+    expect(multi().getAttribute('title')).toMatch(/confirmed exploitation/)
+    expect(screen.getByRole('button', { name: /Mute/ })).toBeEnabled()
+  })
+
+  test('a JS file container is refused; any other JS Recon finding is not', () => {
+    const node = (props: Record<string, unknown>): GraphNode =>
+      ({ id: '9', name: 'app.js', type: 'JsReconFinding', properties: { id: 'js-1', ...props } })
+    render(<Page><GraphNodeMuteButton node={node({ finding_type: 'js_file' })} /></Page>)
+    expect(multi()).toBeDisabled()
+    expect(multi().getAttribute('title')).toMatch(/JS file is a container/)
+    expect(screen.getByRole('button', { name: /Mute/ })).toBeEnabled()
+    cleanup()
+    render(<Page><GraphNodeMuteButton node={node({ finding_type: 'sourcemap' })} /></Page>)
+    expect(multi()).toBeEnabled()
+  })
+
+  test('the drawer asks for the full label', () => {
+    render(<Page><GraphNodeMuteButton node={{ id: '9', name: 'n', type: 'Secret', properties: { id: 's-1' } }} compact={false} /></Page>)
+    expect(multi()).toHaveTextContent(/^Multi mute$/)
+  })
+
+  test('a click opens Multi mute on the stored key, and does not reach the row', async () => {
+    const onRowClick = vi.fn()
+    render(
+      <Page>
+        <table><tbody><tr onClick={onRowClick}><td>
+          <MuteNodeButton name="XSS" graphId="7" nodeId="vuln-1" label="Vulnerability" />
+        </td></tr></tbody></table>
+      </Page>,
+    )
+    fireEvent.click(multi())
+    expect(await screen.findByRole('dialog')).toBeInTheDocument()
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled())
+    expect(sent()).toEqual({ url: '/api/triage/multi-mute/suggest', body: { projectId: 'p1', nodeId: 'vuln-1' } })
+    expect(onRowClick).not.toHaveBeenCalled()
+    expect(mockDangerConfirm).not.toHaveBeenCalled()
   })
 })
 

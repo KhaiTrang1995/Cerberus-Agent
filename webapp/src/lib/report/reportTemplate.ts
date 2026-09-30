@@ -708,6 +708,11 @@ function renderScope(data: ReportData, narrative?: string): string {
       ? `<tr><td>Target Domains (batch)</td><td>${esc(batchRoots.join(', ') || 'N/A')}</td></tr>`
       : `<tr><td>Target Domain</td><td>${esc(project.targetDomain || 'N/A')}</td></tr>`
 
+  // Multi mutes are inside the people's count (P9) but were confirmed in bulk
+  // from AI suggestions, so they are never worded as reviewed one by one.
+  const byMultiMute = graphOverview.suppressedByMultiMute ?? 0
+  const reviewedOneByOne = Math.max(0, (graphOverview.suppressedByPeople ?? 0) - byMultiMute)
+
   return `
 <div class="page-break"></div>
 <div class="section" id="scope">
@@ -740,8 +745,14 @@ function renderScope(data: ReportData, narrative?: string): string {
       <tr><td>Base URLs</td><td>${graphOverview.endpointCoverage.baseUrls}</td></tr>
       <tr><td>Endpoints</td><td>${graphOverview.endpointCoverage.endpoints}</td></tr>
       <tr><td>Parameters</td><td>${graphOverview.endpointCoverage.parameters}</td></tr>
-      ${graphOverview.suppressedByPeople
-        ? `<tr><td>Suppressed as noise</td><td>${graphOverview.suppressedByPeople} finding(s) reviewed and excluded from this report</td></tr>`
+      ${reviewedOneByOne
+        ? `<tr><td>Suppressed as noise</td><td>${reviewedOneByOne} finding(s) reviewed and excluded from this report</td></tr>`
+        : ''}
+      ${byMultiMute
+        ? `<tr><td>Suppressed in bulk</td><td>${byMultiMute} finding(s) excluded by a person in bulk from AI-suggested groups (Multi mute), not reviewed one by one</td></tr>`
+        : ''}
+      ${graphOverview.suppressedByAgents
+        ? `<tr><td>Suppressed by agents</td><td>${graphOverview.suppressedByAgents} finding(s) hidden by an automated agent through the MCP server, not reviewed by a person</td></tr>`
         : ''}
       ${graphOverview.suppressedByRules
         ? `<tr><td>Suppressed by mute rules</td><td>${graphOverview.suppressedByRules} finding(s) excluded by rule, not reviewed one by one${

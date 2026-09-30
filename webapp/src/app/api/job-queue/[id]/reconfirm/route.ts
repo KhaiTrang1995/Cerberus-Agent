@@ -9,9 +9,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import prisma from '@/lib/prisma'
 import { guardProject } from '@/lib/access'
-import { settingsFingerprint } from '@/lib/jobQueue'
-import { resolveTrufflehogFingerprintExtra } from '@/lib/trufflehogStart'
-import { authProfileFingerprintExtra } from '@/lib/authProfileFingerprint'
+import { currentFingerprintFor } from '@/lib/jobFingerprint'
 
 export const runtime = 'nodejs'
 
@@ -50,15 +48,7 @@ export async function POST(_request: NextRequest, { params }: RouteParams) {
     // relation the Project-row fingerprint cannot see: the job was re-confirmed,
     // dispatched, failed the comparison and went straight back to needs_review,
     // with no way out for anyone.
-    const settingsHash = settingsFingerprint(
-      row.kind, project as unknown as Record<string, unknown>,
-      {
-        ...(await resolveTrufflehogFingerprintExtra(
-          row.kind, row.projectId, (row.payload ?? {}) as Record<string, unknown>,
-        )),
-        ...(await authProfileFingerprintExtra(row.kind, row.projectId)),
-      },
-    )
+    const settingsHash = await currentFingerprintFor(row, project as unknown as Record<string, unknown>)
     await prisma.jobQueue.update({
       where: { id },
       data: {

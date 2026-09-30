@@ -13,8 +13,16 @@ from __future__ import annotations
 
 TRIAGE_ERROR_MESSAGES = {
     "llm_error": (
-        "The AI model could not be reached. Check the model and API key in the "
-        "project's CypherFix settings, then run triage again."
+        "The AI model could not be reached. Check your Triage review model in "
+        "Global Settings > LLM Providers > Models by feature, then run triage again."
+    ),
+    "model_required": (
+        "Choose a Triage review model first (Global Settings > LLM Providers > "
+        "Models by feature), or set the review budget to 0 to rank without a model."
+    ),
+    "settings_unavailable": (
+        "The project owner's model settings could not be loaded. Nothing was "
+        "changed. Try again in a moment."
     ),
     "save_failed": (
         "The results could not be saved. Nothing was changed. Try again in a moment."
@@ -34,8 +42,16 @@ TRIAGE_ERROR_MESSAGES = {
 
 CODEFIX_ERROR_MESSAGES = {
     "llm_error": (
-        "The AI model could not be reached. Check the model and API key in the "
-        "project's CypherFix settings, then start the fix again."
+        "The AI model could not be reached. Check your CodeFix model in Global "
+        "Settings > LLM Providers > Models by feature, then start the fix again."
+    ),
+    "model_required": (
+        "Choose a CodeFix model first (Global Settings > LLM Providers > Models "
+        "by feature), then start the fix again."
+    ),
+    "settings_unavailable": (
+        "The project's settings could not be loaded. Nothing was changed. Try "
+        "again in a moment."
     ),
     "clone_failed": (
         "The repository could not be cloned. Check the repository name, the "

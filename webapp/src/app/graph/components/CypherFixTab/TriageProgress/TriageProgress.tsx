@@ -1,26 +1,18 @@
 'use client'
 
 import { memo } from 'react'
-import { Loader2, CheckCircle, AlertCircle, X, Brain } from 'lucide-react'
-import type { TriagePhase, TriageFindingPayload } from '@/lib/cypherfix-types'
+import { Loader2, CheckCircle, AlertCircle, X, Brain, CircleStop, Info } from 'lucide-react'
+import {
+  PUBLISHING_STOP_REFUSAL,
+  TRIAGE_PHASES,
+  TRIAGE_PHASE_LABELS,
+  triagePhaseLabel,
+  type TriagePhase,
+  type TriageFindingPayload,
+} from '@/lib/cypherfix-types'
 import styles from './TriageProgress.module.css'
 
-export const PHASE_LABELS: Record<TriagePhase, string> = {
-  collecting_vulnerabilities: 'Collecting vulnerabilities',
-  collecting_cve_chains: 'Mapping CVE chains',
-  collecting_secrets: 'Scanning for secrets',
-  collecting_exploits: 'Finding exploits',
-  collecting_assets: 'Mapping assets',
-  collecting_chain_findings: 'Analyzing attack chains',
-  collecting_attack_chains: 'Loading chain summaries',
-  collecting_certificates: 'Checking certificates',
-  collecting_security_checks: 'Reviewing security checks',
-  classifying: 'AI classifying real vs noise',
-  correlating: 'AI correlating findings',
-  prioritizing: 'Scoring & ranking findings',
-  generating_remediations: 'Generating remediations',
-  saving: 'Saving results',
-}
+export const PHASE_LABELS = TRIAGE_PHASE_LABELS
 
 interface TriageProgressProps {
   isVisible: boolean
@@ -29,6 +21,8 @@ interface TriageProgressProps {
   findings: TriageFindingPayload[]
   thinking: string
   error: string | null
+  /** A message that is not a failure, e.g. a Stop refused while publishing. */
+  notice?: string | null
   status: string
   /** Feature name for the header, e.g. "Priority Board". Defaults to the CypherFix
    *  wording so the CypherFix page is unchanged. */
@@ -44,6 +38,7 @@ export const TriageProgress = memo(function TriageProgress({
   findings,
   thinking,
   error,
+  notice = null,
   status,
   title = 'Vulnerability Triage',
   onClose,
@@ -54,7 +49,10 @@ export const TriageProgress = memo(function TriageProgress({
   const isRunning = status === 'running' || status === 'connecting'
   const isCompleted = status === 'completed'
   const isError = status === 'error'
-  const phaseLabel = phase ? PHASE_LABELS[phase] || phase : 'Initializing...'
+  const isStopped = status === 'stopped'
+  const isPublishing = phase === 'publishing'
+  const phaseLabel = phase ? triagePhaseLabel(phase) : 'Starting...'
+  const phaseIndex = phase ? TRIAGE_PHASES.indexOf(phase) : -1
 
   return (
     <div className={styles.overlay}>
@@ -65,16 +63,33 @@ export const TriageProgress = memo(function TriageProgress({
             {isRunning && <Loader2 size={16} className={styles.spinner} />}
             {isCompleted && <CheckCircle size={16} className={styles.successIcon} />}
             {isError && <AlertCircle size={16} className={styles.errorIcon} />}
+            {isStopped && <CircleStop size={16} className={styles.stoppedIcon} />}
             <span className={styles.headerTitle}>
-              {isCompleted ? `${title} complete` : isError ? `${title} failed` : title}
+              {isCompleted ? `${title} complete`
+                : isError ? `${title} failed`
+                  : isStopped ? `${title} stopped` : title}
             </span>
           </div>
           <div className={styles.headerRight}>
             {isRunning && (
-              <button className={styles.stopBtn} onClick={onStop}>Stop</button>
+              // Hiding is not stopping: the run goes on, and the page shows it
+              // as its banner.
+              <button className={styles.stopBtn} onClick={onClose} title="Hide this panel; the run keeps going">
+                Hide
+              </button>
             )}
-            {(isCompleted || isError) && (
-              <button className={styles.closeBtn} onClick={onClose}>
+            {isRunning && (
+              <button
+                className={styles.stopBtn}
+                onClick={onStop}
+                disabled={isPublishing}
+                title={isPublishing ? PUBLISHING_STOP_REFUSAL : 'Stop the run; nothing is published'}
+              >
+                Stop
+              </button>
+            )}
+            {(isCompleted || isError || isStopped) && (
+              <button className={styles.closeBtn} onClick={onClose} aria-label="Close panel">
                 <X size={14} />
               </button>
             )}
@@ -90,7 +105,39 @@ export const TriageProgress = memo(function TriageProgress({
             />
           </div>
           <div className={styles.phaseLabel}>{phaseLabel}</div>
+          <ol className={styles.steps} aria-label="Run phases">
+            {TRIAGE_PHASES.map((step: TriagePhase, i) => {
+              const state = isCompleted || i < phaseIndex ? 'done'
+                : i === phaseIndex ? 'current' : 'todo'
+              return (
+                <li
+                  key={step}
+                  className={`${styles.step} ${styles[`step_${state}`] ?? ''}`}
+                  aria-current={state === 'current' ? 'step' : undefined}
+                >
+                  {TRIAGE_PHASE_LABELS[step]}
+                </li>
+              )
+            })}
+          </ol>
         </div>
+
+        {notice && (
+          <div className={styles.noticeBox} role="status">
+            <Info size={14} />
+            {notice}
+          </div>
+        )}
+
+        {isStopped && (
+          <div className={styles.stoppedSection}>
+            <p>
+              Stopped before publishing, so nothing from this run reached the board or
+              the fix list: both keep the previous run&apos;s results.
+            </p>
+            <button className={styles.stopBtn} onClick={onClose}>Close</button>
+          </div>
+        )}
 
         {/* Error */}
         {error && (

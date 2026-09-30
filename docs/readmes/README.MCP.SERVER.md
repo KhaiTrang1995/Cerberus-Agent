@@ -17,20 +17,20 @@ set of recon tuning settings, and query the attack-surface graph.
 
 ## 1. What is and is not exposed
 
-**Exposed (thirty tools).**
+**Exposed.** The table is a summary; the generated [MCP API Reference](https://github.com/samugit83/redamon/wiki/MCP-API-Reference) is rendered from the live `tools/list` and is the authoritative list.
 
 | Tool | What it does | Permission |
 | --- | --- | --- |
 | `list_projects` | The token owner's projects. Nothing else is visible. | `recon:read` |
 | `get_recon_status` | Whether a scan is running, and its phase. | `recon:read` |
-| `get_recon_settings` | The tuning subset this token may change. | `recon:read` |
+| `get_recon_settings` | Every setting `update_recon_settings` can change, plus the (read-only) engagement scope and the `updatedAt` to pass back. Credentials are never returned. | `recon:read` |
 | `graph_summary` | Count per node type + relationships present. | `recon:read` |
 | `graph_schema` | What the graph *means*. No arguments, no data. | `recon:read` |
 | `query_graph` | Ask the graph a question in natural language. | `recon:read` (+ `graph:cypher` for raw Cypher) |
 | `kali_toolbox` | The Kali sandbox's installed toolset, by category. Reads code, not the container. | `recon:read` |
 | `start_recon` | Start the full recon pipeline. | `recon:scan` (+ `recon:overwrite` for `mode:"overwrite"`) |
 | `stop_recon` | Stop a running scan. | `recon:scan` |
-| `update_recon_settings` | Change any recon tuning value. Validated and capped at scan start rather than blocked. | `recon:settings` |
+| `update_recon_settings` | Change any settable field of an EXISTING project: the whole pipeline, the agent's settings and the engagement's limits. Validated, then capped at scan start rather than blocked. A compare-and-swap on `updatedAt`. | `recon:settings` |
 | `create_project` | Open an engagement and fix its scope, atomically with the record of what authorized it. | `project:create` |
 | `attach_engagement_authorization` | Record the scope document that permits this engagement. Append-only. | `engagement:authorize` |
 | `list_engagement_authorizations` | The history of what authorized it, newest first. | `recon:read` |
@@ -45,7 +45,11 @@ set of recon tuning settings, and query the attack-surface graph.
 | `list_scan_versions` | Saved graph versions, with `pinned` and `hasSnapshot`. | `recon:read` |
 | `compare_scan_versions` | What changed between two graph states. Counts and names only. | `recon:read` |
 | `describe_recon_settings` | The reference manual for `update_recon_settings`: meanings, types, bounds. | `recon:read` |
-| `list_recon_presets` | The curated engagement presets, and how much of each is applicable here. | `recon:read` |
+| `list_recon_presets` | The built-in presets and the account's own, optionally with their values. Saved presets it cannot read are reported `unavailable`, never as none. | `recon:read` |
+| `create_recon_preset` | Save a preset from explicit settings, a copy of another preset, or a capture of a project. Validated like a settings write; never carries scope, limits, credentials or uploads. | `preset:write` |
+| `update_recon_preset` | Rename, re-describe, merge or remove keys in one of the account's presets. Built-ins are immutable. | `preset:write` |
+| `delete_recon_preset` | Delete one of the account's presets. The audit row keeps its settings. | `preset:write` |
+| `apply_recon_preset` | The form's "Load preset", server-side: REPLACES the configuration, with `dryRun`. Refused while anything reads or writes the graph and when the backends' defaults cannot be read. | `preset:apply` |
 | `get_attack_surface_overview` | Hosts, services, web surface and findings by severity, in one query. | `recon:read` |
 | `list_exploit_paths` | Technology + CVE pairs ranked by observed exploit, then CVSS. | `recon:read` |
 | `get_blast_radius` | Technologies ranked by how much of the surface they touch. | `recon:read` |
@@ -54,22 +58,37 @@ set of recon tuning settings, and query the attack-surface graph.
 | `queue_recon` | Queue a full recon for when the host has room. | `recon:queue` |
 | `cancel_queued_scan` | Cancel a queued job, reading the update count so a lost race is not reported as success. | `recon:queue` |
 | `get_scan_status` | The other six scanners' state, masked exactly as `get_recon_status` is. | `recon:read` |
-| `set_finding_verdict` | Record a durable triage verdict. Refused while a triage run could re-file it, and on a muted finding. | `triage:write` |
+| `set_finding_verdict` | Record a durable decision (Real raises the score, False positive, Reset of an MCP decision), rescored in the same transaction. Never a decision made in the app (`decided_in_app`, absent channel = app); refused on a muted finding, during an activation, and whenever the agent cannot acknowledge `layered_publish` (an older agent image enforces neither `decided_in_app` nor publish-time honouring). | `triage:write` |
+| `get_finding_triage` | One finding's final score and the three layers behind it (rules, review, decision), detector, group, proof, run. Review text only with `includeQuotes`. | `triage:read` |
+| `get_finding_evidence` | The normalised, secret-redacted evidence bundle the built-in reviewer reads, its `evidenceHash`, reviewability and the review contract. | `triage:read` |
+| `submit_finding_review` | An external review: verdict, disputes and a multiplier, each quote-verified against the rebuilt bundle; RedAmon recomputes the score. Refused on a decided, proven (when lowering), unscored, resolved or changed-evidence finding. | `triage:review` |
+| `get_triage_status` | Triage state (incl. `imported`), the live run's phase/progress/trigger, recent runs, the preflight, the MCP start allowance, decided-by counts, what a live run blocks. | `triage:read` |
+| `start_triage_run` | Start a headless Priority Board run (`POST /triage/runs`). 30-minute cooldown and 12/day per project across tokens, 1,000-review clamp, `write` bucket. | `triage:run` |
+| `stop_triage_run` | Stop a run before it publishes; refused while publishing. | `triage:run` |
+| `mute_findings` | Mute 1-25 findings with a reason. Never a proven or kept-visible one, never over an existing mute; per-token daily budget; stamped `muted_channel=mcp` + token prefix. | `triage:mute` |
+| `unmute_findings` | Unmute 1-100 findings from the muted list, writing the Mute Rules exemption FIRST. A rule's mute only with `includeRuleMutes`, never during a recon scan. | `triage:mute` |
+| `search_muted_findings` | Page every muted finding with the Muted Nodes filters (who muted, rule, token, text), with exact facets. The only source of a muted finding's id. | `triage:read` |
+| `update_project_scope` | Change an existing project's eight target LISTS (batch hosts, GitHub org/repos, GVM strategy, supply-chain org/repo/ref/scope). Guardrail on every root; a third-party widening needs an authorization record. | `project:rescope` (+ `engagement:authorize` to pass `authorization`) |
 
-**Deliberately not exposed:** the agent chat, a shell, partial recon, project
-create/delete/import, secrets and LLM keys, target and scope fields, Rules of
-Engagement, guardrails, **starting** a GVM / TruffleHog / supply-chain / AI
+**Deliberately not exposed:** the agent chat, partial recon, project
+delete/import, secrets and LLM keys, re-pointing an existing project's target
+domain, address list or targeting mode (only its target LISTS move, behind
+`project:rescope`), the engagement RECORD (the client, the contacts, the dates, the
+document), guardrails, **starting** a GVM / TruffleHog / supply-chain / AI
 attack-surface scan, captured HTTP traffic, version activation or deletion,
-Mute Rules (the rules, their presets, applying or arming them), and any graph
-**write**.
+Mute Rules (the rules, their presets, applying or arming them), setting a
+finding's score, tier or factors directly, and any graph **write** other than a
+verdict, a review, a triage run start or stop, and (behind `triage:mute`) a mute
+or unmute.
 
 Note the distinction the reads above draw: their FINDINGS are readable (a
 finding is a finding whichever scanner wrote it), while **starting** those scans
-is not. Muting and unmuting are not exposed either, in either direction: mute is
-the one action that makes a finding invisible to every other read here, and
-unmute reverses a human's suppression decision, which is exactly the power the
-architecture withholds from the model-driven path. Mute Rules are withheld for
-the same reason: a rule is a bulk mute.
+is not. Muting and unmuting ARE exposed, but only behind their own opt-in
+permission, `triage:mute`, and bounded in code rather than by the tool wording:
+mute is the one action that makes a finding invisible to every other read here,
+and the surface was originally built on "only a person mutes". §6 "Mute and
+unmute over MCP" lists what replaces that guarantee. RedAmon's own AI still never
+mutes. Mute Rules stay withheld: a rule is a bulk mute.
 
 `kali_toolbox` serves the `kali_shell` `TOOL_REGISTRY` description verbatim -
 the same bytes the in-app agent is prompted with. One source, no second copy: a
@@ -184,13 +203,14 @@ and a value set only in `.env` would be silently inert.
 | `MCP_TOKEN_RETENTION_DAYS` | `90` | How long revoked/expired token rows are kept before pruning. |
 | `MCP_RATE_READ_PER_MIN` | `120` | Cheap reads per token per minute. |
 | `MCP_RATE_QUERY_PER_MIN` | `20` | `query_graph` calls per token per minute. |
-| `MCP_RATE_WRITE_PER_MIN` | `10` | Settings/stop calls per token per minute. |
+| `MCP_RATE_WRITE_PER_MIN` | `10` | Settings, stop, verdict, mute, preset and rescope calls per token per minute. |
 | `MCP_RATE_START_PER_WINDOW` | `1` | Scan starts per project per window. |
 | `MCP_RATE_START_WINDOW_MS` | `300000` | That window (5 minutes). |
 | `MCP_RATE_COMPARE_PER_WINDOW` | `2` | `compare_scan_versions` calls per project per window. Its own bucket, not `query`: one call can gunzip and parse a whole stored graph. |
 | `MCP_RATE_COMPARE_WINDOW_MS` | `300000` | That window (5 minutes). |
 | `MCP_DISABLED_TOOLS` | (empty) | Comma-separated tool names to withdraw. They disappear from `tools/list` rather than refusing, so a client never plans around them. The per-tool alternative to taking the whole surface down; a name matching no tool is ignored. |
 | `MCP_LLM_DAILY_BUDGET` | `200` | NL queries per token per day (they spend the owner's LLM key). |
+| `MCP_MUTE_DAILY_BUDGET` | `200` | Findings one token may mute per day (`mute_findings`), counted per finding, reserved before the write and refunded for what was not muted. Unmutes are not counted. In memory: a webapp restart resets it. |
 
 > **The generated API reference describes a build, not a deployment.** It is
 > rendered from the server's own `tools/list` with no tool withdrawn, so a
@@ -219,14 +239,15 @@ Agent-side bounds (the agent **does** have an `env_file`, so `.env` reaches it):
   discarding the current graph.
 - **An Agent Profile picks the starting permission set** (§3.1). It is a label
   and a suggestion, never an authorization input.
-- **`triage:write` is the only write to a finding**, and the only one that
-  cannot be undone from this surface except by another verdict. It writes
+- **`triage:write` is the verdict write**, and a verdict cannot be undone from
+  this surface except by another verdict. It writes
   `triage_source = 'human'` deliberately: a third provenance value would make
   the finding prune-eligible on the next scan, let a later AI run overwrite the
   verdict, stop `likely_noise` producing a false-positive state, and render as
   "Not reviewed". The channel is recorded on `triage_verdict_channel` instead,
   and the actor on `triage_verdict_by`. It never mutes or unmutes, directly or
-  indirectly, which is why **it is refused on a muted finding**.
+  indirectly (that is `triage:mute`), which is why **it is refused on a muted
+  finding**: so `triage:write` alone can never release a rule mute.
   `triage_source = 'human'` is a Mute Rules guard: rules never mute a finding a
   person judged, so a verdict on a rule-muted finding (any status, `likely_noise`
   and `unreviewed` included) would release the mute at the next "apply to
@@ -238,6 +259,24 @@ Agent-side bounds (the agent **does** have an `env_file`, so `.env` reaches it):
   mute's lock, and then write onto the node that mute just committed. The
   refusal covers a person's mute as well, and nothing is written. A verdict from
   the app is unaffected: the person clicking could unmute the finding anyway.
+- **`triage:review` is a machine's reading, not a decision**, so it is split
+  from `triage:write`. A review corrects the four factors with verified quotes
+  and RedAmon computes the score (`combine_layers`); it is stamped
+  `triage_ai_channel = 'mcp'` with the token prefix, is valid only while its
+  `triage_ai_evidence_hash` equals the finding's `triage_evidence_hash`, is never
+  re-reviewed by a run while valid, never overrides a person's decision, and its
+  text never reaches `Remediation.solution`/`evidence` (so never CodeFix). An
+  `mcp` false positive keeps its member in the fix group (P2).
+- **`triage:run` starts and stops Priority Board runs.** Opt-in on `triage`
+  only. MCP starts are spaced (`MCP_RUN_COOLDOWN_MS`, 30 min) and capped
+  (`MCP_RUNS_PER_DAY`, 12) per project across every token, counted from
+  `TriageRun.trigger = 'mcp'`; they spend the `write` bucket, not `start`, which
+  is shared with `start_recon` and `queue_recon`. The review budget is clamped to
+  1,000, and a start with no review model ranks rules-only.
+- **`triage:mute` is separate from `triage:write`**: a verdict ranks a finding,
+  a mute HIDES it from every read. It is opt-in, never auto-ticked by a profile
+  (`NEVER_AUTO_TICKED`), offered only by `triage`, and adding it to a token is
+  widening, so it asks for the password. What bounds it is in §6.
 - **`recon:queue` is separate from `recon:scan`**, because a queued job
   dispatches LATER. `JobQueue` carries no token id and revoking a token writes
   only `revokedAt`, so work queued by a credential OUTLIVES that credential;
@@ -320,7 +359,7 @@ or finding write.
 | `pentest` | read, exec, scan, triage:read, cypher | `project:create`, `engagement:authorize` |
 | `asm` | read, exec, scan, queue, triage:read | `project:create` |
 | `vuln_mgmt` | read, exec, triage:read | - |
-| `triage` | read, exec, triage:read, **triage:write** | - |
+| `triage` | read, exec, triage:read, **triage:write**, **triage:review** | `triage:mute`, `triage:run` |
 | `inventory` | read, exec, cypher | - |
 | `compliance` | read, exec, triage:read | - |
 | `ci_gating` | read, exec, queue, triage:read | - |
@@ -339,7 +378,9 @@ The rules behind it, each asserted in `profiles.test.ts`:
    dropdown. **`kali:exec` is the opposite, in EVERY profile's
    `recommendedScopes`** and in `DEFAULT_MCP_SCOPES`, which must equal what
    `custom` recommends so an untouched form never reads as hand-edited.
-2. **`triage:write` and `recon:settings` each go to exactly one profile.**
+2. **`triage:write`, `triage:review` and `recon:settings` each go to exactly one profile.**
+   **`triage:mute` goes to none as a recommendation**: it is in
+   `NEVER_AUTO_TICKED` with `recon:overwrite`, and only `triage` offers it.
 3. **Unattended profiles prefer `recon:queue`.** `asm` and `ci_gating` run with
    nobody watching, where a direct start just fails on a busy project.
 4. **Read-only wherever the job allows it.**
@@ -530,9 +571,15 @@ with 405.
 
 ### The settings surface
 
-`PUT /api/projects/[id]` spreads its body straight into `prisma.project.update`,
-and `Project` has over 700 scalar columns — so anything that reaches it is
-written. Describing exclusions in prose is therefore not a control.
+`PUT /api/projects/[id]` (the project form's save) writes every `Project`
+column its body carries, and `Project` has over 700 scalar columns — so almost
+anything that reaches it is written. Describing exclusions in prose is therefore
+not a control. It strips only the row bookkeeping (`id`, the actor columns, the
+version-activation lock) and the upload-managed columns their own endpoints
+own, stamps `updatedById`, writes a `project.update` audit row (credentials by
+name only), and, when the body carries the `updatedAt` the form loaded, writes
+only while the row still has it: a form left open answers `409` instead of
+reverting what an MCP agent changed meanwhile.
 
 **The allowlist stopped being the control; validation at the point of use became
 it.** The first version of this surface refused 586 of the 712 columns by name,
@@ -547,9 +594,9 @@ may write:
 
 | Disposition | Count | What it means |
 | --- | --- | --- |
-| `settable` | 648 | write at any time through `update_recon_settings` |
+| `settable` | 650 | write at any time through `update_recon_settings` |
 | `create_only` | 19 | the engagement scope: written once by `create_project`, refused by name afterwards |
-| `never` | 47 | not a pipeline parameter at all; refused with its class. 24 of these are the engagement RECORD |
+| `never` | 48 | not a pipeline parameter at all; refused with its class. 24 of these are the engagement RECORD |
 
 There used to be a fourth, `tighten_only`, holding the Rules of Engagement under
 a write-time direction rule. It is deleted rather than migrated. The rule bought
@@ -613,7 +660,10 @@ server's tools. Assume an instruction embedded in a page title reaches the model
 
 | What an injected instruction could try | What stops it |
 | --- | --- |
-| Redirect the platform at a new target | Scope is `create_only`: refused by name on an existing project, whatever the token holds. A different target means a different project. |
+| Redirect the platform at a new target | The target domain, the address list and the targeting mode are `create_only`: refused by name on an existing project, whatever the token holds. A different target means a different project. |
+| Widen a third-party batch list or a scanner's target | Only `update_project_scope` moves a target list, behind `project:rescope`, which no profile ticks. Every batch root runs the permanent guardrail, and a widening of a `third_party` engagement is refused without an `authorization` record, which needs `engagement:authorize` too. The audit row records the digest. |
+| Apply the loudest preset | Needs `preset:apply`. A preset never carries the engagement's limits, so the ceiling still rewrites every rate at scan start, and a `third_party` project cannot start without one. |
+| Plant a stored instruction in the preset library | Needs `preset:write`, which only *Research and training* ticks. Values are bounded exactly as `recon:settings` bounds them; the preset drawer badges a preset an agent wrote last, with the token prefix; every write audits its before and after, and a delete keeps the settings. |
 | Discard the victim's graph history | `mode:"overwrite"` needs `recon:overwrite`, off by default. |
 | Launch a scan storm | Strict per-token/per-project start bucket + the orchestrator's one-scan-per-project rule. |
 | Escalate scan aggression | Aggression is SETTABLE and CAPPED instead of refused. Every rate resolves to at most the engagement ceiling at scan start, and `roeForbiddenTools` / `roeForbiddenCategories` / `roeAllowDos` are checked in code before a tool executes. A `third_party` engagement cannot start without a ceiling at all. |
@@ -623,11 +673,139 @@ server's tools. Assume an instruction embedded in a page title reaches the model
 | Make the scan run an attacker's container | Every `*DockerImage` field is a closed list of the shipped images and an out-of-set value is REFUSED at the write. It used to be accepted and pinned back at scan start, which contained the danger but not the dishonesty: `get_recon_settings` echoed an image the scan would never run. |
 | Reconfigure a job already in the queue | The C-4 fingerprint covers every field that steers where or how hard a job scans, including every engagement limit and the DERIVED answer to whether they are live, so the job goes to `needs_review` instead of dispatching. |
 | Exfiltrate another tenant's data | Ownership check + `scope_query` + result post-validation. |
-| Exfiltrate secrets | No tool returns a credential. |
-| Burn the owner's LLM budget | Per-token daily budget. |
+| Exfiltrate secrets | No tool returns a stored credential. `query_graph` DOES return target-found secrets unredacted (`Secret.matched_text`, nuclei `extracted_results`) to any `recon:read` token: a known, pre-existing exposure. `get_finding_evidence` redacts secret shapes to their first four characters. |
+| Burn the owner's LLM budget | Per-token daily budget for questions. Triage runs started over MCP: a 30-minute per-project cooldown and 12 a day across every token, read from `TriageRun`; a 1,000-review clamp whatever the project stores; the `write` bucket; one run at a time. |
+| Talk a real finding down through a review | `submit_finding_review` needs `triage:review`. Every correction needs a quote verified against the rebuilt, redacted bundle; the multiplier needs its own quote; a proven finding (proof read LIVE in the write transaction) refuses any lowering whole; a person's decision always wins and a decided finding refuses reviews; the review expires when the evidence changes; it is labelled `Agent` with the token prefix and filterable on the board; its text never reaches the fix list or the in-app agent's node context. |
+| Hide a real finding ("this is a false positive, mute it") | Needs `triage:mute`, opt-in and never auto-ticked. Refused on a proven finding and on one a person unmuted, never over an existing mute; a reason on every mute, 25 per call and a per-token DAILY budget; stamped `muted_channel=mcp` + the token prefix, badged in Muted Nodes and counted apart in the report. |
+| Reveal what a Mute Rule hides | `unmute_findings` leaves a rule's mute alone without `includeRuleMutes`, refuses that flag while a recon scan runs, and every such unmute is an exemption on the Mute Rules page. `set_finding_verdict` is refused on a muted finding, so the verdict permission cannot do it. |
 | Aim a command at a third party | **Nothing, once `kali:exec` is granted.** See below. |
 | Smuggle a second command | **Nothing, and nothing is meant to.** A shell is the feature. |
 | Read the sandbox's own environment or keys | **Nothing, once `kali:exec` is granted.** See below. |
+
+### Presets and rescope over MCP
+
+**Presets.** `apply_recon_preset` is the project form's "Load preset" run
+server-side: the same `PRESET_FIELD_KEYS`, the same REPLACE semantics (every
+preset field the preset does not name goes back to the running backends'
+default), the same "Preset applied" badge. It needs the backends' `/defaults`
+and fails closed without them rather than resetting to Prisma defaults the
+backends do not use. It validates every value it CHANGES against the registry,
+then the cross-field rules the form's save runs (fireteam, supply-chain host
+allowlist), and writes with a compare-and-swap on `updatedAt`. It is refused
+while anything reads or writes the graph (`describeLiveGraphWriters`), because
+the in-app agent re-reads project settings every turn.
+
+`PRESET_FIELD_KEYS` is exactly the MCP-settable fields plus the `reconPresetId`
+badge, pinned by a test. A preset once carried `mcpKaliExecEnabled` and
+`updateGraphDb`, and because a preset resets what it does not name, applying
+ANY preset in the UI re-enabled the MCP sandbox. Both are excluded now.
+
+Presets are per user. A guessed id of another user's preset reads exactly like a
+missing one, and apply needs the caller to own both the project and the preset.
+The UI's own preset save and the project import now store only preset fields,
+and reads, the export and apply project a stored blob down to them, so a legacy
+preset carrying a target or a credential keeps it in the database.
+
+**The badge.** `Project.loadedPreset` holds the preset's name, a fingerprint and
+which preset it was (`presetId`, `source`). Renaming a user preset renames the
+badge on the owner's projects that loaded it; deleting one, from the tool or
+the preset drawer, clears it in the same transaction (`lib/reconPresets/badges.ts`,
+a compare-and-swap per project). Editing a preset's values leaves the badge: it
+says the project still holds what loading that preset produced. A badge written
+before it carried an id keeps its name, since a name can also be a built-in's.
+The fingerprint is `v2:` plus a digest of the preset fields NOT at their Prisma
+default, so a column added later reaches every row at its default and hides no
+badge. The unversioned digests written before (over the field set before and
+after `mcpKaliExecEnabled` and `updateGraphDb` left presets) are still accepted:
+that is the backfill, with no migration step to run.
+
+**Rescope.** `update_project_scope` reopens eight `create_only` fields, the
+registry's `rescope: true`, which are the target lists the project form already
+lets a person edit after creation. The target domain, the address list, the
+targeting mode, ownership verification and the target guardrail stay refused
+whatever the token holds.
+
+A batch that gains a host or wildcard entry pauses every enabled `ScanSchedule`
+of the project in the same transaction (`pausedSchedules` in the result,
+`pausedScheduleIds` in the audit). A scheduled run is a full recon of the whole
+batch that nobody watches start, so it must not be the first thing to reach a
+host an agent added; a person resumes the schedules in the Scans tab. A
+narrowing, the GitHub and supply-chain targets (no scheduled run reads them),
+`apply_recon_preset` and `update_recon_settings` pause nothing and only report
+`affectedSchedules`: those change how a run scans, capped by the engagement's
+limits at start, not what it reaches.
+
+**A stale agent flag.** `Conversation.agentRunning` is set and cleared by
+fire-and-forget PATCHes, so an agent restarted mid-run left it true and every
+busy check (apply, rescope, activation, the job-queue dispatcher,
+`get_project_activity`) read the project as busy for good. `lib/agentSessions.ts`
+asks the agent (`GET /agent-sessions/live?project_id=`, backed by
+`WebSocketManager._active_tasks`) whenever a flag is set, and clears the flags
+the agent does not hold with a compare-and-swap on the row's `updatedAt`. There
+is no time-to-live, because a run lasts hours. An agent that cannot answer
+leaves a set flag counting as a running session: fail closed.
+The endpoint takes the MASTER internal key only (`require_master_internal_auth`):
+the kali sandbox holds `SCANNER_API_KEY` and faces the target, and a live
+session id is all the unauthenticated `/agent-session/stop` needs.
+
+**Residual, stated plainly.** A token holding both `project:rescope` and
+`engagement:authorize` can record an authorization for any document digest and
+widen a third-party engagement with it. That claim is attributable (the token id
+is on the record), not verifiable.
+
+**Both directions of the stale-form problem.** Every MCP write is a
+compare-and-swap. The project form's full save now sends back the `updatedAt` it
+loaded, so a form left open answers `409` instead of reverting what an agent
+changed meanwhile.
+
+### Mute and unmute over MCP
+
+The surface was built on "only a person mutes or unmutes": that is what bounded
+a prompt injection to "mislabel a verdict a human can overrule". `mute_findings`
+and `unmute_findings` replace that guarantee with controls enforced in code
+(`webapp/src/lib/mcp/muteTools.ts`, `mute_findings_delegated` and
+`resolve_muted` in `graph_db/mixins/recon/triage_mixin.py`, the `mute_many` /
+`resolve_muted` ops at `/graph/triage`):
+
+1. **Opt-in scope.** `triage:mute`, never auto-ticked, widening on edit.
+2. **Evidence guard.** A finding that is `confirmed`, carries a `triage_proof`,
+   or has a `ChainFinding-[:CONFIRMS]` edge is refused (`proven`), checked in the
+   write under the node's lock.
+3. **A person's unmute stands.** A finding with a `NodeFilterExemption` is
+   refused (`kept_visible`). The pairs travel to the agent, which refuses the op
+   if they are absent rather than reading "none".
+4. **No overwrite, on any path.** The delegated mute never touches an
+   already-muted node; the UI's `mute_finding` is a no-op on one; the agent
+   refuses a `muted_by` starting `rule:` on every mute op, so no master-key
+   caller can forge a rule mute (which the prune would delete).
+5. **Reason required** (3-500 characters), stored on the node and in the audit.
+6. **Rule mutes need `includeRuleMutes`** to unmute, refused while a recon scan
+   runs (the scan-end sweep is not a `NodeFilterRun`, so only
+   `describeScanWriters` sees it).
+7. **Blast radius.** 25 mutes / 100 unmutes per call, the `write` bucket, and
+   `MCP_MUTE_DAILY_BUDGET` per token per day, reserved before the call and kept
+   when the outcome is unknown.
+8. **Provenance, written AND read.** `muted_by` stays the owner (it carries
+   their authority, and the prune / sweep / partial-recon seeding treat it as a
+   person's), plus `muted_channel='mcp'` and `muted_token=<prefix>`. Every
+   unmute removes them and every other mute clears them. Muted Nodes, the MCP
+   listings and the report are three-valued (person / mcp / rule).
+9. **Busy checks fail closed.** Activation before and after the write (a lock
+   read that throws counts as busy), an exemption read that fails is busy, and
+   the apply or scan check runs before and after the unmute's exemption write.
+   The in-app mute and unmute routes answer 409 during an activation too.
+10. **An unknown outcome is said out loud.** A lost answer is
+    `mute_outcome_unknown` / `unmute_outcome_unknown`; the unmute writes its
+    exemptions first, so a lost answer converges on its own.
+11. **Audited on both sides**: `muted_nodes.muted` / `muted_nodes.unmuted`
+    (source `mcp`, token id and prefix, items, reason), the handler's
+    `mcp.<tool>` row, and a `log_event` per item in the agent.
+12. **Emergency lever**: `MCP_DISABLED_TOOLS=mute_findings,unmute_findings`.
+
+The prune and the scanner clears also take the node lock before reading
+`:Muted`, so a mute that commits mid-statement is kept rather than deleted with
+the node. `tooling/scripts/mute_provenance_cleanup.py` strips leftover
+provenance from unmuted findings after a rollback and roll-forward.
 
 ### The `kali:exec` residual, stated plainly
 
@@ -685,6 +863,26 @@ the token id and prefix. **Failures are audited too** — invalid, expired and
 revoked token presentations (by prefix, never the token), scope denials,
 ownership 404s and every post-validation violation — because that is the only way
 a token brute force or a replayed revoked token becomes visible.
+
+`submit_finding_review` also writes `triage.review`: the finding, its verdict, the
+disputed fact NAMES, the multiplier, the score before and after, the token id and
+prefix, and a SHA-256 of the review's text for forensic matching. The quotes, the
+why and the fix lever are in `UNAUDITED_ARGS` and never reach an audit row. A run
+writes `triage.start` (trigger, token id, effective review budget and model) and
+`triage.finish`, or `triage.finish.late` when it reports after being declared lost.
+
+A mute or unmute over MCP also writes `muted_nodes.muted` /
+`muted_nodes.unmuted` with `source = 'mcp'`, the token id and prefix, every item
+and its outcome, and the reason; `outcome: 'unknown'` records a lost answer.
+
+The preset and rescope tools write their own rows with a before and an after:
+`mcp.create_recon_preset`, `mcp.update_recon_preset`, `mcp.delete_recon_preset`
+(which keeps the deleted settings), `mcp.apply_recon_preset` and
+`mcp.update_project_scope` (with the authorization digest and whether the Domain
+node was seeded). A refused settings write records the rejected key, a registry
+key or `<unknown>`, never caller text. The project form's save writes
+`project.update` with `source = 'ui'`, so a person reverting an agent's change is
+reconstructible too; credentials are recorded by name only.
 
 A `start_recon` also produces the normal `ScanJob` history row with
 `initiatedByUserId` set to the token owner, and the audit record carries the

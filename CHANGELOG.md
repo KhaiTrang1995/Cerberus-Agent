@@ -5,6 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.23.0] - 2026-09-29
+
+### Added
+
+- **Priority Board detail panel.** Click a finding to open a panel with its **Result**, the **Rules** behind the score (each factor with its evidence, the tier inputs and the detector's track record), the **Review**, your **Decision**, the **Evidence** the reviewer saw, and its **Group**. You can mark the finding Real or False positive, or Reset it, with an optional reason, and the row updates in place without reloading the board.
+- **The board shows where a score came from.** When a review or a decision moved a score, the score cell adds a muted `rules 62.5 · Act soon` line with the signed change, and the factors a review changed are highlighted. A **Decided by** chip says who ranked each finding: you, you over MCP, the built-in AI, an external agent (with its token prefix) or the rules alone. A review whose evidence has changed since is marked **out of date**. A new **Decided by** filter narrows the board by decider and counts every finding, not only the page loaded.
+- **Reset.** A decided finding can be taken back to undecided. The confirm dialog names what that releases: a reset finding can be pruned and rule-muted like any other.
+- **External agents can review findings over MCP, with a separate permission.** **Review findings** (`triage:review`) adds `submit_finding_review`: an agent reads a finding with `get_finding_triage` and `get_finding_evidence` (both `triage:read`), then submits a verdict, disputes and an impact multiplier, each backed by a quote the server finds in the evidence. The finding is re-scored at once. RedAmon validates the review exactly as it validates its own AI's, and the review stays valid until the evidence changes. The Triage assistance profile ticks it.
+- **External agents can start and stop triage runs, with a separate permission.** **Run triage** (`triage:run`) adds `start_triage_run` and `stop_triage_run`; `get_triage_status` (`triage:read`) reports the preflight, the live run, its phase and progress. The permission is never ticked for you; the Triage assistance profile offers it as an opt-in. A run an agent started shows **Started over MCP · <prefix>** on the board and on the CypherFix page.
+- **`list_findings` filters by layer.** It accepts `decidedBy`, `reviewedVia` and `reviewCurrent`, and returns each finding's review and decision with who made them.
+- **Operators: re-download the onboarding pack** for any token you grant **Review findings** or **Run triage**. An older pack tells the agent it cannot review findings or start a run.
+- **Models by feature.** Triage review, CodeFix, Multi mute, Report narratives, RoE parsing, the Recon preset generator, the Command whisperer and the Tradecraft section picker each run on their own model, chosen once for your account in **Global Settings → LLM Providers → Models by feature**. A feature with no model asks for one the first time you use it; none borrows the project's agent model or a hidden default.
+- **Multi mute.** A **Multi** button next to every **Mute** asks your Multi mute model which other findings you would mute for the same reason, in groups: three exact ones built by RedAmon and up to four marked **AI suggestion**, with an **Undo** per action. RedAmon, not the model, decides what is pre-ticked, and every guard is re-checked as the mute is written. A Multi mute is a person's mute, listed under **Multi mute** in Muted Nodes and counted on its own line in the report.
+
+### Changed
+
+- **A triage score is now built from three layers, and nothing is lost between runs.** The rules compute a base score; a review (the built-in AI or an external agent) may correct it; your decision overrides both. Each layer is stored separately, and a run re-reads the reviews and decisions already on the graph instead of starting over. A review still valid is kept, not paid for again, so the first run after this upgrade reviews only findings with none, and the preflight says how many reviews will be kept.
+- **A run that reviews never replaces an external agent's still-valid review**, and it re-reviews its own only after you change the Triage review model or the review prompt changes.
+- **An AI false positive is no longer permanent.** It lasts while its evidence is unchanged; a finding whose evidence changes is ranked again.
+- **The run dialog shows your real review budget.** It said 150 whatever the project's **Priority Board: findings the AI reviews** was. The budget is now capped at 1,000 on the server as well as in the form. Its count of findings to review is the ones with no still-valid review, not only those never triaged.
+- **A verdict over MCP is accepted while a run is working.** The run's publish reads it and keeps it, instead of the verdict being refused. A verdict you set in the app still cannot be changed or reset over MCP. An agent image older than the webapp cannot enforce that rule, so every MCP verdict is refused until it is rebuilt.
+- **MCP verdicts no longer teach a detector's track record.** Only your own decisions in the app count.
+- **Triage changes no longer show up in the Recon Delta.**
+- **The CypherFix page follows a run started elsewhere**, from the board, another tab or an agent, instead of refusing to start and never connecting.
+- **The per-project CypherFix model is replaced by your account's Triage review and CodeFix models.** CodeFix no longer falls back to `gpt-4o`, triage with **findings the AI reviews** at 0 needs no model, and switching the Triage review model re-reviews once. A report whose model cannot be used now says so instead of dropping its narratives.
+
+### Fixed
+
+- **A review was wiped at the next run.** Every run that did not re-review a finding (no model, a budget of 0, a failed batch, or a reused review) reset its verdict and corrections, so a finding the AI had marked doubtful jumped back up the board.
+- **A multiplier applied without a quote.** It now counts only with an impact quote found in the evidence.
+- **An AI false positive kept its tier** (showing "0.0 Act now") until the next run, and review corrections recorded the wrong "before" values.
+- **Groups were scored before the review**, so a run's new false positives still counted in their group's rank.
+- **A proven finding could be lowered by a review.** Disputes on a confirmed or chain-proven finding are dropped.
+- **The review never saw the request.** A nuclei finding's evidence held only the response, so the payload that triggered it was invisible to the reviewer, and the matcher and a GVM finding's port and solution type were never filled in either. The request is now included, redacted.
+- **A short run never showed its phase.** A run reported where it was only every 30 seconds, so one that finished sooner showed no phase at all; each phase change is now reported at once.
+- **Reset looked like "You: False positive"** and still protected the finding from the prune.
+- **A verdict moved the board's "latest run"**, so every row looked stale after one click.
+- **The AI's reason was blanked by a verdict** from the board, which sent none.
+- **Stopping a run could leave it `running` for ten minutes**, blocking activation and new runs: a Stop while the run was starting, or a second Stop while it was finishing. A run that lost its heartbeat could still publish. A Stop from an agent now also tells every open tab.
+- **Stop was recorded as failed**; it is now `stopped`, and a Stop pressed while the run is publishing is refused so the board and the fix list never disagree.
+- **A long publish was declared lost** after 10 minutes, which let a version activation start while batches were still writing, and the late finish overwrote the status. The heartbeat now keeps a publishing run alive and reports its phase and progress; a late finish is recorded, not applied.
+- **A publish batch that deadlocked was dropped silently.** It is retried, and a batch that still fails is counted, and the run ends partially completed rather than completed.
+- **The board and the CypherFix page were frozen while a verdict waited** on a run's publish. Board reads and writes no longer block the agent.
+- **Summaries dropped whether a model was available**, and run history grew for ever. Each finished run now trims the project's older runs, keeping the newest 50, anything from the last day and the latest completed run.
+- **The run progress showed raw phase names**, counted untriaged findings under Track, and said "highest-severity" where it meant "highest-ranked".
+- **An MCP mute or unmute answered with a server error was reported as not done**, even when it had been written: the unmute removed its exemptions and the mute refunded its budget. It is now `mute_outcome_unknown` / `unmute_outcome_unknown`.
+- **An agent's mute could re-hide a finding you unmuted while its call was running.** The finding is unmuted again and reported as `kept_visible`.
+- **The error codes the MCP mute tools document never reached the agent** (`busy`, `budget_exhausted`, `*_outcome_unknown`); they are now in the message. A mute budget refund no longer lands in the next day's budget.
+- **The Mute button said "this finding changed" during a version activation**, and announced an already-muted finding as your mute.
+- **Preset applied badges hidden in 6.22.0 show again, and follow their preset.** Renaming a preset renames the badge on the projects that loaded it; deleting one clears it.
+- **Adding hosts to a batch over MCP pauses the project's scheduled scans** until you resume them in the **Scans** tab, so no unattended scan reaches a new host first.
+- **A scheduled scan paused while it was starting no longer comes back on.**
+- **A project no longer stays locked by an agent session that has ended.** A session marked as running is checked with the agent; if the agent cannot be reached, the project still counts as busy.
+- **Triage and CodeFix no longer ask for a model you already have** when your settings could not be read; they say the settings could not be loaded.
+- **`update` rebuilds the agent when only the settings registry changed**, which otherwise left it refusing every RoE upload. The webapp now stops at startup when its schema cannot be applied, instead of serving without the new columns, and review budgets stored above 1,000 are brought to 1,000 when it starts.
+
+### Security
+
+- **A verdict or mute during a version switch is refused**, instead of reporting success and then being lost when the activation restored the graph.
+- **"Ask agent about this node" fences the node's name and properties as untrusted.** Scanner text and text written by an external agent reached the in-app agent as plain user text; it is now wrapped the way tool output is, and the triage text an agent can write is left out of the brief entirely.
+- **Evidence is redacted before any model or agent sees it.** Keys, tokens, JWTs, private keys, authorization values, cookie values and any header whose name marks a credential are masked, and volatile headers are normalised, before the evidence is reviewed, hashed or returned over MCP.
+- **The person who acted is recorded**, not only the account they acted as: verdicts and runs started from the app carry the real actor, and every MCP review is audited with its token, the score before and after, and a hash of its text rather than the text itself.
+- **What bounds an agent that reviews.** It can review only open findings no person has decided, and a proven one only upward; it cannot lower a proven finding, decide, mute or undo your decision. Every quote must be found in the evidence, a review is refused if the evidence changed since it was read, and reviews share the 10-per-minute write limit.
+- **What bounds an agent that runs triage.** One run per project at a time, 30 minutes between agent-started runs, at most 12 a day per project, and at most 1,000 reviews per run. It cannot stop a run that is publishing. `MCP_DISABLED_TOOLS=start_triage_run,stop_triage_run` withdraws both tools.
+- **Each AI feature spends only the keys of the user it runs for**, and a deleted custom provider is never swapped for another. The RoE parse, report narratives and command whisperer agent endpoints require the master internal key: **rebuild the agent and the webapp together**.
+- **Provider error text never reaches the browser**, and Multi mute redacts evidence before the model sees it. A model's quote counts as proof only when it is in the finding's own evidence, never in the HTTP headers every response shares.
+
 ## [6.22.0] - 2026-09-29
 
 ### Added
@@ -12,10 +79,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Mute from anywhere on the graph page.** The Priority Board's **Mute** button now also appears in the node drawer (left of delete) and as the rightmost column of every node table: All Nodes, Node Inspector, JS Recon and the Red Zone tables. It works exactly as it does on the board: confirm, hide the finding from the graph, reports and the agent, and restore it from Muted Nodes. Only findings can be muted. On asset rows (IP, domain, port, technology and so on) the button is disabled and its tooltip says why.
 - **Node ID column on every node table.** All Nodes, Node Inspector, JS Recon, the Red Zone tables and Insights Top Findings show the node's graph id in a leftmost column, and the Recon Delta shows it for live assets. It is the number to quote to an agent; MCP results carry it as `nodeId`.
 - **Copy a node's context, or start an agent session from it.** In the node drawer, **Copy context** puts an LLM-ready Markdown brief (properties and relationships) on your clipboard. **Ask agent** asks what you want, then opens a fresh agent session with your request and that brief as the first message. It is hidden on a saved version.
+- **External agents can mute and unmute findings over MCP, with a separate permission.** A new token permission, **Mute and unmute findings** (`triage:mute`), adds three MCP tools: `mute_findings` hides up to 25 findings with a reason, `unmute_findings` brings up to 100 back, and `search_muted_findings` pages through every muted finding with the Muted Nodes filters (it needs only `triage:read`). The permission is never ticked for you; the Triage assistance profile offers it as an opt-in. An agent's mute is marked as the agent's everywhere: **Muted Nodes** badges it with the token's prefix, and the new **Agent (MCP)** and **Token** filters list one token's mutes together so you can review and unmute them in one go. The pentest report counts agent mutes on their own line, apart from people's. Deleting or expiring a token that can mute says its mutes stay and names the prefix to find them by. Operators: re-download the onboarding pack for any token you grant this permission, because an older pack tells the agent it cannot mute.
+- **External agents can manage and apply recon presets over MCP.** `list_recon_presets` now lists your own saved presets beside the built-ins and can return a preset's values. Two new permissions add four tools. **Manage your recon preset library** (`preset:write`) gives `create_recon_preset` (from values, a copy of another preset, or a capture of a project), `update_recon_preset` and `delete_recon_preset`; built-in presets cannot be changed. **Apply a recon preset to a project** (`preset:apply`) gives `apply_recon_preset`, the form's Load preset run by the server, with a dry run that lists what will change and what only resets to its default. Only *Research and training* ticks them; *Penetration testing*, *Bug bounty* and *Continuous attack surface monitoring* offer apply as an opt-in. A preset an agent wrote last is badged **Edited by an MCP agent** in My Presets and the preset picker, and both lists get a name filter past 10 presets.
+- **External agents can change an existing project's target lists, with a separate permission.** **Change an existing project's target lists** (`project:rescope`) adds `update_project_scope`, which edits a batch project's host list, the GitHub hunt's organisation and repositories, the GVM target strategy and the supply-chain organisation, repository, ref and scope: the lists the project form already edits. The target domain, the address list and the targeting mode stay fixed for every token. It is never ticked for you; *Continuous attack surface monitoring* offers it as an opt-in.
 
 ### Changed
 
 - **Node drawer actions moved into the Basic Info row** as matching icon buttons (copy, ask agent, mute, delete). The drawer title is smaller and shows the full name on hover when it is clipped.
+- **`update_recon_settings` describes what it can really change.** Its description still listed the old 126-field allowlist, so agents concluded they could not edit an existing project's settings. The refused fields are now listed from the settings registry itself. *Penetration testing* and *Bug bounty* offer **Change recon tuning settings** as an opt-in.
+- **Saved-preset badges reset once.** Presets no longer carry two switches (see Security), which changes the fingerprint behind the **Preset applied** badge, so projects that showed it lose it until the next preset load. Nothing about their settings changes.
+
+### Security
+
+- **What bounds an agent that mutes.** An agent can never mute a proven finding (confirmed, carrying a proof, or confirmed by an attack chain) or one a person brought back. It can never change a mute that already exists, and it unmutes a Mute Rule's mute only when asked to explicitly, never while a recon scan runs. Each mute needs a reason, and each token may mute at most 200 findings a day (`MCP_MUTE_DAILY_BUDGET`). If the answer to a mute is lost in transit, the agent is told the outcome is unknown and to check before retrying. `MCP_DISABLED_TOOLS=mute_findings,unmute_findings` withdraws both tools.
+- **A mute can no longer be deleted by a scan running at the same moment.** The end-of-scan prune and the GVM, GitHub-hunt and TruffleHog clears now lock a finding before they check whether it is muted. A mute that landed between that check and the delete used to be deleted along with the finding.
+- **A mute never overwrites someone else's mute.** Pressing Mute on a stale row of an already-muted finding now leaves it exactly as it was, with the same person or rule and the same reason. Nothing that reaches the internal triage API can make a mute pass as a Mute Rule's, which the prune would delete.
+- **Mute and Unmute are refused while a version is being activated.** Activation swaps the graph out and back, and a mute or unmute made in between reported success and was then lost.
+- **Loading a preset no longer turns the MCP sandbox back on.** A preset resets every setting it does not name to its default, and presets carried *Allow MCP Sandbox Commands* and *Update Graph DB*, both on by default. Loading any preset re-enabled the sandbox on a project where you had turned it off. Presets no longer carry either switch.
+- **A settings page left open no longer reverts an agent's change.** **Update Settings** now answers *This project changed since you opened it* instead of overwriting whatever an MCP agent (or another tab) changed meanwhile. Saving also no longer writes back the version-activation lock, which a page opened before an activation released mid-swap, and every save writes an audit row naming what it changed.
+- **Every MCP settings write is a compare-and-swap.** Two agents writing the same project at once could each overwrite the other; the later one now gets a conflict. `update_recon_settings` also runs the fireteam and supply-chain checks the project form's save runs, which it skipped.
+- **Preset generation spends only your own LLM key.** The AI preset generator took the user from the request body and had no sign-in check of its own.
+- **MCP `create_project` runs the permanent target guardrail**, as the project form does, on the domain and on every batch root.
+- **Presets store and return preset settings only.** Saving a preset in the UI, importing one and exporting a project used to pass through whatever object a preset held, so an old preset could carry a target or a credential; reads and the export now return only preset fields, and an import skips a bad preset instead of failing.
+- **The project form's AI guardrail can block an edit again.** On a batch host-list edit it called the agent without the internal key and read the wrong field of the answer, so it never refused anything.
+
+### Fixed
+
+- **The queued-scan warning after a settings change was wrong.** It reported every queued full and partial recon as parked for review; it now matches the dispatcher and lists the job ids.
+- **A full recon queued before a change to supply-chain recon now re-confirms**, like a change to any pipeline phase, instead of running with the new setting.
+- **Uploading a JS recon file and then saving the form no longer drops the upload** from the project.
+- **An MCP write can clear the engagement identity header.** Its empty default was refused as an invalid header.
 
 ## [6.21.0] - 2026-09-29
 
