@@ -219,3 +219,73 @@ def test_takeover_confidence_is_in_the_verdict_taken():
         assert out["confidence"] == conf
         assert out["source"] == "jev_classifier"
         assert out["reason"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Target-derived state is bounded
+# ---------------------------------------------------------------------------
+
+def _capture_state():
+    captured = {"all_questions": {}}
+
+    async def fake(key, model, state, questions):
+        captured["state"] = state
+        captured["questions"] = questions                       # the last request's
+        captured["all_questions"].update(questions)             # across a split
+        names = list(questions)
+        answers = {}
+        for n in names:
+            q = questions[n]
+            if q["type"] == "choice":
+                answers[n] = {"type": "choice", "choice": next(iter(q["criteria"])), "confidence": 1.0,
+                              "probabilities": {}}
+            else:
+                answers[n] = {"type": "noul", "noul": 0.1}
+        return {"model": "x", "answers": answers}
+
+    return captured, fake
+
+
+def test_an_oversized_body_and_headers_are_clipped_before_they_reach_jev():
+    captured, fake = _capture_state()
+    huge_headers = {"X-Big": "h" * 100_000}
+    with _patch_system_one(fake):
+        _run(jev_hooks.waf_classify(KEY, "http://t/" + "u" * 50_000, 403, huge_headers, "b" * 500_000, 5))
+    state = captured["state"]
+    assert len(state["body_sample"]) < jev_hooks._SAMPLE_CHARS + 400     # + the wrapper
+    assert len(state["headers"]) < jev_hooks._HEADERS_CHARS + 400
+    assert len(state["url"]) == jev_hooks._SHORT_CHARS
+
+
+def test_takeover_and_ffuf_state_is_clipped_too():
+    captured, fake = _capture_state()
+    with _patch_system_one(fake):
+        _run(jev_hooks.takeover_classify(KEY, "h" * 9000, "p" * 9000, 404, {"a": "b" * 90_000}, "r" * 90_000))
+    s = captured["state"]
+    assert len(s["hostname"]) == jev_hooks._SHORT_CHARS
+    assert len(s["claimed_provider"]) == jev_hooks._SHORT_CHARS
+    assert len(s["response_sample"]) < jev_hooks._SAMPLE_CHARS + 400
+    captured, fake = _capture_state()
+    with _patch_system_one(fake):
+        _run(jev_hooks.ffuf_extensions(KEY, "http://t/", {"X": "x" * 90_000}, 6))
+    assert len(captured["state"]["headers"]) < jev_hooks._HEADERS_CHARS + 400
+
+
+def test_the_clip_keeps_the_nonce_boundary_intact():
+    """wrap_untrusted runs AFTER the clip, so the closing marker is never cut off."""
+    captured, fake = _capture_state()
+    with _patch_system_one(fake):
+        _run(jev_hooks.waf_classify(KEY, "http://t/", 200, {}, "b" * 500_000, 5))
+    body = captured["state"]["body_sample"]
+    assert body.startswith("<<<UNTRUSTED_TARGET_BODY id=")
+    assert body.rstrip().endswith(">>>") and "<<<END_UNTRUSTED_TARGET_BODY id=" in body
+
+
+def test_nuclei_universal_floor_survives_a_candidate_list_over_the_cap():
+    """Only the questions are bounded: a universal tag past the cap is still kept."""
+    cands = [f"t{i}" for i in range(jev_hooks._MAX_CANDIDATES)] + ["cve"]
+    captured, fake = _capture_state()
+    with _patch_system_one(fake):
+        out = _run(jev_hooks.nuclei_tags(KEY, [], [], cands, 15))
+    assert len(captured["all_questions"]) == jev_hooks._MAX_CANDIDATES
+    assert "cve" in out["tags"]

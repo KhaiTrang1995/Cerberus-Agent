@@ -23,9 +23,24 @@ from jev_client import JEV_MODEL, JevError
 #: the per-account rate and bounds the request size; larger sets split.
 JEV_MAX_QUESTIONS_PER_CALL = 200
 
+#: Caps on target-derived text placed in the state. TypeSafe takes about 64k tokens
+#: per request, and the endpoint accepts the same unbounded bodies as /llm/*, so one
+#: oversized header or body would fail the call. Clipping keeps the verdict
+#: available, and the tail of a header dump or body sample is the least useful part.
+_HEADERS_CHARS = 16_000
+_SAMPLE_CHARS = 8_000
+_FINGERPRINT_CHARS = 8_000
+_SHORT_CHARS = 2_000
+#: More candidate tags than any real template set has; only bounds a pathological caller.
+_MAX_CANDIDATES = 500
+
 #: Noul answers at or above this read as "yes". The recon thresholds (70/100)
 #: are calibrated against this, so it moves with the pinned model.
 _YES = 0.5
+
+
+def _clip(value, limit: int) -> str:
+    return str(value if value is not None else "")[:limit]
 
 
 def _noul(instructions: str, *, true: str = "", false: str = "") -> dict:
@@ -79,8 +94,8 @@ async def ffuf_extensions(key: str, url: str, headers: dict, max_extensions: int
         for i, ext in enumerate(FFUF_JEV_CATALOG)
     }
     state = {
-        "url": url,
-        "headers": wrap_untrusted(json.dumps(headers), label="TARGET_HEADERS"),
+        "url": _clip(url, _SHORT_CHARS),
+        "headers": wrap_untrusted(_clip(json.dumps(headers), _HEADERS_CHARS), label="TARGET_HEADERS"),
     }
     answers = await _ask(key, state, questions)
 
@@ -117,7 +132,10 @@ async def nuclei_tags(key: str, technologies: list, servers: list,
     is tool-controlled; the fingerprint is the only target-derived input and
     goes into the state.
     """
-    valid_candidates = [c for c in candidates if isinstance(c, str)]
+    all_candidates = [c for c in candidates if isinstance(c, str)]
+    # The floor is computed over the FULL list; only the questions are bounded.
+    universal = {t for t in _NUCLEI_UNIVERSAL if t in all_candidates}
+    valid_candidates = all_candidates[:_MAX_CANDIDATES]
     questions = {
         f"tag_{i}": _noul(
             f"Should the Nuclei template tag `{tag}` be included for a scan of a host "
@@ -125,12 +143,11 @@ async def nuclei_tags(key: str, technologies: list, servers: list,
         for i, tag in enumerate(valid_candidates)
     }
     state = {
-        "technologies": wrap_untrusted(json.dumps(technologies), label="TARGET_FINGERPRINT"),
-        "servers": wrap_untrusted(json.dumps(servers), label="TARGET_FINGERPRINT"),
+        "technologies": wrap_untrusted(_clip(json.dumps(technologies), _FINGERPRINT_CHARS), label="TARGET_FINGERPRINT"),
+        "servers": wrap_untrusted(_clip(json.dumps(servers), _FINGERPRINT_CHARS), label="TARGET_FINGERPRINT"),
     }
     answers = await _ask(key, state, questions) if questions else {}
 
-    universal = {t for t in _NUCLEI_UNIVERSAL if t in valid_candidates}
     scored = sorted(
         ((answers[f"tag_{i}"]["noul"], tag) for i, tag in enumerate(valid_candidates)
          if answers[f"tag_{i}"]["noul"] >= _YES),
@@ -168,11 +185,11 @@ async def waf_classify(key: str, url: str, status_code: int, headers: dict,
         },
     }
     state = {
-        "url": url,
+        "url": _clip(url, _SHORT_CHARS),
         "status_code": status_code,
         "response_time_ms": response_time_ms,
-        "headers": wrap_untrusted(json.dumps(headers), label="TARGET_HEADERS"),
-        "body_sample": wrap_untrusted(body_sample, label="TARGET_BODY"),
+        "headers": wrap_untrusted(_clip(json.dumps(headers), _HEADERS_CHARS), label="TARGET_HEADERS"),
+        "body_sample": wrap_untrusted(_clip(body_sample, _SAMPLE_CHARS), label="TARGET_BODY"),
     }
     answers = await _ask(key, state, questions)
 
@@ -202,11 +219,11 @@ async def takeover_classify(key: str, hostname: str, expected_provider: str,
             false="A genuine provider unclaimed-site page"),
     }
     state = {
-        "hostname": hostname,
-        "claimed_provider": expected_provider,
+        "hostname": _clip(hostname, _SHORT_CHARS),
+        "claimed_provider": _clip(expected_provider, _SHORT_CHARS),
         "status_code": status_code,
-        "headers": wrap_untrusted(json.dumps(headers), label="TARGET_HEADERS"),
-        "response_sample": wrap_untrusted(response_sample, label="TARGET_BODY"),
+        "headers": wrap_untrusted(_clip(json.dumps(headers), _HEADERS_CHARS), label="TARGET_HEADERS"),
+        "response_sample": wrap_untrusted(_clip(response_sample, _SAMPLE_CHARS), label="TARGET_BODY"),
     }
     answers = await _ask(key, state, questions)
 
