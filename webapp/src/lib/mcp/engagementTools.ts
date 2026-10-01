@@ -524,20 +524,6 @@ function resolveRates(row: Record<string, unknown>, ceiling: number | null): Res
 
 const ALLOWED_IMAGE_SUFFIX = 'DockerImage'
 
-/**
- * Read-only proof that the configured pipeline fits the engagement.
- *
- * Without it "the pipeline respects the scope" is an assertion. With it, it is a
- * diff a person checks in ten seconds, and an agent is expected to call it and
- * report it before `start_recon`.
- *
- * The distinction that earns its place: it reports RESOLVED values, not written
- * ones. `get_recon_settings` echoes what a caller wrote, and for the fields the
- * runtime corrects - a rate above the ceiling, a container image outside the
- * shipped set, a wordlist path outside the project directory - those are two
- * different answers. An agent that only read the first would believe a rejected
- * value was accepted.
- */
 /** The four recon AI hooks that have an LLM | Jev engine switch. */
 const AI_HOOKS = [
   { hook: 'ffuf_extensions', engineField: 'ffufAiUseJev' },
@@ -584,6 +570,20 @@ async function resolveAiHooks(row: Record<string, unknown>, ownerUserId: string)
   })
 }
 
+/**
+ * Read-only proof that the configured pipeline fits the engagement.
+ *
+ * Without it "the pipeline respects the scope" is an assertion. With it, it is a
+ * diff a person checks in ten seconds, and an agent is expected to call it and
+ * report it before `start_recon`.
+ *
+ * The distinction that earns its place: it reports RESOLVED values, not written
+ * ones. `get_recon_settings` echoes what a caller wrote, and for the fields the
+ * runtime corrects - a rate above the ceiling, a container image outside the
+ * shipped set, a wordlist path outside the project directory - those are two
+ * different answers. An agent that only read the first would believe a rejected
+ * value was accepted.
+ */
 export async function preflightScopeCheck(ctx: McpContext, projectId: string) {
   requireScope(ctx.token, 'recon:read')
   await assertMcpProjectAccess(ctx.token.userId, projectId)

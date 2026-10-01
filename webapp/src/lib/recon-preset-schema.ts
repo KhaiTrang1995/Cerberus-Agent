@@ -1045,7 +1045,7 @@ export const RECON_PARAMETER_CATALOG = `
 - securityCheckDirectIpHttps: boolean - Check direct IP HTTPS access
 - securityCheckIpApiExposed: boolean
 - securityCheckWafBypass: boolean
-- wafAiClassifier: boolean - Use AI to classify WAF/CDN presence from response headers/body/latency when the static check misses (requires aiInPipeline=true). Augments _has_cdn_markers and check_waf_bypass; AI-detected bypasses are tagged detection_method=ai_classifier. Default false.
+- wafAiClassifier: boolean - Use AI to classify WAF/CDN presence from response headers/body/latency when the static check misses (requires aiInPipeline=true). Augments _has_cdn_markers and check_waf_bypass; AI-detected bypasses are tagged detection_method=ai_classifier (jev_classifier when wafAiUseJev is on). Default false.
 - wafAiUseJev: boolean - Engine for the WAF classifier: false uses the LLM in aiPipelineModel, true uses TypeSafe AI Jev (jev-1.13.0). Only when aiInPipeline=true; needs a Jev token on the owner's account, else the hook uses its static fallback.
 - securityCheckTlsExpiringSoon: boolean
 - securityCheckTlsExpiryDays: integer - Days threshold

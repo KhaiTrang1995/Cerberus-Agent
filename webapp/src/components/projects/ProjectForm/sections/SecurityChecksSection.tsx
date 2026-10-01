@@ -128,7 +128,8 @@ export function SecurityChecksSection({ data, updateField, onRun }: SecurityChec
                       'configured model, which scores WAF presence 0-100 from ' +
                       'headers, body fingerprints, cookies, and latency. ' +
                       'AI-detected bypasses are tagged with ' +
-                      'detection_method=ai_classifier, waf_type, waf_confidence. ' +
+                      'detection_method=ai_classifier (jev_classifier on the Jev engine), ' +
+                      'waf_type, waf_confidence. ' +
                       (!data.aiInPipeline ? 'Enable "AI in Pipeline" in the Target tab to use this.' : '')
                     }
                   />

@@ -13350,7 +13350,7 @@
    "group": "llm",
    "has_default": true,
    "mcp": "settable",
-   "meaning": "Use AI to classify WAF/CDN presence from response headers/body/latency when the static check misses (requires aiInPipeline=true). Augments _has_cdn_markers and check_waf_bypass; AI-detected bypasses are tagged detection_method=ai_classifier. Default false.",
+   "meaning": "Use AI to classify WAF/CDN presence from response headers/body/latency when the static check misses (requires aiInPipeline=true). Augments _has_cdn_markers and check_waf_bypass; AI-detected bypasses are tagged detection_method=ai_classifier (jev_classifier when wafAiUseJev is on). Default false.",
    "optional": false,
    "phase": "http_probe",
    "prisma_type": "Boolean",

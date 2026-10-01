@@ -9502,7 +9502,8 @@ fields:
       Use AI to classify WAF/CDN presence from response headers/body/latency when
       the static check misses (requires aiInPipeline=true). Augments
       _has_cdn_markers and check_waf_bypass; AI-detected bypasses are tagged
-      detection_method=ai_classifier. Default false.
+      detection_method=ai_classifier (jev_classifier when wafAiUseJev is on).
+      Default false.
     form_section: "SecurityChecksSection"
   wafAiUseJev:
     tool: waf
