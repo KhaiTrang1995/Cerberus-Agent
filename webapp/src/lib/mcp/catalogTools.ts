@@ -151,6 +151,11 @@ const NOTES = [
   'Where zeroMeans is "unlimited", 0 is the FASTEST value the field accepts and not the ' +
     'safest. Under an engagement ceiling a 0 there is rewritten to the ceiling.',
   'Settings apply to the NEXT scan. A scan already running read its settings when it started.',
+  'AI hooks have THREE levels: aiInPipeline, then the per-hook AI flag, then the *UseJev engine. ' +
+    'At scan start aiInPipeline forces every per-hook AI flag to its own value; it does not touch ' +
+    'the engine fields. A *UseJev flag only switches which engine answers (false = the LLM in ' +
+    'aiPipelineModel, true = TypeSafe Jev), and switching one ON is refused unless the project ' +
+    'owner has a Jev token. preflight_scope_check reports each hook\'s effective engine.',
 ]
 
 /**

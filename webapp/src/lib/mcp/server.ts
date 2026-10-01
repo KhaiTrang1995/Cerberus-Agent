@@ -1934,6 +1934,9 @@ export function buildMcpServer(ctx: McpContext, instructions?: string): McpServe
         'agent that only read the first would believe a rejected value was accepted.\n\n' +
         'It also names every enabled tool whose PHASE is not in scanModules. Those are the ' +
         'silent no-ops: the scan succeeds, that tool never runs, and no result field says why.\n\n' +
+        '`aiHooks` gives, for each of the four recon AI hooks, the engine the row asks for ' +
+        '(llm or jev) and the one that will run: off when aiInPipeline is off, and a hook on ' +
+        'Jev reads as its static fallback when the project owner has no Jev token.\n\n' +
         '`startable` is false when a third-party engagement is missing its ceiling or its ' +
         'authorization record, which is exactly what start_recon will refuse on.',
       annotations: READ_ONLY,

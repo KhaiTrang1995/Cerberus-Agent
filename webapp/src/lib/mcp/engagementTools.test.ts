@@ -25,6 +25,7 @@ const h = vi.hoisted(() => ({
   findUniqueAuthorization: vi.fn(),
   findManyAuthorization: vi.fn(),
   countAuthorization: vi.fn(),
+  tokenCount: vi.fn(),
   findFirstScanJob: vi.fn(),
   transaction: vi.fn(),
   busy: vi.fn(),
@@ -47,6 +48,7 @@ vi.mock('@/lib/prisma', () => {
       count: (...a: unknown[]) => h.countAuthorization(...a),
     },
     scanJob: { findFirst: (...a: unknown[]) => h.findFirstScanJob(...a) },
+    userLlmProvider: { count: (...a: unknown[]) => h.tokenCount(...a) },
     $transaction: (fn: (tx: unknown) => unknown) => h.transaction(fn, client),
   }
   return { default: client }
@@ -73,6 +75,63 @@ const ctx = (scopes: readonly string[] = ALL_SCOPES): McpContext => ({
     tokenId: 't1', userId: 'owner', tokenPrefix: 'rdmn_mcp_aaaaaaaa',
     name: 'agent', scopes: scopes as never,
   },
+})
+
+describe('preflight_scope_check: the effective engine of each AI hook', () => {
+  const byHook = (r: Awaited<ReturnType<typeof preflightScopeCheck>>) =>
+    Object.fromEntries(r.aiHooks.map(x => [x.hook, x]))
+
+  test('reports the four hooks with the engine each row asks for', async () => {
+    h.findProject.mockResolvedValue(projectRow({ aiInPipeline: true, ffufAiUseJev: false }))
+    const r = await preflightScopeCheck(ctx(), 'p1')
+    expect(r.aiHooks.map(x => x.hook)).toEqual([
+      'ffuf_extensions', 'nuclei_tags', 'waf_classification', 'takeover_disambiguation',
+    ])
+    expect(byHook(r).ffuf_extensions).toEqual({ hook: 'ffuf_extensions', engine: 'llm', effective: 'llm' })
+  })
+
+  test('aiInPipeline off means every hook is off, whatever the engine field says', async () => {
+    h.findProject.mockResolvedValue(projectRow({ aiInPipeline: false, ffufAiUseJev: true }))
+    const r = await preflightScopeCheck(ctx(), 'p1')
+    expect(byHook(r).ffuf_extensions).toMatchObject({ engine: 'jev', effective: 'off' })
+    expect(r.aiHooks.every(x => x.effective === 'off')).toBe(true)
+    expect(h.tokenCount).not.toHaveBeenCalled()
+  })
+
+  test('a hook on Jev with a token on the owner\'s account runs on Jev', async () => {
+    h.tokenCount.mockResolvedValue(1)
+    h.findProject.mockResolvedValue(projectRow({ aiInPipeline: true, wafAiUseJev: true }))
+    const r = await preflightScopeCheck(ctx(), 'p1')
+    expect(byHook(r).waf_classification).toMatchObject({ engine: 'jev', effective: 'jev' })
+    expect(h.tokenCount).toHaveBeenCalledWith({ where: { userId: 'owner', providerType: 'jev' } })
+  })
+
+  test('a hook on Jev with no token is reported as its static fallback', async () => {
+    h.findProject.mockResolvedValue(projectRow({ aiInPipeline: true, nucleiTagsAiUseJev: true }))
+    const r = await preflightScopeCheck(ctx(), 'p1')
+    expect(byHook(r).nuclei_tags.effective).toBe("jev → static fallback (no Jev token on the owner's account)")
+    expect(byHook(r).ffuf_extensions.effective).toBe('llm')
+  })
+
+  test('a failed token count is reported as unverified, never as a guess', async () => {
+    h.tokenCount.mockRejectedValue(new Error('db down'))
+    h.findProject.mockResolvedValue(projectRow({ aiInPipeline: true, takeoverAiUseJev: true }))
+    const r = await preflightScopeCheck(ctx(), 'p1')
+    expect(byHook(r).takeover_disambiguation.effective).toContain('could not check')
+  })
+
+  test('all hooks on the LLM never touch the token table', async () => {
+    h.findProject.mockResolvedValue(projectRow({ aiInPipeline: true }))
+    await preflightScopeCheck(ctx(), 'p1')
+    expect(h.tokenCount).not.toHaveBeenCalled()
+  })
+
+  test('the response carries counts and engines only: never a token, key or provider row', async () => {
+    h.tokenCount.mockResolvedValue(1)
+    h.findProject.mockResolvedValue(projectRow({ aiInPipeline: true, ffufAiUseJev: true }))
+    const r = await preflightScopeCheck(ctx(), 'p1')
+    expect(JSON.stringify(r.aiHooks)).not.toMatch(/apikey|api_key|apiKey|token":/i)
+  })
 })
 
 const AUTH = {
@@ -124,6 +183,7 @@ beforeEach(() => {
   h.findUniqueAuthorization.mockResolvedValue(null)
   h.findManyAuthorization.mockResolvedValue([])
   h.countAuthorization.mockResolvedValue(0)
+  h.tokenCount.mockResolvedValue(0)
   h.findFirstScanJob.mockResolvedValue(null)
   h.updateProject.mockResolvedValue({})
   h.updateManyProject.mockResolvedValue({ count: 1 })

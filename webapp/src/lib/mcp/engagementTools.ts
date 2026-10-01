@@ -538,6 +538,52 @@ const ALLOWED_IMAGE_SUFFIX = 'DockerImage'
  * different answers. An agent that only read the first would believe a rejected
  * value was accepted.
  */
+/** The four recon AI hooks that have an LLM | Jev engine switch. */
+const AI_HOOKS = [
+  { hook: 'ffuf_extensions', engineField: 'ffufAiUseJev' },
+  { hook: 'nuclei_tags', engineField: 'nucleiTagsAiUseJev' },
+  { hook: 'waf_classification', engineField: 'wafAiUseJev' },
+  { hook: 'takeover_disambiguation', engineField: 'takeoverAiUseJev' },
+] as const
+
+/**
+ * Which engine each AI hook will actually use at the next scan.
+ *
+ * `aiInPipeline` forces every per-hook AI flag to its own value at scan start
+ * and never touches the engine fields, so with it off every hook is off, and
+ * with it on the engine field alone decides. A hook on Jev runs only if the
+ * project owner has a Jev token; otherwise it uses its static fallback, which
+ * is what this reports. Over MCP the token's user IS the owner (a mismatch is
+ * a hard deny), so the owner's rows are counted with it. The token itself is
+ * never read: a count is all this needs, and the secret has no business here.
+ */
+async function resolveAiHooks(row: Record<string, unknown>, ownerUserId: string) {
+  const aiOn = row.aiInPipeline === true
+  const wantsJev = AI_HOOKS.some(h => row[h.engineField] === true)
+
+  let ownerHasToken: boolean | null = null
+  if (aiOn && wantsJev) {
+    try {
+      ownerHasToken = (await prisma.userLlmProvider.count({
+        where: { userId: ownerUserId, providerType: 'jev' },
+      })) > 0
+    } catch {
+      ownerHasToken = null
+    }
+  }
+
+  return AI_HOOKS.map(({ hook, engineField }) => {
+    const engine = row[engineField] === true ? 'jev' : 'llm'
+    let effective: string
+    if (!aiOn) effective = 'off'
+    else if (engine === 'llm') effective = 'llm'
+    else if (ownerHasToken === true) effective = 'jev'
+    else if (ownerHasToken === false) effective = 'jev → static fallback (no Jev token on the owner\'s account)'
+    else effective = 'jev (could not check the owner\'s Jev token)'
+    return { hook, engine, effective }
+  })
+}
+
 export async function preflightScopeCheck(ctx: McpContext, projectId: string) {
   requireScope(ctx.token, 'recon:read')
   await assertMcpProjectAccess(ctx.token.userId, projectId)
@@ -632,6 +678,8 @@ export async function preflightScopeCheck(ctx: McpContext, projectId: string) {
 
   const exceeds = rates.filter(r => ceiling !== null && r.resolved > ceiling)
 
+  const aiHooks = await resolveAiHooks(row, ctx.token.userId)
+
   return {
     projectId,
     engagement,
@@ -663,6 +711,9 @@ export async function preflightScopeCheck(ctx: McpContext, projectId: string) {
       maxBatchHosts: MAX_BATCH_HOSTS,
     },
     ceilingRps: ceiling,
+    // Per hook: the engine the row asks for and the one that will run. A hook on
+    // Jev with no token on the owner's account runs its static fallback.
+    aiHooks,
     // The DERIVED answer to "are this project's limits live", and which of the
     // three makes them so. It is not a column, so a caller cannot read it from
     // get_recon_settings; this is the only place it is reported.
