@@ -169,6 +169,7 @@ Additional properties present on this node type, not yet described:
 - version (string): software version from Nmap -sV (e.g. "2.3.4", "8.5.19")
 - cpe (string): CPE string from Nmap (e.g. "cpe:/a:vsftpd:vsftpd:2.3.4")
 - nmap_scanned (boolean): true if Nmap has probed this port
+- A Port with source "nmap" was missed by the port scan and confirmed open by Nmap, which created it
 Additional properties present on this node type, not yet described:
 - ip_address (string)
 
@@ -481,6 +482,11 @@ Web cache poisoning properties (source="cache_poisoning"):
 - id pattern: `cache_{user_id}_{project_id}_{technique}_{baseurl}_{path}_{vector}` — deterministic, MERGE-safe
 - Typical query: "list confirmed cache poisoning findings" → `MATCH (e:Endpoint)-[:HAS_VULNERABILITY]->(v:Vulnerability {source: 'cache_poisoning'}) WHERE v.confidence_tier = 'Confirmed' RETURN e.url, v.cache_header, v.cache_impact, v.confidence, v.poc_link`
 
+Security-check properties (source="security_check"):
+- detection_method (string): how a waf_bypass was decided, "payload_differential", "static_headers", "ai_classifier" or "jev_classifier"; waf_confidence (float), waf_type (string) and ai_reasoning (string) carry the WAF classifier's verdict
+- service (string): the service a port check found on the port (e.g. "redis", "mysql")
+- A port/service check that reports no URL (admin_port_exposed, database_exposed, redis_no_auth, smtp_open_relay) carries matched_ip and port, one finding per IP and port, linked from its IP via HAS_VULNERABILITY
+
 Per-source properties node filters also read (graph_db/node_filters/catalog.yaml):
 - url (string): the probed URL (security_check, origin_discovery)
 - status_code (integer): HTTP status of the probe (security_check, origin_discovery)
@@ -657,6 +663,7 @@ and carries dependency data, not secrets.
 - duration_seconds (float): run duration
 - repos_scanned (integer), commits_scanned (integer), files_scanned (integer): coverage
 - secrets_found (integer), sensitive_files (integer): result counts
+- coverage_gap_count (integer): set only on a run that stopped ("interrupted", "in_progress"), failed, or skipped content GitHub throttled or failed to serve; such a run keeps every earlier finding rather than pruning it
 
 **GithubRepository** - A repository the hunt walked (also written by Supply-Chain Recon)
 - name (string): "owner/repo"
@@ -672,11 +679,13 @@ and carries dependency data, not secrets.
 - matches (integer): how many times this secret appears
 - sample (string): a REDACTED excerpt for identification, never the full value
 - timestamp (string): when the hunt observed it
+- repository_public (boolean): true for a public repository or gist, false for a private one; absent when the hunt did not know
 
 **GithubSensitiveFile** - A file that is sensitive by NAME or kind, not by content
 - secret_type (string): the sensitive-file class, e.g. ".env", "id_rsa"
 - path (string), repository (string): where it was found
 - timestamp (string): when the hunt observed it
+- repository_public (boolean): as on GithubSecret
 
 Both finding types also carry the shared `triage_*` properties described under
 Triage below (`triage_state`, `triage_tier`, `triage_priority_score`,
