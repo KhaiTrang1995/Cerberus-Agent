@@ -30,6 +30,7 @@ _REDACT_PATTERNS = [
     re.compile(r"tvly-[A-Za-z0-9_\-]{16,}"),                     # Tavily search key
     re.compile(r"AIza[A-Za-z0-9_\-]{30,}"),                      # Google / Gemini key
     re.compile(r"xai-[A-Za-z0-9]{20,}"),                         # xAI (Grok) key
+    re.compile(r"apikey_[A-Za-z0-9]{16,}_[A-Za-z0-9]{16,}"),     # TypeSafe (Jev) key
     # ProjectDiscovery Cloud key: what vulnx sends upstream, opaque and long.
     re.compile(r"(?i)\bpdcp[-_]?(?:api[-_]?)?key\s*[:=]\s*[^\s,;\"']{8,}"),
 ]

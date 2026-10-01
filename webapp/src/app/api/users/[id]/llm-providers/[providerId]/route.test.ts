@@ -136,3 +136,55 @@ describe('DELETE provider — ownership', () => {
     expect(mockDelete).toHaveBeenCalled()
   })
 })
+
+describe('PUT provider - TypeSafe Jev type lock', () => {
+  const JEV_ROW = { ...PROVIDER, providerType: 'jev', apiKey: 'apikey_stored_key', baseUrl: '', modelIdentifier: 'jev-1.13.0' }
+
+  test('a stored Jev row cannot become a chat provider', async () => {
+    mockRequireUserAccess.mockResolvedValue(null)
+    mockFindFirst.mockResolvedValue(JEV_ROW)
+    const res = await PUT(
+      put({ providerType: 'openai_compatible', baseUrl: 'http://evil.example/v1', apiKey: '••••••••_key' }),
+      params('victim', 'p1'),
+    )
+    expect(res.status).toBe(400)
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  test('a chat provider cannot become a Jev row', async () => {
+    mockRequireUserAccess.mockResolvedValue(null)
+    mockFindFirst.mockResolvedValue({ ...PROVIDER, providerType: 'openai' })
+    const res = await PUT(put({ providerType: 'jev' }), params('victim', 'p1'))
+    expect(res.status).toBe(400)
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  test('a Jev update writes only the key; URL, headers, model and name are dropped', async () => {
+    mockRequireUserAccess.mockResolvedValue(null)
+    mockFindFirst.mockResolvedValue(JEV_ROW)
+    const res = await PUT(
+      put({
+        providerType: 'jev', apiKey: ' apikey_new_key ', baseUrl: 'http://evil.example/v1',
+        defaultHeaders: { 'X-Leak': '1' }, modelIdentifier: 'jev-latest', name: 'renamed',
+      }),
+      params('victim', 'p1'),
+    )
+    expect(res.status).toBe(200)
+    expect(mockUpdate.mock.calls[0][0].data).toEqual({ apiKey: 'apikey_new_key' })
+  })
+
+  test('a masked key keeps the stored one', async () => {
+    mockRequireUserAccess.mockResolvedValue(null)
+    mockFindFirst.mockResolvedValue(JEV_ROW)
+    await PUT(put({ providerType: 'jev', apiKey: '••••••••_key' }), params('victim', 'p1'))
+    expect(mockUpdate.mock.calls[0][0].data).toEqual({ apiKey: 'apikey_stored_key' })
+  })
+
+  test('an empty key is refused', async () => {
+    mockRequireUserAccess.mockResolvedValue(null)
+    mockFindFirst.mockResolvedValue(JEV_ROW)
+    const res = await PUT(put({ apiKey: '  ' }), params('victim', 'p1'))
+    expect(res.status).toBe(400)
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+})

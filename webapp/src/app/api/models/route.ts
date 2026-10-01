@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { internalKeyHeaders } from '@/lib/agentAuth'
 import prisma from '@/lib/prisma'
 import { requireEffectiveUser } from '@/lib/access'
-import { isChatProvider } from '@/lib/llmProviderPresets'
+import { isChatProvider } from '@/lib/llmProviderKinds'
 
 const AGENT_API_URL = process.env.AGENT_API_URL || 'http://localhost:8090'
 

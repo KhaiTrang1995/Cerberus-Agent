@@ -2,7 +2,7 @@ import type { ComponentType, SVGProps } from 'react'
 import { SiOpenai, SiAnthropic, SiGooglegemini } from 'react-icons/si'
 import { FaAws } from 'react-icons/fa6'
 import { LuSettings, LuSparkles } from 'react-icons/lu'
-import { SiDeepseek, SiOpenrouter, SiMoonshot, SiQwen, SiXai, SiMistral } from '@/components/icons/ProviderBrandIcons'
+import { SiDeepseek, SiOpenrouter, SiMoonshot, SiQwen, SiXai, SiMistral, SiTypeSafe } from '@/components/icons/ProviderBrandIcons'
 
 /**
  * Presets for OpenAI-Compatible LLM provider base URLs.
@@ -76,17 +76,9 @@ export const PROVIDER_TYPES = [
   { id: 'mistral', name: 'Mistral AI', description: 'Mistral models - open-weight and commercial.', Icon: SiMistral as ProviderIcon, apiKeyUrl: 'https://console.mistral.ai/api-keys/' },
   { id: 'bedrock', name: 'AWS Bedrock', description: 'AWS Bedrock foundation models', Icon: FaAws as ProviderIcon, apiKeyUrl: 'https://console.aws.amazon.com/iam/home#/security_credentials' },
   { id: 'openai_compatible', name: 'OpenAI-Compatible', description: 'Any OpenAI-compatible endpoint (Ollama, vLLM, Groq, etc.)', Icon: LuSettings as ProviderIcon, apiKeyUrl: '' },
+  { id: 'jev', name: 'TypeSafe AI (Jev)', description: 'Typed decision API used by recon AI hooks', Icon: SiTypeSafe as ProviderIcon, apiKeyUrl: 'https://console.typesafe.ai/keys' },
 ] as const
 
 export type ProviderType = typeof PROVIDER_TYPES[number]['id']
 
-/**
- * Provider types whose key is not for a chat model (TypeSafe Jev). Every place
- * that treats "any provider row" as a chat LLM must skip them, or the token is
- * forwarded to the agent's model discovery and counted as a configured LLM.
- * Twin of NON_CHAT_PROVIDER_TYPES in agentic/llm_builder.py.
- */
-export const NON_CHAT_PROVIDER_TYPES: ReadonlySet<string> = new Set(['jev'])
-
-export const isChatProvider = (p: { providerType: string }): boolean =>
-  !NON_CHAT_PROVIDER_TYPES.has(p.providerType)
+export { NON_CHAT_PROVIDER_TYPES, isChatProvider, JEV_MODEL, JEV_PROVIDER_NAME } from './llmProviderKinds'

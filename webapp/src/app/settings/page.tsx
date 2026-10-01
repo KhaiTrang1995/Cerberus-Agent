@@ -17,7 +17,7 @@ import McpTokensTab from '@/components/settings/mcp-tokens/McpTokensTab'
 import type { ProviderData } from '@/components/settings/LlmProviderForm'
 import { TradecraftResourceForm } from '@/components/settings/TradecraftResourceForm'
 import { TradecraftResourceList } from '@/components/settings/TradecraftResourceList'
-import { PROVIDER_TYPES } from '@/lib/llmProviderPresets'
+import { PROVIDER_TYPES, isChatProvider } from '@/lib/llmProviderPresets'
 import { Modal } from '@/components/ui/Modal/Modal'
 import { useAlertModal, useToast, WikiInfoButton, Toggle } from '@/components/ui'
 import { TrafficMindProjectMatrix } from '@/components/traffic/TrafficMindProjectMatrix'
@@ -31,6 +31,7 @@ import { ApiUsageReportModal } from '@/components/settings/api-usage/ApiUsageRep
 import { ApiUsageLlmChip } from '@/components/settings/api-usage/ApiUsageLlmChip'
 import { llmInventoryHint } from '@/lib/apiUsage/inventory'
 import { FeatureModelsSection } from '@/components/settings/FeatureModelsSection'
+import { JevProviderSection } from '@/components/settings/JevProviderSection'
 
 /** A Secret Multiscanner credential column (TRUFFLEHOG_KEY_FIELDS). */
 type TrufflehogField = `trufflehog${string}`
@@ -190,8 +191,11 @@ export default function SettingsPage() {
   // LLM Providers
   const [providers, setProviders] = useState<ProviderData[]>([])
   const [providersLoading, setProvidersLoading] = useState(true)
+  // A failed fetch must not read as "no providers" (or "no Jev token").
+  const [providersError, setProvidersError] = useState(false)
   const [showProviderForm, setShowProviderForm] = useState(false)
   const [editingProvider, setEditingProvider] = useState<ProviderData | null>(null)
+  const [jevFormOpen, setJevFormOpen] = useState(false)
 
   // User Settings
   const [settings, setSettings] = useState<UserSettings>(EMPTY_SETTINGS)
@@ -561,13 +565,29 @@ export default function SettingsPage() {
     if (!userId) return
     try {
       const resp = await fetch(`/api/users/${userId}/llm-providers`)
-      if (resp.ok) setProviders(await resp.json())
+      if (resp.ok) {
+        setProviders(await resp.json())
+        setProvidersError(false)
+      } else {
+        setProvidersError(true)
+      }
     } catch (err) {
       console.error('Failed to fetch providers:', err)
+      setProvidersError(true)
     } finally {
       setProvidersLoading(false)
     }
   }, [userId])
+
+  const retryProviders = useCallback(() => {
+    setProvidersLoading(true)
+    fetchProviders()
+  }, [fetchProviders])
+
+  // Jev is not a chat provider: it has its own section and never counts as an LLM.
+  const chatProviders = useMemo(() => providers.filter(isChatProvider), [providers])
+  const jevProvider = useMemo(() => providers.find(p => p.providerType === 'jev') ?? null, [providers])
+  const providerFormOpen = showProviderForm || !!editingProvider || jevFormOpen
 
   // Fetch user settings
   const fetchSettings = useCallback(async () => {
@@ -655,8 +675,11 @@ export default function SettingsPage() {
   }, [fetchProviders, fetchSettings, fetchSkills, fetchChatSkills])
 
   // Delete provider
-  const deleteProvider = useCallback(async (providerId: string) => {
-    if (!userId || !(await showConfirm('Delete this provider? Models from it will no longer be available.'))) return
+  const deleteProvider = useCallback(async (
+    providerId: string,
+    message = 'Delete this provider? Models from it will no longer be available.',
+  ) => {
+    if (!userId || !(await showConfirm(message))) return
     try {
       await fetch(`/api/users/${userId}/llm-providers/${providerId}`, { method: 'DELETE' })
       fetchProviders()
@@ -1124,7 +1147,7 @@ export default function SettingsPage() {
           </h2>
           <div className={styles.sectionHeaderActions}>
             <ApiUsageControls controller={apiUsage} buttonClassName={styles.sectionHeaderBtn} />
-            {!showProviderForm && !editingProvider && (
+            {!providerFormOpen && (
               <button className="primaryButton" onClick={() => setShowProviderForm(true)}>
                 <Plus size={14} /> Add Provider
               </button>
@@ -1155,14 +1178,19 @@ export default function SettingsPage() {
         )}
 
         {/* Provider list */}
-        {!showProviderForm && !editingProvider && (
+        {!providerFormOpen && (
           providersLoading ? (
             <div className={styles.emptyState}><Loader2 size={16} className={styles.spin} /> Loading...</div>
-          ) : providers.length === 0 ? (
+          ) : providersError ? (
+            <div className={styles.emptyState} role="alert">
+              Couldn&apos;t load your providers.{' '}
+              <button type="button" className="textButton" onClick={retryProviders}>Retry</button>
+            </div>
+          ) : chatProviders.length === 0 ? (
             <div className={styles.emptyState}>No providers configured. Add one to get started.</div>
           ) : (
             <div className={styles.providerList}>
-              {providers.map((p: ProviderData) => {
+              {chatProviders.map((p: ProviderData) => {
                 const Icon = getProviderIconComponent(p.providerType)
                 return (
                 <div key={p.id} className={styles.providerCard}>
@@ -1193,9 +1221,31 @@ export default function SettingsPage() {
         )}
 
         {!showProviderForm && !editingProvider && (
+          <JevProviderSection
+            userId={userId}
+            provider={jevProvider}
+            loading={providersLoading}
+            error={providersError}
+            onRetry={retryProviders}
+            formOpen={jevFormOpen}
+            onOpenForm={() => setJevFormOpen(true)}
+            onFormDone={saved => {
+              setJevFormOpen(false)
+              if (saved) fetchProviders()
+            }}
+            onDelete={id => deleteProvider(
+              id, 'Delete your Jev token? Recon hooks set to the Jev engine will use their static fallback.')}
+            onDirtyChange={setChildDirty}
+            usageChip={jevProvider?.id
+              ? <ApiUsageLlmChip report={apiUsage.meta?.report} providerId={jevProvider.id} hint={llmUsageHints[jevProvider.id]} />
+              : null}
+          />
+        )}
+
+        {!providerFormOpen && (
           <FeatureModelsSection
             userId={userId}
-            providersCount={providers.length}
+            providersCount={chatProviders.length}
             providersLoading={providersLoading}
           />
         )}

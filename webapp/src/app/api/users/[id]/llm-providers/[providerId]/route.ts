@@ -86,6 +86,18 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       return NextResponse.json({ error: 'Provider not found' }, { status: 404 })
     }
 
+    // The type of a Jev row is locked both ways: turning it into a chat type
+    // would send the stored token to any base URL, and turning a chat key into
+    // Jev would send that key to TypeSafe.
+    const bodyType = body.providerType as string | undefined
+    const touchesJev = existing.providerType === 'jev' || bodyType === 'jev'
+    if (touchesJev && bodyType !== undefined && bodyType !== existing.providerType) {
+      return NextResponse.json(
+        { error: 'The provider type of a TypeSafe AI (Jev) token cannot be changed' },
+        { status: 400 },
+      )
+    }
+
     // Preserve masked secrets
     const secretFields = ['apiKey', 'awsAccessKeyId', 'awsSecretKey', 'awsBearerToken'] as const
     const updateData: Record<string, unknown> = { ...body }
@@ -111,6 +123,17 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     if (effectiveType !== 'openai_compatible') {
       updateData.reasoningEnabled = false
       updateData.reasoningEffort = 'high'
+    }
+
+    // A Jev row keeps its pinned model, name and empty endpoint: the key is the
+    // only field an update can write.
+    if (existing.providerType === 'jev') {
+      const apiKey = typeof updateData.apiKey === 'string' ? updateData.apiKey.trim() : undefined
+      if (apiKey === '') {
+        return NextResponse.json({ error: 'apiKey is required for TypeSafe AI (Jev)' }, { status: 400 })
+      }
+      for (const field of Object.keys(updateData)) delete updateData[field]
+      if (apiKey !== undefined) updateData.apiKey = apiKey
     }
 
     const provider = await prisma.userLlmProvider.update({

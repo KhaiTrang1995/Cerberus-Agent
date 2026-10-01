@@ -34,6 +34,9 @@ const XAI_PATH = 'M0 1.5h4.2l5.5 8.5L16.5 1.5H22l-9.8 12L24 22.5h-4.7l-6-9-6.5 9
 /* Mistral AI - stylised M letterform with diagonal cut */
 const MISTRAL_PATH = 'M0 3h5.5l6.5 10.5L18.5 3H24v18h-4.5V9.8l-5.5 8.7H9.5L4 9.8V21H0Z'
 
+/* TypeSafe AI (Jev) - stylised T letterform over a base bar */
+const TYPESAFE_PATH = 'M2 2h20v4.5h-7.5V17h-5V6.5H2ZM4 19.5h16V22H4Z'
+
 export const SiDeepseek = (props: IconProps) => (
   <BrandSvg {...props} title={props.title ?? 'DeepSeek'} path={DEEPSEEK_PATH} />
 )
@@ -56,4 +59,8 @@ export const SiXai = (props: IconProps) => (
 
 export const SiMistral = (props: IconProps) => (
   <BrandSvg {...props} title={props.title ?? 'Mistral AI'} path={MISTRAL_PATH} />
+)
+
+export const SiTypeSafe = (props: IconProps) => (
+  <BrandSvg {...props} title={props.title ?? 'TypeSafe AI'} path={TYPESAFE_PATH} />
 )

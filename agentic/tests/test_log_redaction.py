@@ -34,6 +34,7 @@ def main():
         "bearer header": "Authorization: Bearer supersecrettoken123456",
         "inline url": "clone https://x-access-token:ghp_SECRETTOKEN12345678901234@github.com/o/r",
         "aws akid": "id AKIAIOSFODNN7EXAMPLE seen",
+        "typesafe jev": "key apikey_" + "0f" * 18 + "_" + "a1" * 32 + " used",
     }
     for name, text in cases.items():
         red = lc._redact_text(text)
@@ -43,6 +44,8 @@ def main():
     # specific: the exact PAT value must not survive.
     secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
     check("PAT value removed", secret not in lc._redact_text(f"boom {secret} boom"))
+    jev_key = "apikey_" + "0f" * 18 + "_" + "a1" * 32
+    check("TypeSafe key value removed", jev_key not in lc._redact_text(f"key={jev_key}, x"))
 
     # RedactingFilter applied through a real handler record.
     rec = logging.LogRecord("t", logging.INFO, __file__, 1,

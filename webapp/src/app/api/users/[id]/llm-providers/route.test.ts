@@ -16,6 +16,7 @@ import { NextRequest } from 'next/server'
 
 const mockFindMany = vi.fn()
 const mockCreate = vi.fn()
+const mockCount = vi.fn()
 const mockUserFindUnique = vi.fn()
 const mockGetSession = vi.fn()
 const mockIsInternal = vi.fn()
@@ -25,6 +26,7 @@ vi.mock('@/lib/prisma', () => ({
     userLlmProvider: {
       findMany: (...args: unknown[]) => mockFindMany(...args),
       create: (...args: unknown[]) => mockCreate(...args),
+      count: (...args: unknown[]) => mockCount(...args),
     },
     user: {
       findUnique: (...args: unknown[]) => mockUserFindUnique(...args),
@@ -59,6 +61,7 @@ const params = (id: string) => ({ params: Promise.resolve({ id }) })
 beforeEach(() => {
   mockFindMany.mockReset().mockResolvedValue([PROVIDER])
   mockCreate.mockReset().mockResolvedValue({ ...PROVIDER })
+  mockCount.mockReset().mockResolvedValue(0)
   mockUserFindUnique.mockReset().mockResolvedValue({ id: 'victim' })
   mockGetSession.mockReset()
   mockIsInternal.mockReset()
@@ -236,5 +239,47 @@ describe('POST /api/users/[id]/llm-providers — ghost user id (#173)', () => {
 
     expect(res.status).toBe(403)
     expect(mockUserFindUnique).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /api/users/[id]/llm-providers - TypeSafe Jev', () => {
+  const JEV_BODY = {
+    providerType: 'jev', name: 'whatever', apiKey: '  apikey_abc_def  ',
+    baseUrl: 'http://evil.example/v1', modelIdentifier: 'jev-latest',
+    defaultHeaders: { 'X-Leak': '1' },
+  }
+
+  test('a second Jev token is refused with 409 and nothing is written', async () => {
+    mockGetSession.mockResolvedValue({ userId: 'victim', role: 'user' })
+    mockCount.mockResolvedValue(1)
+    const res = await POST(postReq('victim', JEV_BODY), params('victim'))
+    expect(res.status).toBe(409)
+    expect(mockCount).toHaveBeenCalledWith({ where: { userId: 'victim', providerType: 'jev' } })
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  test('model, name, base URL and headers are forced; the key is trimmed', async () => {
+    mockGetSession.mockResolvedValue({ userId: 'victim', role: 'user' })
+    const res = await POST(postReq('victim', JEV_BODY), params('victim'))
+    expect(res.status).toBe(201)
+    const data = mockCreate.mock.calls[0][0].data
+    expect(data).toMatchObject({
+      userId: 'victim', providerType: 'jev', name: 'TypeSafe AI (Jev)', apiKey: 'apikey_abc_def',
+      baseUrl: '', modelIdentifier: 'jev-1.13.0', defaultHeaders: {},
+    })
+  })
+
+  test('a Jev row without a key is refused with 400', async () => {
+    mockGetSession.mockResolvedValue({ userId: 'victim', role: 'user' })
+    const res = await POST(postReq('victim', { ...JEV_BODY, apiKey: '   ' }), params('victim'))
+    expect(res.status).toBe(400)
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  test('chat providers are not counted or limited', async () => {
+    mockGetSession.mockResolvedValue({ userId: 'victim', role: 'user' })
+    const res = await POST(postReq('victim', NEW_PROVIDER), params('victim'))
+    expect(res.status).toBe(201)
+    expect(mockCount).not.toHaveBeenCalled()
   })
 })

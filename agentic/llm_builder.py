@@ -34,7 +34,7 @@ _BUILTIN_PROVIDERS = ("openai", "anthropic", "openrouter", "bedrock", "deepseek"
 #: Jev). Every path that builds a chat LLM from "a provider row" must skip
 #: them: `setup_llm`'s custom branch would build ChatOpenAI with no base URL
 #: and send the token to api.openai.com. Twin of the webapp's
-#: NON_CHAT_PROVIDER_TYPES in llmProviderPresets.ts.
+#: NON_CHAT_PROVIDER_TYPES in webapp/src/lib/llmProviderKinds.ts.
 NON_CHAT_PROVIDER_TYPES = frozenset({"jev"})
 
 #: The provider types that can serve a `custom/<id>` model.

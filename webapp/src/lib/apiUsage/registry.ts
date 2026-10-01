@@ -45,6 +45,7 @@ import { kimiProbe } from './providers/llm/moonshot'
 import { xaiProbe } from './providers/llm/xai'
 import { anthropicProbe, geminiProbe, glmProbe, mistralProbe, openaiProbe, qwenProbe } from './providers/llm/validity'
 import { openaiCompatibleProbe } from './providers/llm/openaiCompatible'
+import { jevProbe } from './providers/llm/jev'
 import { bedrockProbe } from './providers/llm/bedrock'
 
 export const PROBES: readonly ProbeDef[] = [
@@ -110,6 +111,7 @@ export const LLM_PROBES: Readonly<Record<string, ProbeDef>> = {
   mistral: mistralProbe,
   bedrock: bedrockProbe,
   openai_compatible: openaiCompatibleProbe,
+  jev: jevProbe,
 }
 
 /**

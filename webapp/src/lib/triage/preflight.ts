@@ -21,6 +21,7 @@ import { describeLiveGraphWriters } from '@/lib/graphWriters'
 import { readFeatureModel } from '@/lib/featureModels'
 import { agentTriage, type TriageChannel, type TriageTenant } from '@/lib/triage/actions'
 import { MAX_REVIEW_BUDGET } from '@/lib/triage/limits'
+import { isChatProvider } from '@/lib/llmProviderKinds'
 
 export { MAX_REVIEW_BUDGET }
 
@@ -119,7 +120,7 @@ export async function computePreflight(
 
   // "Does the configured model have a key" is a yes/no; the key itself never
   // leaves the server, and its absence is not an error.
-  const hasKey = Boolean(model) && providers.some((p) => Boolean(p.apiKey))
+  const hasKey = Boolean(model) && providers.filter(isChatProvider).some((p) => Boolean(p.apiKey))
 
   let blockedReason: string | null = null
   if (liveRun) {

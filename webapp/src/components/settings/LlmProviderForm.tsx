@@ -6,7 +6,7 @@ import { useToast } from '@/components/ui'
 import { useAgentHealth } from '@/hooks/useAgentHealth'
 import { useDirtyState } from '@/hooks/useDirtyState'
 import { useUnsavedChangesGuard } from '@/hooks/useUnsavedChangesGuard'
-import { PROVIDER_TYPES, OPENAI_COMPAT_PRESETS } from '@/lib/llmProviderPresets'
+import { PROVIDER_TYPES, OPENAI_COMPAT_PRESETS, NON_CHAT_PROVIDER_TYPES, JEV_MODEL, JEV_PROVIDER_NAME } from '@/lib/llmProviderPresets'
 import type { ProviderType } from '@/lib/llmProviderPresets'
 import { REASONING_EFFORTS } from '@/lib/llmReasoning'
 import type { ReasoningEffort } from '@/lib/llmReasoning'
@@ -20,6 +20,11 @@ interface LlmProviderFormProps {
   onCancel: () => void
   /** Reports unsaved-changes state to the parent (drives the tab-switch guard). */
   onDirtyChange?: (dirty: boolean) => void
+  /**
+   * Opens a new provider of this type with no type picker. Non-chat types
+   * (Jev) are only reachable this way: the generic picker never lists them.
+   */
+  lockedType?: 'jev'
 }
 
 export interface ProviderData {
@@ -63,11 +68,14 @@ const EMPTY_PROVIDER: ProviderData = {
   awsBearerToken: '',
 }
 
-export function LlmProviderForm({ userId, provider, existingProviderTypes = [], onSave, onCancel, onDirtyChange }: LlmProviderFormProps) {
+export function LlmProviderForm({ userId, provider, existingProviderTypes = [], onSave, onCancel, onDirtyChange, lockedType }: LlmProviderFormProps) {
   const isEditing = !!provider?.id
   const toast = useToast()
   const [form, setForm] = useState<ProviderData>(() => ({
     ...EMPTY_PROVIDER,
+    ...(lockedType === 'jev' && !provider
+      ? { providerType: 'jev', name: JEV_PROVIDER_NAME, modelIdentifier: JEV_MODEL }
+      : {}),
     ...(provider || {}),
     defaultHeaders: provider?.defaultHeaders || {},
     reasoningEnabled: provider?.reasoningEnabled ?? false,
@@ -138,6 +146,15 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
     })
   }, [])
 
+  // A Jev row carries only its key: the server pins the model and refuses any
+  // base URL or header, so none is sent.
+  const requestBody = useCallback(
+    () => form.providerType === 'jev'
+      ? { providerType: 'jev', name: JEV_PROVIDER_NAME, apiKey: form.apiKey, modelIdentifier: JEV_MODEL }
+      : form,
+    [form],
+  )
+
   const handleTest = useCallback(async () => {
     setTesting(true)
     setTestResult(null)
@@ -146,7 +163,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
       const resp = await fetch(`/api/users/${userId}/llm-providers/${providerId}/test`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: JSON.stringify(requestBody()),
       })
       const result = await resp.json()
       setTestResult({
@@ -159,7 +176,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
     } finally {
       setTesting(false)
     }
-  }, [userId, provider?.id, form])
+  }, [userId, provider?.id, requestBody])
 
   const handleSave = useCallback(async () => {
     setSaving(true)
@@ -172,7 +189,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
       const resp = await fetch(url, {
         method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(form),
+        body: JSON.stringify(requestBody()),
       })
 
       if (!resp.ok) {
@@ -192,7 +209,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
     } finally {
       setSaving(false)
     }
-  }, [isEditing, userId, provider, form, onSave, setBaseline])
+  }, [isEditing, userId, provider, form, requestBody, onSave, setBaseline])
 
   // Step 1: Choose provider type
   if (step === 'type') {
@@ -200,7 +217,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
       <div className={styles.formSection}>
         <h3 className={styles.formTitle}>Choose Provider Type</h3>
         <div className={styles.providerTypeGrid}>
-          {PROVIDER_TYPES.map(pt => {
+          {PROVIDER_TYPES.filter(pt => !NON_CHAT_PROVIDER_TYPES.has(pt.id)).map(pt => {
             const alreadyAdded = pt.id !== 'openai_compatible' && existingProviderTypes.includes(pt.id)
             return (
               <button
@@ -235,6 +252,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
   const isKeyBased = ['openai', 'anthropic', 'openrouter', 'deepseek', 'gemini', 'glm', 'kimi', 'qwen', 'xai', 'mistral'].includes(ptype)
   const isBedrock = ptype === 'bedrock'
   const isCompat = ptype === 'openai_compatible'
+  const isJev = ptype === 'jev'
   const apiKeyUrl = providerDef?.apiKeyUrl
   const apiKeyLinkLabel = isBedrock ? 'Get AWS credentials' : 'Get API key'
   return (
@@ -243,7 +261,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
         <h3 className={styles.formTitle}>
           {isEditing ? 'Edit' : 'Add'} {providerDef?.name || ptype} Provider
         </h3>
-        {!isEditing && (
+        {!isEditing && !lockedType && (
           <button className="textButton" onClick={() => setStep('type')}>Change type</button>
         )}
       </div>
@@ -258,19 +276,21 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
         </a>
       )}
 
-      {/* Name */}
-      <div className="formGroup">
-        <label className="formLabel formLabelRequired">Display Name</label>
-        <input
-          className="textInput"
-          value={form.name}
-          onChange={e => updateForm('name', e.target.value)}
-          placeholder="e.g., My OpenAI Key"
-        />
-      </div>
+      {/* Name (a Jev row is always named after the provider: one per user) */}
+      {!isJev && (
+        <div className="formGroup">
+          <label className="formLabel formLabelRequired">Display Name</label>
+          <input
+            className="textInput"
+            value={form.name}
+            onChange={e => updateForm('name', e.target.value)}
+            placeholder="e.g., My OpenAI Key"
+          />
+        </div>
+      )}
 
       {/* Key-based providers: just API key */}
-      {isKeyBased && (
+      {(isKeyBased || isJev) && (
         <div className="formGroup">
           <label className="formLabel formLabelRequired">API Key</label>
           <div className={styles.secretInputWrapper}>
@@ -279,7 +299,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
               type={showApiKey ? 'text' : 'password'}
               value={form.apiKey}
               onChange={e => updateForm('apiKey', e.target.value)}
-              placeholder="sk-..."
+              placeholder={isJev ? 'apikey_...' : 'sk-...'}
             />
             <button
               className={styles.secretToggle}
@@ -289,6 +309,16 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
               {showApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
             </button>
           </div>
+        </div>
+      )}
+
+      {isJev && (
+        <div className="formGroup">
+          <label className="formLabel">Model</label>
+          <div className={styles.readonlyValue} data-testid="jev-model">{JEV_MODEL}</div>
+          <span className="formHint">
+            Pinned: the recon AI hooks are calibrated against this version.
+          </span>
         </div>
       )}
 

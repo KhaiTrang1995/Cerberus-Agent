@@ -3,6 +3,7 @@ import prisma from '@/lib/prisma'
 import { getSession, isInternalRequest } from '@/lib/session'
 import { isReasoningEffort } from '@/lib/llmReasoning'
 import { requireUserExists, isForeignKeyViolation } from '@/lib/userScopedWrite'
+import { JEV_MODEL, JEV_PROVIDER_NAME } from '@/lib/llmProviderKinds'
 
 interface RouteParams {
   params: Promise<{ id: string }>
@@ -103,6 +104,22 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       )
     }
 
+    // A Jev token is one per user and pinned: its model, URL and headers are
+    // never the caller's to choose, so the key can only ever go to TypeSafe.
+    const isJev = providerType === 'jev'
+    if (isJev) {
+      if (typeof body.apiKey !== 'string' || !body.apiKey.trim()) {
+        return NextResponse.json({ error: 'apiKey is required for TypeSafe AI (Jev)' }, { status: 400 })
+      }
+      const existingJev = await prisma.userLlmProvider.count({ where: { userId: id, providerType: 'jev' } })
+      if (existingJev > 0) {
+        return NextResponse.json(
+          { error: 'A TypeSafe AI (Jev) token is already saved. Edit it instead of adding another.' },
+          { status: 409 },
+        )
+      }
+    }
+
     // For openai_compatible, baseUrl and modelIdentifier are required
     if (providerType === 'openai_compatible') {
       if (!body.baseUrl || !body.modelIdentifier) {
@@ -129,11 +146,11 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       data: {
         userId: id,
         providerType,
-        name,
-        apiKey: body.apiKey || '',
-        baseUrl: body.baseUrl || '',
-        modelIdentifier: body.modelIdentifier || '',
-        defaultHeaders: body.defaultHeaders || {},
+        name: isJev ? JEV_PROVIDER_NAME : name,
+        apiKey: isJev ? body.apiKey.trim() : body.apiKey || '',
+        baseUrl: isJev ? '' : body.baseUrl || '',
+        modelIdentifier: isJev ? JEV_MODEL : body.modelIdentifier || '',
+        defaultHeaders: isJev ? {} : body.defaultHeaders || {},
         timeout: body.timeout ?? 120,
         temperature: body.temperature ?? 0,
         maxTokens: body.maxTokens ?? 16384,

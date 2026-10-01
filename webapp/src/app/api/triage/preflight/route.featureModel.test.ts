@@ -10,6 +10,7 @@ import { NextRequest } from 'next/server'
 
 const mockProject = vi.fn()
 const mockSettings = vi.fn()
+const mockProviders = vi.fn()
 
 vi.mock('@/lib/triageClient', () => ({
   requireProjectOwner: async (projectId: string) => ({ userId: 'alice', projectId }),
@@ -23,7 +24,7 @@ vi.mock('@/lib/prisma', () => ({
     userSettings: { findUnique: (...a: unknown[]) => mockSettings(...a) },
     triageRun: { findFirst: async () => null },
     remediation: { groupBy: async () => [] },
-    userLlmProvider: { findMany: async () => [{ providerType: 'openai', apiKey: 'sk' }] },
+    userLlmProvider: { findMany: (...a: unknown[]) => mockProviders(...a) },
   },
 }))
 vi.mock('@/lib/triageRun', () => ({
@@ -45,6 +46,7 @@ function project(budget: number) {
 beforeEach(() => {
   vi.clearAllMocks()
   mockSettings.mockResolvedValue({ featureModels: { triage: 'gpt-5-mini' } })
+  mockProviders.mockResolvedValue([{ providerType: 'openai', apiKey: 'sk' }])
 })
 
 describe('preflight and the Triage review model', () => {
@@ -85,5 +87,24 @@ describe('preflight and the Triage review model', () => {
     const body = await res.json()
     expect(body.model).toBe('')
     expect(body.estimatedAiCalls).toBe(0)
+  })
+})
+
+describe('preflight and a TypeSafe Jev token', () => {
+  test('a Jev key alone is not a model key: no AI calls are estimated', async () => {
+    project(25)
+    mockProviders.mockResolvedValue([{ providerType: 'jev', apiKey: 'apikey_x_y' }])
+    const body = await (await get()).json()
+    expect(body.hasModelKey).toBe(false)
+    expect(body.estimatedAiCalls).toBe(0)
+  })
+
+  test('a chat key next to the Jev key still counts', async () => {
+    project(25)
+    mockProviders.mockResolvedValue([
+      { providerType: 'jev', apiKey: 'apikey_x_y' }, { providerType: 'openai', apiKey: 'sk' },
+    ])
+    const body = await (await get()).json()
+    expect(body.hasModelKey).toBe(true)
   })
 })

@@ -241,3 +241,38 @@ describe('regression: 180s route cap overrides the provider\'s own timeout', () 
     expect(budget).toBeGreaterThanOrEqual(30_000)
   })
 })
+
+describe('POST llm-providers/[providerId]/test - TypeSafe Jev lock', () => {
+  const JEV_ROW = {
+    id: 'jev1', userId: 'u1', providerType: 'jev', apiKey: 'apikey_stored_key',
+    baseUrl: '', modelIdentifier: 'jev-1.13.0', defaultHeaders: {},
+  }
+  const sentToAgent = () => JSON.parse(fetchMock.mock.calls[0][1].body as string)
+
+  test('a stored Jev row cannot be redirected by the body', async () => {
+    mockFindFirst.mockResolvedValue(JEV_ROW)
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ success: true }), { status: 200 }))
+    await POST(post({
+      providerType: 'openai_compatible', baseUrl: 'http://evil.example/v1',
+      defaultHeaders: { 'X-Leak': '1' }, modelIdentifier: 'gpt-4o', apiKey: '••••••••_key',
+    }), params('u1', 'jev1'))
+    expect(sentToAgent()).toMatchObject({
+      providerType: 'jev', baseUrl: '', defaultHeaders: {}, modelIdentifier: 'jev-1.13.0',
+      apiKey: 'apikey_stored_key',
+    })
+  })
+
+  test('a freshly typed Jev key is the one tested', async () => {
+    mockFindFirst.mockResolvedValue(JEV_ROW)
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ success: true }), { status: 200 }))
+    await POST(post({ apiKey: 'apikey_new_key' }), params('u1', 'jev1'))
+    expect(sentToAgent().apiKey).toBe('apikey_new_key')
+  })
+
+  test('a stored chat key can never be tested as Jev', async () => {
+    mockFindFirst.mockResolvedValue({ ...JEV_ROW, providerType: 'openai', apiKey: 'sk-stored' })
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ success: true }), { status: 200 }))
+    await POST(post({ providerType: 'jev', apiKey: '••••••••ored' }), params('u1', 'jev1'))
+    expect(sentToAgent().providerType).toBe('openai')
+  })
+})

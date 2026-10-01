@@ -292,6 +292,13 @@
   position: relative;
 }
 
+.readonlyValue {
+  padding: var(--space-2) 0;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
 .secretInputWrapper input {
   padding-right: var(--space-8);
 }

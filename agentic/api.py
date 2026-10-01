@@ -1912,6 +1912,12 @@ class LlmProviderTestRequest(BaseModel):
     awsBearerToken: str = ""
 
 
+_JEV_TEST_ERRORS = {
+    "jev_auth": "TypeSafe rejected the key",
+    "jev_no_credit": "No TypeSafe credit",
+}
+
+
 @app.post("/llm-provider/test", tags=["System"], dependencies=[Depends(require_internal_auth)])
 async def test_llm_provider(body: LlmProviderTestRequest):
     """Test an LLM provider config by sending a simple message."""
@@ -2048,6 +2054,23 @@ async def test_llm_provider(body: LlmProviderTestRequest):
                 "custom/provider-test",
                 custom_llm_config=body.model_dump(),
             )
+        elif ptype == "jev":
+            # Not a chat provider: listing models proves the key without
+            # spending credit, and the key only ever goes to api.typesafe.ai.
+            import jev_client
+            try:
+                await jev_client.list_models(body.apiKey)
+            except jev_client.JevError as e:
+                return JSONResponse(
+                    content={"success": False,
+                             "error": _JEV_TEST_ERRORS.get(e.error_type, e.message)},
+                    status_code=400,
+                )
+            return {
+                "success": True,
+                "model": jev_client.JEV_MODEL,
+                "response_text": f"TypeSafe accepted the key (model {jev_client.JEV_MODEL}).",
+            }
         else:
             return JSONResponse(
                 content={"success": False, "error": f"Unknown provider type: {ptype}"},

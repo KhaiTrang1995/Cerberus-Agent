@@ -261,3 +261,90 @@ describe('LlmProviderForm agent preflight', () => {
     expect(screen.getByRole('button', { name: 'Test Connection' })).toBeEnabled()
   })
 })
+
+// TypeSafe Jev: a non-chat provider, reachable only from its own section.
+describe('LlmProviderForm Jev branch', () => {
+  beforeEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+    toastSuccess.mockReset()
+    toastError.mockReset()
+  })
+  afterEach(cleanup)
+
+  const JEV_ROW: ProviderData = {
+    ...PROVIDER,
+    id: 'jev-row',
+    providerType: 'jev',
+    name: 'TypeSafe AI (Jev)',
+    apiKey: '••••••••abcd',
+    baseUrl: '',
+    modelIdentifier: 'jev-1.13.0',
+  }
+
+  test('the generic type picker never lists Jev', () => {
+    mockFetch({})
+    render(<LlmProviderForm userId="user-1" onSave={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.getByText('Choose Provider Type')).toBeInTheDocument()
+    expect(screen.queryByText(/TypeSafe/)).not.toBeInTheDocument()
+    expect(screen.getByText('OpenAI')).toBeInTheDocument()
+  })
+
+  test('locked to Jev: key and pinned model only, no picker and no chat fields', () => {
+    mockFetch({})
+    render(<LlmProviderForm userId="user-1" lockedType="jev" onSave={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.queryByText('Choose Provider Type')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Change type' })).not.toBeInTheDocument()
+    expect(screen.getByPlaceholderText('apikey_...')).toBeInTheDocument()
+    expect(screen.getByTestId('jev-model')).toHaveTextContent('jev-1.13.0')
+    expect(screen.queryByText('Display Name')).not.toBeInTheDocument()
+    expect(screen.queryByText(/Base URL/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Temperature/)).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Get API key/ })).toHaveAttribute(
+      'href', 'https://console.typesafe.ai/keys')
+  })
+
+  test('Save stays disabled until a key is typed, then POSTs only the key and the pinned model', async () => {
+    const fetchMock = mockFetch({})
+    const onSave = vi.fn()
+    render(<LlmProviderForm userId="user-1" lockedType="jev" onSave={onSave} onCancel={vi.fn()} />)
+
+    const save = screen.getByRole('button', { name: 'Save Provider' })
+    expect(save).toBeDisabled()
+    fireEvent.change(screen.getByPlaceholderText('apikey_...'), { target: { value: 'apikey_abc_def' } })
+    expect(save).toBeEnabled()
+    fireEvent.click(save)
+
+    await waitFor(() => expect(providerCalls(fetchMock)).toHaveLength(1))
+    const [url, init] = providerCalls(fetchMock)[0] as [string, RequestInit]
+    expect(url).toBe('/api/users/user-1/llm-providers')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({
+      providerType: 'jev', name: 'TypeSafe AI (Jev)', apiKey: 'apikey_abc_def', modelIdentifier: 'jev-1.13.0',
+    })
+    await waitFor(() => expect(onSave).toHaveBeenCalled())
+  })
+
+  test('editing a saved Jev row sends no base URL or headers, and Test does the same', async () => {
+    const fetchMock = mockFetch({ provider: { ok: true, status: 200, json: async () => ({ success: true }) } })
+    render(<LlmProviderForm userId="user-1" provider={JEV_ROW} onSave={vi.fn()} onCancel={vi.fn()} />)
+
+    fireEvent.change(screen.getByPlaceholderText('apikey_...'), { target: { value: 'apikey_new_key' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Test Connection' }))
+    await waitFor(() => expect(providerCalls(fetchMock)).toHaveLength(1))
+    fireEvent.click(screen.getByRole('button', { name: 'Update Provider' }))
+    await waitFor(() => expect(providerCalls(fetchMock)).toHaveLength(2))
+
+    const [testUrl, testInit] = providerCalls(fetchMock)[0] as [string, RequestInit]
+    const [saveUrl, saveInit] = providerCalls(fetchMock)[1] as [string, RequestInit]
+    expect(testUrl).toBe('/api/users/user-1/llm-providers/jev-row/test')
+    expect(saveUrl).toBe('/api/users/user-1/llm-providers/jev-row')
+    expect(saveInit.method).toBe('PUT')
+    for (const init of [testInit, saveInit]) {
+      const body = JSON.parse(init.body as string)
+      expect(body).toEqual({
+        providerType: 'jev', name: 'TypeSafe AI (Jev)', apiKey: 'apikey_new_key', modelIdentifier: 'jev-1.13.0',
+      })
+    }
+  })
+})

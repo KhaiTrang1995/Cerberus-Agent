@@ -6,6 +6,8 @@
  * free - they take plain data and return plain data/booleans.
  */
 
+import { isChatProvider } from '@/lib/llmProviderKinds'
+
 /** Shape of the bits of the user record the gate cares about. */
 export interface UserModelDefaults {
   defaultAgentModel?: string | null
@@ -44,12 +46,15 @@ export function needsModelGate(
 
 /**
  * Whether the hard provider gate must block creation: true when the user has no
- * LLM provider configured. A non-array (e.g. an error payload) is treated as
- * "no providers" only when explicitly empty/absent - callers pass the parsed
- * list; anything that isn't a non-empty array counts as missing.
+ * chat LLM provider configured. Callers pass the parsed list; anything that
+ * isn't an array counts as missing. A non-chat row (a TypeSafe Jev token) does
+ * not count: no agent or pipeline model can run on it.
  */
 export function hasNoConfiguredProvider(providers: unknown): boolean {
-  return !Array.isArray(providers) || providers.length === 0
+  if (!Array.isArray(providers)) return true
+  return !providers.some(p =>
+    typeof p === 'object' && p !== null
+    && isChatProvider({ providerType: String((p as { providerType?: unknown }).providerType ?? '') }))
 }
 
 /**

@@ -136,6 +136,16 @@ describe('hasNoConfiguredProvider', () => {
     expect(hasNoConfiguredProvider(null)).toBe(true)
     expect(hasNoConfiguredProvider(undefined)).toBe(true)
   })
+
+  test('a Jev token alone is not a chat provider: the gate stays closed', () => {
+    expect(hasNoConfiguredProvider([{ id: 'j1', providerType: 'jev' }])).toBe(true)
+  })
+
+  test('a Jev token next to a chat provider passes', () => {
+    expect(hasNoConfiguredProvider([
+      { id: 'j1', providerType: 'jev' }, { id: 'p1', providerType: 'anthropic' },
+    ])).toBe(false)
+  })
 })
 
 // ---------------------------------------------------------------------------

@@ -62,12 +62,19 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       }
       const isMasked = (v: unknown) => typeof v === 'string' && v.startsWith('••••')
       const SECRET_FIELDS = new Set(['apiKey', 'awsAccessKeyId', 'awsSecretKey', 'awsBearerToken'])
+      // The stored type decides where the stored key may go. For a Jev row the
+      // body can never redirect the token; for any other row it can never turn
+      // the key into a Jev test.
+      const LOCKED_FOR_JEV = new Set(['providerType', 'baseUrl', 'defaultHeaders', 'modelIdentifier'])
+      const storedIsJev = provider.providerType === 'jev'
       config = { ...(provider as unknown as Record<string, unknown>) }
       for (const [key, value] of Object.entries(body)) {
         if (SECRET_FIELDS.has(key) && isMasked(value)) {
           // Keep DB value - user did not retype the secret
           continue
         }
+        if (storedIsJev && LOCKED_FOR_JEV.has(key)) continue
+        if (!storedIsJev && key === 'providerType' && value === 'jev') continue
         config[key] = value
       }
     }
