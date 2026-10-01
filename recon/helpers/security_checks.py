@@ -9,12 +9,16 @@ Security Check Categories:
 2. TLS/SSL Security Checks - Certificate validation, cipher strength, HSTS
 """
 
+import ipaddress
+import json
+import re
 import socket
 import ssl
 import requests
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Any, Set
-from urllib.parse import quote
+from email.utils import parsedate_to_datetime
+from typing import Dict, List, Optional, Any, Set, Tuple
+from urllib.parse import quote, urlparse
 import concurrent.futures
 
 from recon.helpers.cdn_ranges import (
@@ -94,6 +98,21 @@ def _hh_request(method, url, *args, **kwargs):
     return resp
 
 
+def _url_host(host: str) -> str:
+    """`host` as a URL authority needs it: an IPv6 literal in brackets (RFC 3986).
+
+    requests raises InvalidURL for an unbracketed IPv6 address, and every check
+    swallows RequestException, so without brackets an IPv6 target is silently
+    never tested. IPv4 addresses and hostnames come back unchanged.
+    """
+    try:
+        if ipaddress.ip_address(host).version == 6:
+            return f"[{host}]"
+    except ValueError:
+        pass
+    return host
+
+
 def _host_down(host: str) -> bool:
     """True when both :443 and :80 of `host` are known unreachable this run.
 
@@ -104,10 +123,11 @@ def _host_down(host: str) -> bool:
     """
     try:
         from recon.helpers import circuit_breaker as cb
-        down = (cb.host_health.is_down(f"https://{host}")
-                and cb.host_health.is_down(f"http://{host}"))
+        authority = _url_host(host)
+        down = (cb.host_health.is_down(f"https://{authority}")
+                and cb.host_health.is_down(f"http://{authority}"))
         if down and _HH_SCOPE is not None:
-            _HH_SCOPE.note_host_skipped(cb.host_key(f"https://{host}"))
+            _HH_SCOPE.note_host_skipped(cb.host_key(f"https://{authority}"))
         return down
     except Exception:  # noqa: BLE001 - a fault here scans as today
         return False
@@ -161,7 +181,7 @@ def _analyze_redirect_chain(ip: str, scheme: str, timeout: int = 10) -> Dict:
         - redirects_to_hostname: bool - whether final destination is a hostname (not IP)
         - redirect_count: int - number of redirects
     """
-    url = f"{scheme}://{ip}"
+    url = f"{scheme}://{_url_host(ip)}"
     result = {
         "redirects": False,
         "final_url": url,
@@ -198,10 +218,8 @@ def _analyze_redirect_chain(ip: str, scheme: str, timeout: int = 10) -> Dict:
                 result["final_url"] = final_response.url
                 result["redirect_count"] = len(final_response.history)
                 
-                # Extract host from final URL
-                from urllib.parse import urlparse
-                parsed = urlparse(final_response.url)
-                final_host = parsed.netloc.split(':')[0]  # Remove port if present
+                # .hostname, not netloc.split(':'): an IPv6 netloc is "[2001:db8::1]:8080".
+                final_host = urlparse(final_response.url).hostname or ""
                 result["final_host"] = final_host
                 
                 # Check if final destination is a hostname (not an IP)
@@ -335,7 +353,7 @@ def _is_bare_origin_match(ip: str, hostnames: List[str], scheme: str, timeout: i
     """
     try:
         ip_resp = _hh_get(
-            f"{scheme}://{ip}",
+            f"{scheme}://{_url_host(ip)}",
             timeout=timeout,
             allow_redirects=False,
             verify=False,
@@ -400,7 +418,7 @@ def check_direct_ip_http(ip: str, hostnames: Optional[List[str]] = None, timeout
         Vulnerability dict if HTTP is accessible, None otherwise
     """
     try:
-        url = f"http://{ip}"
+        url = f"http://{_url_host(ip)}"
         response = _hh_get(
             url,
             timeout=timeout,
@@ -494,7 +512,7 @@ def check_direct_ip_https(ip: str, hostnames: Optional[List[str]] = None, timeou
         Vulnerability dict if HTTPS is accessible, None otherwise
     """
     try:
-        url = f"https://{ip}"
+        url = f"https://{_url_host(ip)}"
         response = _hh_get(
             url,
             timeout=timeout,
@@ -592,7 +610,7 @@ def check_ip_api_exposed(ip: str, timeout: int = 10) -> Optional[Dict]:
 
     for path in api_paths:
         try:
-            url = f"http://{ip}{path}"
+            url = f"http://{_url_host(ip)}{path}"
             response = _hh_get(
                 url,
                 timeout=timeout,
@@ -610,8 +628,7 @@ def check_ip_api_exposed(ip: str, timeout: int = 10) -> Optional[Dict]:
             if response_is_cdn_edge(response):
                 continue
 
-            # 200 OK with JSON or 401/403 (auth required) indicates API presence
-            if response.status_code in [200, 401, 403] and (is_json or response.status_code in [401, 403]):
+            if response.status_code == 200 and is_json:
                 return {
                     "type": "ip_api_exposed",
                     "severity": "high",
@@ -625,10 +642,51 @@ def check_ip_api_exposed(ip: str, timeout: int = 10) -> Optional[Dict]:
                     "content_type": content_type,
                     "evidence": f"API endpoint returned {response.status_code} with {content_type}",
                 }
+
+            # Every web server answers 401/403 somewhere (a default nginx page,
+            # a WAF block), so only an API's own refusal says an API lives here.
+            if response.status_code in (401, 403) and _is_api_response(response, content_type):
+                return {
+                    "type": "ip_api_exposed",
+                    "severity": "medium",
+                    "name": "Authenticated API Endpoint Exposed on IP",
+                    "description": f"API endpoint {path} answers on direct IP {ip} over plain HTTP and "
+                                  f"requires authentication (HTTP {response.status_code}). The API is "
+                                  "reachable around any edge WAF/CDN, and credentials sent to it "
+                                  "travel unencrypted.",
+                    "url": url,
+                    "matched_ip": ip,
+                    "path": path,
+                    "status_code": response.status_code,
+                    "content_type": content_type,
+                    "evidence": f"API endpoint returned {response.status_code} with "
+                                f"{content_type or 'an API error body'}",
+                }
         except requests.exceptions.RequestException:
             continue
 
     return None
+
+
+def _is_api_response(response, content_type: str) -> bool:
+    """True when a response reads as an API's: JSON (any +json type or a JSON
+    body) or a Bearer token challenge. An HTML or plain-text error page is not."""
+    if "json" in (content_type or "").lower():
+        return True
+    headers = {str(k).lower(): str(v) for k, v in (response.headers or {}).items()}
+    if headers.get("www-authenticate", "").strip().lower().startswith("bearer"):
+        return True
+    try:
+        body = (response.text or "").strip()
+    except Exception:  # noqa: BLE001 - an undecodable body is not JSON
+        return False
+    if not body or body[0] not in "{[":
+        return False
+    try:
+        json.loads(body)
+    except ValueError:
+        return False
+    return True
 
 
 # Canonical WAF-signature probes for the blocked-vs-allowed differential (class 13).
@@ -658,12 +716,13 @@ def _waf_payload_differential(subdomain: str, ip: str, timeout: int = 10) -> Opt
     -- stronger than comparing Server-header tokens. Returns a finding dict or None.
     """
     ua = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
+    origin_base = f"https://{_url_host(ip)}/"
     for kind, payload in _WAF_PROBES:
         q = f"?{_WAF_PROBE_PARAM}={quote(payload)}"
         try:
             edge = _hh_get(f"https://{subdomain}/{q}", timeout=timeout, verify=False,
                                 allow_redirects=False, headers=ua)
-            origin = _hh_get(f"https://{ip}/{q}", timeout=timeout, verify=False,
+            origin = _hh_get(f"{origin_base}{q}", timeout=timeout, verify=False,
                                   allow_redirects=False, headers={**ua, "Host": subdomain})
         except requests.exceptions.RequestException:
             continue
@@ -680,7 +739,7 @@ def _waf_payload_differential(subdomain: str, ip: str, timeout: int = 10) -> Opt
                     f"(HTTP {origin.status_code}) addressed directly with the real Host "
                     "header. The WAF can be bypassed by reaching the origin directly."
                 ),
-                "url": f"https://{ip}/",
+                "url": origin_base,
                 "matched_ip": ip,
                 "subdomain": subdomain,
                 "evidence": (f"probe_class={kind}; edge_status={edge.status_code}; "
@@ -704,7 +763,7 @@ def check_cache_purge_exposed(ip: str, hostnames: Optional[List[str]] = None,
     if hostnames:
         headers["Host"] = hostnames[0]
     for scheme in ("http", "https"):
-        base = f"{scheme}://{ip}/"
+        base = f"{scheme}://{_url_host(ip)}/"
         try:
             control = _hh_request("RDMNNOOP", base, timeout=timeout, verify=False,
                                        allow_redirects=False, headers=headers)
@@ -773,7 +832,7 @@ def check_waf_bypass(
         )
 
         # Try accessing via direct IP with Host header
-        ip_url = f"https://{ip}"
+        ip_url = f"https://{_url_host(ip)}"
         ip_response = _hh_get(
             ip_url,
             timeout=timeout,
@@ -1680,57 +1739,114 @@ def check_session_cookies(hostname: str, timeout: int = 10) -> List[Dict]:
             headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0"}
         )
 
-        # Check Set-Cookie headers
-        set_cookies = response.headers.get_all('Set-Cookie') if hasattr(response.headers, 'get_all') else []
-        if not set_cookies:
-            # Try alternative method
-            set_cookies = [v for k, v in response.headers.items() if k.lower() == 'set-cookie']
+        session_indicators = ['session', 'sess', 'sid', 'token', 'auth', 'jwt', 'phpsessid', 'jsessionid', 'asp.net_sessionid']
 
-        # Also check response.cookies
-        for cookie in response.cookies:
-            cookie_str = f"{cookie.name}={cookie.value}"
+        for name, secure, httponly in _cookies_set_by(response):
+            if not any(ind in name.lower() for ind in session_indicators):
+                continue
 
-            # Session-like cookie names
-            session_indicators = ['session', 'sess', 'sid', 'token', 'auth', 'jwt', 'phpsessid', 'jsessionid', 'asp.net_sessionid']
-            is_session_cookie = any(ind in cookie.name.lower() for ind in session_indicators)
+            if not secure:
+                findings.append({
+                    "type": "session_no_secure",
+                    "severity": "medium",
+                    "name": "Session Cookie Missing Secure Flag",
+                    "description": f"The session cookie '{name}' does not have the Secure flag. "
+                                  "It can be transmitted over unencrypted HTTP connections.",
+                    "url": url,
+                    "hostname": hostname,
+                    "cookie_name": name,
+                    "evidence": f"Cookie '{name}' missing Secure attribute",
+                    "recommendation": "Add the Secure flag to all session cookies.",
+                })
 
-            if is_session_cookie:
-                # Check Secure flag
-                if not cookie.secure:
-                    findings.append({
-                        "type": "session_no_secure",
-                        "severity": "medium",
-                        "name": "Session Cookie Missing Secure Flag",
-                        "description": f"The session cookie '{cookie.name}' does not have the Secure flag. "
-                                      "It can be transmitted over unencrypted HTTP connections.",
-                        "url": url,
-                        "hostname": hostname,
-                        "cookie_name": cookie.name,
-                        "evidence": f"Cookie '{cookie.name}' missing Secure attribute",
-                        "recommendation": "Add the Secure flag to all session cookies.",
-                    })
-
-                # Check HttpOnly flag
-                # Note: requests library doesn't expose HttpOnly directly, check raw header
-                raw_cookie = response.headers.get('Set-Cookie', '')
-                if cookie.name in raw_cookie and 'httponly' not in raw_cookie.lower():
-                    findings.append({
-                        "type": "session_no_httponly",
-                        "severity": "medium",
-                        "name": "Session Cookie Missing HttpOnly Flag",
-                        "description": f"The session cookie '{cookie.name}' does not have the HttpOnly flag. "
-                                      "It can be accessed by JavaScript, enabling XSS-based session theft.",
-                        "url": url,
-                        "hostname": hostname,
-                        "cookie_name": cookie.name,
-                        "evidence": f"Cookie '{cookie.name}' missing HttpOnly attribute",
-                        "recommendation": "Add the HttpOnly flag to all session cookies.",
-                    })
+            if not httponly:
+                findings.append({
+                    "type": "session_no_httponly",
+                    "severity": "medium",
+                    "name": "Session Cookie Missing HttpOnly Flag",
+                    "description": f"The session cookie '{name}' does not have the HttpOnly flag. "
+                                  "It can be accessed by JavaScript, enabling XSS-based session theft.",
+                    "url": url,
+                    "hostname": hostname,
+                    "cookie_name": name,
+                    "evidence": f"Cookie '{name}' missing HttpOnly attribute",
+                    "recommendation": "Add the HttpOnly flag to all session cookies.",
+                })
 
     except requests.exceptions.RequestException:
         pass
 
     return findings
+
+
+def _set_cookie_lines(response) -> List[str]:
+    """Each Set-Cookie header of one response, unmerged.
+
+    requests folds repeated Set-Cookie headers into one comma-joined value, so
+    a flag on one cookie looks like a flag on all of them. urllib3 still holds
+    them apart; the comma split is only a fallback, and stops before a comma
+    inside an Expires date ("Wed, 21 Oct 2015").
+    """
+    raw_headers = getattr(getattr(response, "raw", None), "headers", None)
+    getlist = getattr(raw_headers, "getlist", None)
+    if callable(getlist):
+        try:
+            lines = getlist("Set-Cookie")
+        except Exception:  # noqa: BLE001 - fall back to the merged header
+            lines = None
+        if isinstance(lines, list) and all(isinstance(v, str) for v in lines):
+            return lines
+    merged = (response.headers or {}).get("Set-Cookie") or ""
+    if not isinstance(merged, str) or not merged:
+        return []
+    return [part for part in re.split(r",\s*(?=[^;,=\s]+=)", merged) if part.strip()]
+
+
+def _cookie_is_cleared(attrs: Dict[str, str]) -> bool:
+    """A Set-Cookie that deletes the cookie (Max-Age <= 0 or an Expires in the
+    past) leaves the browser nothing to steal; the cookie jar drops it too."""
+    max_age = attrs.get("max-age")
+    if max_age is not None:
+        try:
+            return int(max_age) <= 0
+        except ValueError:
+            pass
+    expires = attrs.get("expires")
+    if expires:
+        try:
+            when = parsedate_to_datetime(expires)
+        except (TypeError, ValueError, IndexError):
+            return False
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        return when <= datetime.now(timezone.utc)
+    return False
+
+
+def _cookies_set_by(response) -> List[Tuple[str, bool, bool]]:
+    """(name, secure, httponly) for every cookie the response chain leaves set.
+
+    Redirect hops count: a session cookie issued on a 302 is as exposed as one
+    on the final page. A cookie set twice is judged as the browser keeps it,
+    by its last Set-Cookie.
+    """
+    final: Dict[str, Tuple[str, bool, bool]] = {}
+    for hop in list(getattr(response, "history", None) or []) + [response]:
+        for line in _set_cookie_lines(hop):
+            parts = line.split(";")
+            name, sep, _value = parts[0].partition("=")
+            name = name.strip()
+            if not sep or not name:
+                continue
+            attrs: Dict[str, str] = {}
+            for attr in parts[1:]:
+                key, _, val = attr.strip().partition("=")
+                attrs[key.strip().lower()] = val.strip()
+            if _cookie_is_cleared(attrs):
+                final.pop(name, None)
+                continue
+            final[name] = (name, "secure" in attrs, "httponly" in attrs)
+    return list(final.values())
 
 
 def check_basic_auth_no_tls(hostname: str, timeout: int = 10) -> Optional[Dict]:
@@ -2171,9 +2287,8 @@ def check_redis_no_auth(ip: str, port: int = 6379, timeout: int = 5) -> Optional
         Vulnerability dict if Redis has no auth, None otherwise
     """
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((ip, port))
+        # create_connection, not an AF_INET socket: it also reaches IPv6.
+        sock = socket.create_connection((ip, port), timeout=timeout)
 
         # Send PING command
         sock.send(b"PING\r\n")
@@ -2199,33 +2314,71 @@ def check_redis_no_auth(ip: str, port: int = 6379, timeout: int = 5) -> Optional
     return None
 
 
-def check_kubernetes_api_exposed(ip: str, timeout: int = 10) -> Optional[Dict]:
+KUBERNETES_API_PORTS = (6443, 8443, 443)
+
+# What GET /api (or a sibling discovery path) returns from a kube-apiserver:
+# the document kind and the list field that kind always carries.
+_K8S_DISCOVERY_KINDS = {
+    "APIVersions": "versions",
+    "APIGroupList": "groups",
+    "APIResourceList": "resources",
+}
+
+
+def _is_kubernetes_api_response(status: int, body: str) -> bool:
+    """True only for a kube-apiserver document, not a page that mentions it.
+
+    200: a discovery document (APIVersions with its `versions` list, ...).
+    401/403: the API's own Status object, `{"kind": "Status", "apiVersion":
+    "v1", "status": "Failure", "code": <the HTTP status>}`.
+    """
+    try:
+        doc = json.loads(body or "")
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(doc, dict):
+        return False
+    kind = doc.get("kind")
+    if status == 200:
+        field = _K8S_DISCOVERY_KINDS.get(kind)
+        return bool(field) and isinstance(doc.get(field), list)
+    if status in (401, 403):
+        return (kind == "Status" and doc.get("apiVersion") == "v1"
+                and doc.get("status") == "Failure" and doc.get("code") == status)
+    return False
+
+
+def check_kubernetes_api_exposed(ip: str, timeout: int = 10,
+                                 ports: Optional[List[int]] = None) -> Optional[Dict]:
     """
     Check if Kubernetes API is publicly exposed.
 
     Args:
         ip: IP address to check
         timeout: Request timeout
+        ports: Ports to probe; defaults to KUBERNETES_API_PORTS. The port-scan
+            caller passes only the ones the scan found open.
 
     Returns:
         Vulnerability dict if K8s API is exposed, None otherwise
     """
-    k8s_ports = [6443, 8443, 443]
+    k8s_ports = list(KUBERNETES_API_PORTS) if ports is None else list(ports)
 
     for port in k8s_ports:
-        url = f"https://{ip}:{port}/api"
+        url = f"https://{_url_host(ip)}:{port}/api"
         try:
+            # A redirect lands on whatever page the server points at (a login
+            # portal, a marketing site): only /api's own answer is evidence.
             response = _hh_get(
                 url,
                 timeout=timeout,
+                allow_redirects=False,
                 verify=False,
                 headers={"User-Agent": "Mozilla/5.0"}
             )
 
-            # Check for Kubernetes API response
             if response.status_code in [200, 401, 403]:
-                content = response.text.lower()
-                if 'kind' in content or 'kubernetes' in content or 'apiversion' in content:
+                if _is_kubernetes_api_response(response.status_code, response.text):
                     severity = "critical" if response.status_code == 200 else "high"
                     return {
                         "type": "kubernetes_api_exposed",
@@ -2260,9 +2413,7 @@ def check_smtp_open_relay(ip: str, port: int = 25, timeout: int = 10) -> Optiona
         Vulnerability dict if open relay, None otherwise
     """
     try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(timeout)
-        sock.connect((ip, port))
+        sock = socket.create_connection((ip, port), timeout=timeout)
 
         # Read banner
         banner = sock.recv(1024).decode('utf-8', errors='ignore')
@@ -2307,11 +2458,58 @@ def check_smtp_open_relay(ip: str, port: int = 25, timeout: int = 10) -> Optiona
     return None
 
 
+def _port_number(value) -> Optional[int]:
+    """A port from an int, a numeric string or a port_details {"port": n} entry."""
+    if isinstance(value, dict):
+        value = value.get("port")
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    return port if 0 < port < 65536 else None
+
+
+def _open_ports_by_ip(port_scan: Dict[str, Any]) -> Dict[str, Tuple[List[int], Dict[str, Any]]]:
+    """{ip: (sorted open ports, its by_ip entry)} from the port scan section.
+
+    Both the full pipeline and partial recon put one entry per IP under
+    port_scan["by_ip"] - {"ip", "hostnames", "ports": [int], "port_details",
+    "cdn", "is_cdn"} - and every listed port is open. A top-level
+    {ip: {port: {"state": "open"}}} map is read as well, but only under a key
+    that is an IP literal, so the section names (scan_metadata, by_host, ...)
+    are never taken for hosts.
+    """
+    found: Dict[str, Tuple[Set[int], Dict[str, Any]]] = {}
+    by_ip = port_scan.get("by_ip")
+    if isinstance(by_ip, dict):
+        for key, entry in by_ip.items():
+            if not isinstance(entry, dict):
+                continue
+            ip = str(entry.get("ip") or key)
+            ports = found.setdefault(ip, (set(), entry))[0]
+            for value in list(entry.get("ports") or []) + list(entry.get("port_details") or []):
+                port = _port_number(value)
+                if port:
+                    ports.add(port)
+    for key, ports_data in port_scan.items():
+        if not (isinstance(ports_data, dict) and _looks_like_ip(key)):
+            continue
+        ports = found.setdefault(key, (set(), {}))[0]
+        for port_str, port_info in ports_data.items():
+            if isinstance(port_info, dict) and port_info.get("state") == "open":
+                port = _port_number(port_str)
+                if port:
+                    ports.add(port)
+    return {ip: (sorted(ports), entry) for ip, (ports, entry) in found.items() if ports}
+
+
 def run_port_service_checks(
     recon_data: Dict[str, Any],
     enabled_checks: Dict[str, bool],
     timeout: int = 10,
-    max_workers: int = 10
+    max_workers: int = 10,
+    cdn_ips: Optional[Set[str]] = None,
+    roe_excluded_hosts: Optional[List[str]] = None,
 ) -> List[Dict]:
     """
     Run all enabled port/service security checks.
@@ -2321,28 +2519,42 @@ def run_port_service_checks(
         enabled_checks: Dict of check_name -> enabled (bool)
         timeout: Connection timeout
         max_workers: Maximum concurrent workers
+        cdn_ips: IPs already classified as CDN edge (the direct-IP prefilter)
+        roe_excluded_hosts: The RoE exclusion list when RoE is on
 
     Returns:
         List of vulnerability findings
     """
     findings = []
 
-    # Get port scan data
-    port_scan = recon_data.get("port_scan", {})
+    port_scan = recon_data.get("port_scan") or {}
+    if not isinstance(port_scan, dict):
+        return findings
 
-    def check_single_ip(ip: str, ports_data: Dict) -> List[Dict]:
+    # A CDN edge's open ports are the CDN's, not the target's. Same rule as the
+    # direct-IP checks: a reliable edge name or a CDN ASN, never a generic cloud
+    # label ("aws" also marks EC2/ALB origins, whose ports ARE the target's).
+    edge_ips: Set[str] = set(cdn_ips or ())
+    try:
+        edge_ips |= collect_reliable_edge_ips(recon_data)
+        edge_ips |= collect_asn_cdn_ips(recon_data)
+    except Exception as exc:  # noqa: BLE001 - same fallback as the direct-IP prefilter
+        print(f"[!][SecurityCheck] CDN prefilter failed for port checks: {exc}")
+
+    from recon.helpers.roe_scope import _is_roe_excluded
+
+    ips_to_check = []
+    for ip, (open_ports, _entry) in _open_ports_by_ip(port_scan).items():
+        if ip in edge_ips:
+            continue
+        if roe_excluded_hosts and _is_roe_excluded(ip, roe_excluded_hosts):
+            continue
+        ips_to_check.append((ip, open_ports))
+
+    def check_single_ip(ip: str, open_ports: List[int]) -> List[Dict]:
         if _host_down(ip):
             return []
         ip_findings = []
-
-        # Extract open ports
-        open_ports = []
-        for port_str, port_info in ports_data.items():
-            if isinstance(port_info, dict) and port_info.get("state") == "open":
-                try:
-                    open_ports.append(int(port_str))
-                except ValueError:
-                    pass
 
         if enabled_checks.get("admin_port_exposed", True):
             results = check_admin_ports_exposed(ip, open_ports, timeout)
@@ -2357,8 +2569,9 @@ def run_port_service_checks(
             if result:
                 ip_findings.append(result)
 
-        if enabled_checks.get("kubernetes_api_exposed", True):
-            result = check_kubernetes_api_exposed(ip, timeout=timeout)
+        k8s_ports = [p for p in KUBERNETES_API_PORTS if p in open_ports]
+        if enabled_checks.get("kubernetes_api_exposed", True) and k8s_ports:
+            result = check_kubernetes_api_exposed(ip, timeout=timeout, ports=k8s_ports)
             if result:
                 ip_findings.append(result)
 
@@ -2368,12 +2581,6 @@ def run_port_service_checks(
                 ip_findings.append(result)
 
         return ip_findings
-
-    # Process each IP with port scan data
-    ips_to_check = []
-    for ip, ports_data in port_scan.items():
-        if isinstance(ports_data, dict):
-            ips_to_check.append((ip, ports_data))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         future_to_ip = {executor.submit(check_single_ip, ip, ports): ip for ip, ports in ips_to_check}
@@ -2546,6 +2753,24 @@ def run_app_security_checks(
 # Rate Limiting Checks
 # =============================================================================
 
+# Throttling wording, matched as words: separate "rate" and "limit" substrings
+# are on any page that says "generate" and "unlimited".
+_RATE_LIMIT_TEXT = re.compile(
+    r"\brate[\s_-]?limit|too many requests|too many (?:\w+ )?attempts", re.IGNORECASE)
+
+
+def _login_attempt_processed(status: int) -> bool:
+    """True when the answer shows the endpoint evaluated the credentials.
+
+    2xx/3xx: it rendered a page or redirected after the attempt; 401: it
+    rejected the credentials. Nothing else is evidence of an attempt being
+    processed: 404/405/410/501 mean no such endpoint or method, 400/422 a
+    request refused before any credential check (malformed body, missing CSRF
+    token), 403 a WAF or CSRF block, 5xx a server failure, 429 throttling.
+    """
+    return 200 <= status < 400 or status == 401
+
+
 def check_no_rate_limiting(urls: List[str], hostname: str, timeout: int = 5) -> List[Dict]:
     """
     Check if rate limiting is missing on login/auth endpoints.
@@ -2570,12 +2795,13 @@ def check_no_rate_limiting(urls: List[str], hostname: str, timeout: int = 5) -> 
 
     # Filter URLs that belong to this hostname and contain auth keywords
     auth_urls = set()
+    host = (hostname or "").lower()
     for url in urls:
         try:
-            from urllib.parse import urlparse
             parsed = urlparse(url)
-            # Check if URL belongs to this hostname
-            if parsed.netloc == hostname or parsed.netloc.endswith(f'.{hostname}'):
+            # .hostname, not netloc: "app.example.com:8443" is still this host.
+            url_host = parsed.hostname or ""
+            if url_host == host or url_host.endswith(f'.{host}'):
                 url_lower = url.lower()
                 if any(keyword in url_lower for keyword in auth_keywords):
                     # Normalize to base URL without query params for rate limit test
@@ -2603,7 +2829,6 @@ def check_no_rate_limiting(urls: List[str], hostname: str, timeout: int = 5) -> 
         tested_urls.add(url)
 
         try:
-            from urllib.parse import urlparse
             parsed = urlparse(url)
             endpoint = parsed.path
 
@@ -2638,7 +2863,7 @@ def check_no_rate_limiting(urls: List[str], hostname: str, timeout: int = 5) -> 
                     if resp.status_code == 429:  # Too Many Requests
                         rate_limit_detected = True
                         break
-                    if 'rate' in resp.text.lower() and 'limit' in resp.text.lower():
+                    if _RATE_LIMIT_TEXT.search(resp.text or ""):
                         rate_limit_detected = True
                         break
                     if resp.headers.get('Retry-After'):
@@ -2646,6 +2871,11 @@ def check_no_rate_limiting(urls: List[str], hostname: str, timeout: int = 5) -> 
                         break
                     if resp.headers.get('X-RateLimit-Remaining', '999') == '0':
                         rate_limit_detected = True
+                        break
+
+                    # All ten must be processed attempts for a finding, so the
+                    # first refusal ends the burst.
+                    if not _login_attempt_processed(resp.status_code):
                         break
 
                     success_count += 1
@@ -2707,23 +2937,19 @@ def run_rate_limit_checks(
     if resource_enum:
         discovered_urls.extend(resource_enum.get("discovered_urls", []))
 
-    # From nuclei scan discovered_urls
-    nuclei_data = recon_data.get("nuclei_scan", {})
-    if nuclei_data:
-        nuclei_urls = nuclei_data.get("discovered_urls", {})
-        if nuclei_urls:
-            discovered_urls.extend(nuclei_urls.get("all_scanned_urls", []))
-            discovered_urls.extend(nuclei_urls.get("dast_urls_with_params", []))
+    # Nuclei's URL lists, which vuln_scan.py stores under vuln_scan.discovered_urls
+    nuclei_urls = (recon_data.get("vuln_scan") or {}).get("discovered_urls") or {}
+    if isinstance(nuclei_urls, dict):
+        discovered_urls.extend(nuclei_urls.get("all_scanned_urls") or [])
+        discovered_urls.extend(nuclei_urls.get("dast_urls_with_params") or [])
 
-    # From httpx data (live URLs)
-    httpx_data = recon_data.get("httpx", {})
-    if httpx_data:
-        for entry in httpx_data.values():
-            if isinstance(entry, dict) and entry.get("url"):
-                discovered_urls.append(entry["url"])
+    # Live URLs from httpx, keyed by URL under http_probe.by_url
+    by_url = (recon_data.get("http_probe") or {}).get("by_url") or {}
+    for url, entry in by_url.items():
+        discovered_urls.append((entry.get("url") if isinstance(entry, dict) else None) or url)
 
     # Deduplicate
-    discovered_urls = list(set(discovered_urls))
+    discovered_urls = list({u for u in discovered_urls if isinstance(u, str) and u})
 
     def check_single_host(hostname: str) -> List[Dict]:
         if _host_down(hostname):
@@ -2835,6 +3061,7 @@ def run_security_checks(
     ai_user_id: str = '',
     ai_project_id: str = '',
     ai_engine: str = 'llm',
+    roe_excluded_hosts: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Run all enabled security checks on recon data.
@@ -2850,6 +3077,8 @@ def run_security_checks(
             agent's /llm/waf-classify endpoint on a static-negative match.
         ai_model: LLM model id forwarded to the agent (e.g. 'claude-opus-4-6').
         ai_user_id, ai_project_id: Forwarded for per-user provider key resolution.
+        roe_excluded_hosts: ROE_EXCLUDED_HOSTS when RoE is on. The port/service
+            checks read IPs straight from the port scan, so they apply it here.
 
     Returns:
         Dictionary with security check findings
@@ -2860,13 +3089,15 @@ def run_security_checks(
     try:
         return _run_security_checks(
             recon_data, enabled_checks, timeout, tls_expiry_days, max_workers,
-            ai_classifier_enabled, ai_model, ai_user_id, ai_project_id, ai_engine)
+            ai_classifier_enabled, ai_model, ai_user_id, ai_project_id, ai_engine,
+            roe_excluded_hosts=roe_excluded_hosts)
     finally:
         _HH_SCOPE = None
 
 
 def _run_security_checks(recon_data, enabled_checks, timeout, tls_expiry_days, max_workers,
-                         ai_classifier_enabled, ai_model, ai_user_id, ai_project_id, ai_engine='llm'):
+                         ai_classifier_enabled, ai_model, ai_user_id, ai_project_id, ai_engine='llm',
+                         roe_excluded_hosts=None):
     _set_ai_ctx(ai_classifier_enabled, ai_model, ai_user_id, ai_project_id, ai_engine)
     if _AI_CTX["enabled"]:
         print(f"[*][WAF-AI] Classifier cascade enabled, model={_AI_CTX['model']}")
@@ -2958,6 +3189,7 @@ def _run_security_checks(recon_data, enabled_checks, timeout, tls_expiry_days, m
     print("=" * 70 + "\n")
 
     all_findings = []
+    cdn_ips: Set[str] = set()
 
     # Run direct IP access checks
     if enabled_ip > 0 and ips:
@@ -2969,7 +3201,6 @@ def _run_security_checks(recon_data, enabled_checks, timeout, tls_expiry_days, m
         #           serve the application directly.
         # Case 3 layer 1: IPs inside published Cloudflare prefixes.
         # Case 3 layer 2: IPs whose ASN matches a known CDN ASN.
-        cdn_ips: Set[str] = set()
         try:
             cdn_ips |= collect_reliable_edge_ips(recon_data)
             cdn_ips |= collect_asn_cdn_ips(recon_data)
@@ -3058,7 +3289,9 @@ def _run_security_checks(recon_data, enabled_checks, timeout, tls_expiry_days, m
             recon_data=recon_data,
             enabled_checks=enabled_checks,
             timeout=timeout,
-            max_workers=max_workers
+            max_workers=max_workers,
+            cdn_ips=cdn_ips,
+            roe_excluded_hosts=roe_excluded_hosts,
         )
         all_findings.extend(port_findings)
         print(f"[+][SecurityCheck] Found {len(port_findings)} issues")

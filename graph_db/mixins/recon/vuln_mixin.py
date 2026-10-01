@@ -2,8 +2,10 @@
 
 Part of the recon_mixin.py split. Methods pasted unchanged.
 """
+import ipaddress
 import json
 import hashlib
+import re
 from datetime import datetime
 from urllib.parse import urlparse, parse_qs
 
@@ -29,6 +31,94 @@ def stable_vuln_id(finding_type: str, url: str, ip_or_host: str = "",
     """
     unique_key = f"{finding_type or ''}|{url or ''}|{ip_or_host or ''}|{user_id or ''}|{project_id or ''}"
     return hashlib.sha1(unique_key.encode("utf-8", "replace")).hexdigest()[:12]
+
+
+def _authority_host(parsed) -> str:
+    """A parsed URL's host without its port, case kept; an IPv6 literal unbracketed.
+
+    A plain netloc.split(':') cuts "[2001:db8::1]:8080" to "[2001", which no IP
+    node matches.
+    """
+    netloc = parsed.netloc
+    if netloc.startswith("["):
+        return netloc[1:].partition("]")[0]
+    return netloc.split(":")[0]
+
+
+def _ip_port_key(ip: str, port) -> str:
+    """The id key of a finding scoped to one IP (and port): "ip:port", IPv6 bracketed."""
+    if not port:
+        return ip
+    try:
+        bracket = ipaddress.ip_address(ip).version == 6
+    except ValueError:
+        bracket = False
+    return f"[{ip}]:{port}" if bracket else f"{ip}:{port}"
+
+
+#: Security-check fields with no fixed column of their own, copied onto the
+#: node when the check set them: how a waf_bypass was decided and how sure the
+#: classifier was (triage weighs a finding by them), and a port's service.
+_SECURITY_CHECK_EXTRA_FIELDS = (
+    "detection_method", "waf_confidence", "waf_type", "ai_reasoning", "service",
+)
+
+#: Words nmap and the fingerprinters put after a product name without making
+#: it another product: "Apache httpd", "Microsoft IIS httpd", "Apache HTTP
+#: Server", "Squid http proxy", "PostgreSQL DB", "Node.js Express framework".
+_TECH_DESCRIPTOR_WORDS = (
+    "http", "https", "httpd", "server", "web", "webserver", "daemon", "smtpd",
+    "ftpd", "sshd", "imapd", "pop3d", "proxy", "accelerator", "framework",
+    "db", "database",
+)
+
+
+def tech_name_regex(product: str) -> str:
+    """The regex a lower-cased Technology.name must fully match to BE `product`.
+
+    `product` is the CVE lookup's normalised name ("apache", "iis", "openssh").
+    The name must be the product's whole words, optionally behind one vendor
+    word and followed by descriptor words, then anything after "/", ":" or "("
+    (version, distro). So "Apache httpd/2.4.41", "Microsoft IIS httpd/10.0",
+    "Apache Tomcat" (for "tomcat") match, while "phpMyAdmin" (php), "Django"
+    (go), "Preact" (react) and "Apache Tomcat" (apache) do not.
+
+    Only constructs Java and Python read alike, so the Cypher `=~` and
+    tech_matches_cve_product decide the same way.
+    """
+    tokens = [t for t in re.split(r"[\s-]+", str(product or "").strip().lower()) if t]
+    if not tokens:
+        return "(?!)"
+    sep = r"[\s-]+"
+    core = sep.join(re.escape(t) for t in tokens)
+    descriptors = "|".join(_TECH_DESCRIPTOR_WORDS)
+    return rf"(?:[^\s/:(-]+{sep})?{core}(?:{sep}(?:{descriptors}))*(?:\s*[/:(].*)?"
+
+
+def tech_version_regex(version: str) -> str:
+    """The regex a Technology.version must fully match to be `version` in another
+    spelling: "8.2p1" and "8.2-1ubuntu" are 8.2, "10.0" is 10; "8.20" and "8.2.1"
+    are not 8.2."""
+    v = re.sub(r"^[vV]", "", str(version or "").strip())
+    v = re.sub(r"(?:\.0)+$", "", v) or v
+    return rf"[vV]?{re.escape(v)}(?:\.0)*(?:[^0-9.].*)?"
+
+
+def tech_matches_cve_product(tech_name: str, product: str, *exact_names: str) -> bool:
+    """Python mirror of the writer's Technology name predicate (see tech_name_regex).
+
+    An exact, case-insensitive name match on the product or one of
+    `exact_names` (the lookup key with and without its version) always holds.
+    Otherwise the product must sit inside the name (the CONTAINS guard) AND
+    match as a whole product, so it only ever narrows substring matching.
+    """
+    name = str(tech_name or "").lower()
+    if not name:
+        return False
+    if any(name == str(n).lower() for n in (product, *exact_names) if n):
+        return True
+    p = str(product or "").lower()
+    return bool(p) and p in name and re.fullmatch(tech_name_regex(p), name) is not None
 
 
 def nuclei_cve_ids(cves) -> list:
@@ -670,17 +760,28 @@ class VulnMixin:
                         # Matching strategies (in order):
                         # 1. Exact match by clean name (key without version suffix)
                         # 2. Exact match by NVD product name or raw key
-                        # 3. CONTAINS fallback (product name within technology name)
+                        # 3. The product as a whole name inside the technology name
+                        #    (tech_name_regex): "Apache httpd/2.4.41" for "apache",
+                        #    but not "phpMyAdmin" for "php" nor "Apache Tomcat" for
+                        #    "apache". The CONTAINS guard keeps it a narrowing of
+                        #    substring matching: a name without the product never matches.
                         # Version matching:
                         # - First try exact version match
-                        # - Then fallback to version-less match (handles httpx detecting
+                        # - Then fall back to nodes with no version, or the same
+                        #   version spelled differently ("8.2p1" for 8.2) - never a
+                        #   node of another version (handles httpx detecting
                         #   "Apache Tomcat" without version while NVD uses "Apache-Coyote/1.1")
                         name_where = """
                             (toLower(t.name) = toLower($tech_name_clean)
                              OR toLower(t.name) = toLower($tech_product)
                              OR toLower(t.name) = toLower($tech_key)
-                             OR toLower(t.name) CONTAINS toLower($tech_product))
+                             OR (toLower(t.name) CONTAINS toLower($tech_product)
+                                 AND toLower(t.name) =~ $tech_name_regex))
                         """
+                        name_params = dict(
+                            tech_name_clean=tech_name_clean, tech_product=tech_product,
+                            tech_key=tech_name, tech_name_regex=tech_name_regex(tech_product),
+                        )
 
                         matched = 0
 
@@ -694,24 +795,27 @@ class VulnMixin:
                                 MERGE (t)-[:HAS_KNOWN_CVE]->(c)
                                 RETURN count(*) as matched
                                 """,
-                                user_id=user_id, project_id=project_id, tech_name_clean=tech_name_clean,
-                                tech_product=tech_product, tech_key=tech_name,
+                                user_id=user_id, project_id=project_id, **name_params,
                                 tech_version=tech_version, cve_id=cve_id
                             )
                             matched = result.single()["matched"]
 
                         if matched == 0:
-                            # Try 2: name match ignoring version (fallback for version mismatch)
+                            # Try 2: a node whose version is unknown, or this one in another spelling
+                            version_where = ("AND (coalesce(t.version, '') = '' "
+                                             "OR t.version =~ $tech_version_regex)"
+                                             if tech_version else "")
                             result = session.run(
                                 f"""
                                 MATCH (t:Technology {{user_id: $user_id, project_id: $project_id}})
-                                WHERE {name_where}
+                                WHERE {name_where} {version_where}
                                 MATCH (c:CVE {{id: $cve_id}})
                                 MERGE (t)-[:HAS_KNOWN_CVE]->(c)
                                 RETURN count(*) as matched
                                 """,
-                                user_id=user_id, project_id=project_id, tech_name_clean=tech_name_clean,
-                                tech_product=tech_product, tech_key=tech_name, cve_id=cve_id
+                                user_id=user_id, project_id=project_id, **name_params,
+                                tech_version_regex=tech_version_regex(tech_version or ""),
+                                cve_id=cve_id
                             )
                             matched = result.single()["matched"]
 
@@ -914,6 +1018,15 @@ class VulnMixin:
                     missing_header = finding.get("missing_header")
                     port = finding.get("port")
 
+                    # Port/service checks report the scanned host as `ip`, with no
+                    # url, hostname or matched_ip. Keyed on those alone, every IP's
+                    # finding of a type would hash to one unlinked node; key it on
+                    # ip:port and treat the ip as matched_ip (property + IP link).
+                    ip_port_key = ""
+                    if not (url or matched_ip or hostname) and finding.get("ip"):
+                        matched_ip = finding["ip"]
+                        ip_port_key = _ip_port_key(matched_ip, port)
+
                     # Deterministic, tenant-scoped id: converges with
                     # origin_discovery on the same (type, url, ip/host) exposure
                     # within this tenant and survives re-runs.
@@ -924,7 +1037,8 @@ class VulnMixin:
                     # exemptions already reference.
                     finding_domain = (finding.get("domain") or ""
                                       if domain_batch and not (url or matched_ip or hostname) else "")
-                    vuln_id = stable_vuln_id(finding_type, url, matched_ip or hostname or finding_domain,
+                    vuln_id = stable_vuln_id(finding_type, url,
+                                             ip_port_key or matched_ip or hostname or finding_domain,
                                              user_id, project_id)
 
                     # Create Vulnerability node
@@ -958,6 +1072,11 @@ class VulnMixin:
                         vuln_props["missing_header"] = missing_header
                     if port:
                         vuln_props["port"] = port
+                    for extra in _SECURITY_CHECK_EXTRA_FIELDS:
+                        value = finding.get(extra)
+                        # Primitives only: one map value fails the whole node write.
+                        if isinstance(value, (str, int, float, bool)) and value != "":
+                            vuln_props[extra] = value
 
                     vuln_props = {k: v for k, v in vuln_props.items() if v is not None}
 
@@ -983,7 +1102,7 @@ class VulnMixin:
                     # For URL-based findings
                     if url and (url.startswith("http://") or url.startswith("https://")):
                         parsed = urlparse(url)
-                        url_host = parsed.netloc.split(':')[0]  # Remove port if present
+                        url_host = _authority_host(parsed)
                         
                         # If URL host is an IP address, connect to IP node (not BaseURL)
                         # This keeps the vulnerability connected to the existing IP node in the graph

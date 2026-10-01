@@ -128,6 +128,42 @@ def graph_url_fingerprints(base_urls, user_id: str, project_id: str) -> dict:
         return {}
 
 
+def graph_open_ports(ips, user_id: str, project_id: str) -> dict:
+    """{ip: [open port numbers]} from the graph's Port nodes. Never raises.
+
+    The port/service security checks read open ports from port_scan.by_ip,
+    which the vuln-scan builder fills with CDN metadata only.
+    """
+    ips = sorted({ip for ip in (ips or []) if isinstance(ip, str) and ip})
+    if not ips:
+        return {}
+    try:
+        from graph_db import Neo4jClient
+        with Neo4jClient() as graph_client:
+            if not graph_client.verify_connection():
+                return {}
+            with graph_client.driver.session() as session:
+                result = session.run(
+                    """
+                    MATCH (p:Port {user_id: $uid, project_id: $pid})
+                    WHERE p.ip_address IN $ips AND p.number IS NOT NULL
+                      AND coalesce(p.state, 'open') = 'open'
+                    RETURN p.ip_address AS ip, collect(DISTINCT p.number) AS ports
+                    """,
+                    ips=ips, uid=user_id, pid=project_id,
+                )
+                out = {}
+                for record in result:
+                    ports = sorted({int(p) for p in (_field(record, "ports") or [])
+                                    if isinstance(p, int) or str(p).isdigit()})
+                    if ports:
+                        out[_field(record, "ip")] = ports
+                return out
+    except Exception as e:
+        print(f"[!][Partial Recon] Could not read open ports for the port checks: {e}")
+        return {}
+
+
 def _as_roots(domains) -> list:
     """A builder's roots: a list, or one root from a caller not yet migrated."""
     if isinstance(domains, str):

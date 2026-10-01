@@ -1087,6 +1087,8 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
                 ai_user_id=os.environ.get('USER_ID', ''),
                 ai_project_id=os.environ.get('PROJECT_ID', ''),
                 ai_engine=('jev' if WAF_AI_USE_JEV else 'llm'),
+                roe_excluded_hosts=(settings.get('ROE_EXCLUDED_HOSTS') or None)
+                if settings.get('ROE_ENABLED') else None,
             )
 
             # Merge security checks into vuln_scan results
