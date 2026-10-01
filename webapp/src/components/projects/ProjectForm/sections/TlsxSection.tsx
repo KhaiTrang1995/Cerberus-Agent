@@ -146,7 +146,7 @@ export function TlsxSection({ data, updateField, onRun }: TlsxSectionProps) {
                     min={0}
                     max={10000}
                   />
-                  <span className={styles.fieldHint}>Cap on in-scope SAN names merged back as scan targets.</span>
+                  <span className={styles.fieldHint}>Cap on in-scope SAN names merged back as scan targets. JS Recon uses the same cap for the hostnames it finds.</span>
                 </div>
               </div>
 

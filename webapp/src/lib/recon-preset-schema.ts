@@ -991,7 +991,7 @@ export const RECON_PARAMETER_CATALOG = `
 - tlsxTimeout: integer - Per-handshake connect timeout in seconds. Default 5.
 - tlsxRunTimeout: integer - Whole-container ceiling in seconds. Default 900.
 - tlsxRetries: integer - Handshake retries. Default 1.
-- tlsxMaxInjectedHostnames: integer - Cap on in-scope certificate SAN hostnames merged back into dns.subdomains as scan targets. Default 200.
+- tlsxMaxInjectedHostnames: integer - Cap on in-scope hostnames merged back into dns.subdomains as scan targets from certificate SANs and from JavaScript recon, applied to each source separately. Default 200.
 - tlsxDelay: string - Optional -delay between connections (e.g. "200ms"); stealth only. Default "".
 - tlsxIncludeHttpPorts: boolean - Also grab certs on HTTP/HTTPS ports httpx already covers (duplicate handshakes). Default false.
 - tlsxInjectHostnames: boolean - Merge in-scope certificate SAN hostnames into dns.subdomains as new probe targets. Default true.

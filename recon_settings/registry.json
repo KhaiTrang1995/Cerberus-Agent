@@ -12373,7 +12373,7 @@
    "group": "not-tuning",
    "has_default": true,
    "mcp": "settable",
-   "meaning": "Cap on in-scope certificate SAN hostnames merged back into dns.subdomains as scan targets. Default 200.",
+   "meaning": "Cap on in-scope hostnames merged back into dns.subdomains as scan targets from certificate SANs and from JavaScript recon, applied to each source separately. Default 200.",
    "optional": false,
    "phase": "http_probe",
    "prisma_type": "Int",

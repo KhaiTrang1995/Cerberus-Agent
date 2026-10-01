@@ -22,7 +22,7 @@ import os
 import shutil
 import subprocess
 import tempfile
-from typing import Any, Dict, Set
+from typing import Any, Dict, Optional, Set
 from urllib.parse import urlparse
 
 try:
@@ -519,11 +519,16 @@ def merge_uncover_into_pipeline(
     combined_result: dict,
     uncover_data: dict,
     domain: str,
+    settings: Optional[dict] = None,
 ) -> int:
     """Merge uncover discoveries into the pipeline's DNS/subdomain structures.
 
     New subdomains go into dns.subdomains so downstream modules
-    (port scan, HTTP probe, OSINT enrichment) process them.
+    (port scan, HTTP probe, OSINT enrichment) process them. They come from
+    third-party search engines, so they pass the same gates as every other
+    discovered name (merge_discovered_hostnames): apex allow-list, RoE
+    exclusions, hostname syntax, and no name resolving to a non-routable
+    address. ``domain`` empty means no apex to test against: nothing is added.
 
     Returns count of new assets merged.
     """
@@ -534,14 +539,20 @@ def merge_uncover_into_pipeline(
     subdomains = dns.setdefault("subdomains", {})
     merged = 0
 
-    # Merge new hostnames as subdomains with their IPs
-    for host in uncover_data.get("hosts", []):
-        if host not in subdomains:
-            subdomains[host] = {
-                "ips": {"ipv4": [], "ipv6": []},
-                "source": "uncover",
-            }
-            merged += 1
+    new_hosts = [h for h in uncover_data.get("hosts", []) if h not in subdomains]
+    if new_hosts:
+        from recon.helpers.target_helpers import merge_discovered_hostnames
+        before = set(subdomains)
+        merge_discovered_hostnames(combined_result, new_hosts, source="uncover",
+                                   root_domain=domain, settings=settings)
+        subdomains = dns["subdomains"]
+        merged = len(set(subdomains) - before)
+        # update_graph_from_uncover writes every name in the payload as a
+        # Subdomain, so a name the gates refused must leave the payload too.
+        rejected = {h for h in new_hosts if h not in subdomains}
+        if rejected:
+            uncover_data["hosts"] = [h for h in uncover_data.get("hosts", []) if h not in rejected]
+            print(f"[*][Uncover] {len(rejected)} hostname(s) failed the scope gates and are dropped")
 
     # For IPs discovered without a hostname, track them
     # so OSINT enrichment modules can process them

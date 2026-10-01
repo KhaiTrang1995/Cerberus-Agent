@@ -959,7 +959,8 @@ def run_ip_recon(target_ips: list, settings: dict) -> dict:
             uncover_data = run_uncover_expansion(combined_result, settings)
             if uncover_data:
                 combined_result["uncover"] = uncover_data
-                merge_uncover_into_pipeline(combined_result, uncover_data, combined_result.get('domain', ''))
+                merge_uncover_into_pipeline(combined_result, uncover_data, combined_result.get('domain', ''),
+                                            settings=settings)
                 combined_result["metadata"]["modules_executed"].append("uncover_expansion")
                 save_recon_file(combined_result, output_file)
                 _graph_update_bg("update_graph_from_uncover", combined_result, USER_ID, PROJECT_ID)
@@ -1576,7 +1577,8 @@ def run_domain_recon(target: str, bruteforce: bool = False,
                 # Domain batch the global is empty, so every group's expansion
                 # would be merged against the wrong (or no) domain.
                 merge_uncover_into_pipeline(
-                    combined_result, uncover_data, target_info["root_domain"])
+                    combined_result, uncover_data, target_info["root_domain"],
+                    settings=_settings)
                 combined_result["metadata"]["modules_executed"].append("uncover_expansion")
                 save_recon_file(combined_result, output_file)
                 _graph_update_bg("update_graph_from_uncover", combined_result, USER_ID, PROJECT_ID)

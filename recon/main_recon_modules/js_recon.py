@@ -1113,9 +1113,13 @@ def run_js_recon(combined_result: dict, settings: dict) -> dict:
             # silently discarded whenever it found a new subdomain. Route through
             # the scope-safe dict merge instead.
             from recon.helpers.target_helpers import merge_discovered_hostnames
+            # The same cap as the certificate paths: every name costs a blocking
+            # DNS lookup here and then a scan target, and a JS bundle can name
+            # any number of hosts.
             merge_discovered_hostnames(
                 combined_result, new_subs, source='js_recon',
                 root_domain=scope_roots, settings=settings,
+                max_injected=(settings or {}).get('TLSX_MAX_INJECTED_HOSTNAMES', 200),
             )
 
         # 6. Keep matched_text in output for copy-to-clipboard in the UI

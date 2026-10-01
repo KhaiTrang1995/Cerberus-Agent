@@ -8850,8 +8850,9 @@ fields:
     bounds: { min: 0, max: 10000 }
     group: not-tuning
     meaning: >-
-      Cap on in-scope certificate SAN hostnames merged back into dns.subdomains as
-      scan targets. Default 200.
+      Cap on in-scope hostnames merged back into dns.subdomains as scan targets
+      from certificate SANs and from JavaScript recon, applied to each source
+      separately. Default 200.
   tlsxMaxTargets:
     tool: tlsx
     runtime_key: "TLSX_MAX_TARGETS"
