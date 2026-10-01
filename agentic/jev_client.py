@@ -38,7 +38,7 @@ _WEBAPP_TIMEOUT_S = 10.0
 _MODEL_RE = re.compile(r"^jev-\d+\.\d+\.\d+$")
 #: Printable ASCII with no whitespace. A CR/LF in a header value makes httpx
 #: raise an error that quotes the value, which would put the key in a log.
-_KEY_RE = re.compile(r"^[\x21-\x7e]{8,512}$")
+_KEY_RE = re.compile(r"[\x21-\x7e]{8,512}")
 
 ERROR_MESSAGES = {
     "jev_auth": "TypeSafe rejected the Jev API key",
@@ -90,7 +90,7 @@ def _error_for_status(status: int, headers) -> JevError:
 
 
 def _auth_headers(key: str) -> dict:
-    if not isinstance(key, str) or not _KEY_RE.match(key):
+    if not isinstance(key, str) or not _KEY_RE.fullmatch(key):
         raise JevError("jev_auth")
     return {"Authorization": f"Bearer {key}"}
 
@@ -136,7 +136,10 @@ def _valid_answer(question: dict, answer) -> bool:
     if qtype == "noul":
         return _is_unit(answer.get("noul"))
     if qtype == "choice":
-        return (answer.get("choice") in (question.get("criteria") or {})
+        choice = answer.get("choice")
+        # isinstance first: `in` hashes the value, and a list or object would raise
+        # TypeError, which no caller handles (only JevError is).
+        return (isinstance(choice, str) and choice in (question.get("criteria") or {})
                 and _is_unit(answer.get("confidence")))
     if qtype == "score":
         score = answer.get("score")

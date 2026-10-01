@@ -369,3 +369,32 @@ def test_provider_test_failures_carry_fixed_texts(client, error_type, text):
         resp = _post_test(client)
     assert resp.status_code == 400
     assert resp.json() == {"success": False, "error": text}
+
+
+# ---------------------------------------------------------------------------
+# Regressions found in review
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("choice", [["cloudflare"], {"cloudflare": 1}, [], {}])
+def test_an_unhashable_choice_is_a_bad_response_not_a_crash(choice):
+    """REGRESSION (unhashable choice escaped as a TypeError): `choice in criteria` hashes the
+    value, so a list or object raised TypeError inside system_one. Only JevError is handled
+    upstream, so the endpoint answered 500 with a traceback instead of the fixed 503
+    jev_bad_response that the recon breaker classifies."""
+    answer = {"vendor": {"type": "choice", "choice": choice, "confidence": 0.9, "probabilities": {}}}
+    with _transport(_ok(answer)):
+        with pytest.raises(JevError) as err:
+            _run(jev_client.system_one(KEY, "jev-1.13.0", "s", CHOICE_Q))
+    assert err.value.error_type == "jev_bad_response"
+
+
+def test_a_key_with_a_trailing_newline_is_refused_before_any_request():
+    """REGRESSION (`$` matched before a final newline): the key pattern comment promised no
+    whitespace, but `abc\\n` passed. h11 would reject the header later, but the guard must
+    not depend on that."""
+    seen: list = []
+    with _transport(_ok({}), seen):
+        with pytest.raises(JevError) as err:
+            _run(jev_client.system_one(KEY + "\n", "jev-1.13.0", "s", NOUL_Q))
+    assert err.value.error_type == "jev_auth"
+    assert seen == []

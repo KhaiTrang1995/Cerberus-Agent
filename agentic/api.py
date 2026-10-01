@@ -1183,12 +1183,23 @@ def _jev_failure(err) -> JSONResponse:
     return JSONResponse(content=body, status_code=503)
 
 
-async def _jev_preamble(user_id: str, project_id: str) -> str:
-    """Validate the caller, bind the project to its owner, and return the token.
+class _JevPreambleError(Exception):
+    """A request the /jev/* preamble refused, carrying the exact response to send.
 
-    Raises an `HTTPException`/`JevError`-shaped failure by returning a
-    JSONResponse-bearing exception is avoided: instead this returns the key, or
-    raises `_JevPreambleError` carrying the response to send.
+    Not an HTTPException: recon reads `error_type` from the TOP LEVEL of the body, and
+    HTTPException would nest it under "detail".
+    """
+
+    def __init__(self, response: JSONResponse):
+        self.response = response
+
+
+async def _jev_preamble(user_id: str, project_id: str) -> str:
+    """Return the project owner's Jev token, or raise `_JevPreambleError`.
+
+    Order matters: the caller's ids are validated, the project is bound to its owner
+    (fail closed), and only then is the token loaded, so a mismatched project never
+    causes the owner's token to be read.
     """
     import jev_client
     from llm_builder import fetch_user_providers, ProvidersUnreachable
@@ -1214,11 +1225,6 @@ async def _jev_preamble(user_id: str, project_id: str) -> str:
     if not key:
         raise _JevPreambleError(_jev_failure(jev_client.JevError("jev_not_configured")))
     return key
-
-
-class _JevPreambleError(Exception):
-    def __init__(self, response: JSONResponse):
-        self.response = response
 
 
 def _log_jev(endpoint: str, user_id: str, project_id: str, n_questions: int,
@@ -1248,6 +1254,12 @@ async def _run_jev(endpoint: str, user_id: str, project_id: str, n_questions: in
         _log_jev(endpoint, user_id, project_id, n_questions, jev_hooks.JEV_MODEL,
                  int((_time.monotonic() - started) * 1000), f"error_type={e.error_type}")
         return _jev_failure(e)
+    except Exception as e:                                        # noqa: BLE001
+        # Anything unclassified still has to be a fixed 503 that recon's breaker can
+        # name. The class is logged, never the message: it can carry request state.
+        _log_jev(endpoint, user_id, project_id, n_questions, jev_hooks.JEV_MODEL,
+                 int((_time.monotonic() - started) * 1000), f"error={type(e).__name__}")
+        return _jev_failure(jev_hooks.JevError("jev_bad_response"))
     _log_jev(endpoint, user_id, project_id, n_questions, jev_hooks.JEV_MODEL,
              int((_time.monotonic() - started) * 1000), "ok")
     return result

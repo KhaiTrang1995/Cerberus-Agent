@@ -12,6 +12,7 @@ deliberate edit alongside JEV_MODEL.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from prompt_safety import wrap_untrusted
@@ -33,6 +34,11 @@ _FINGERPRINT_CHARS = 8_000
 _SHORT_CHARS = 2_000
 #: More candidate tags than any real template set has; only bounds a pathological caller.
 _MAX_CANDIDATES = 500
+
+#: The only shape of a Nuclei tag recon accepts (its TAG_REGEX). A tag is written into
+#: the question wording, so anything else is dropped here instead of becoming instruction
+#: text: the endpoint takes whatever list its caller sends.
+_TAG_RE = re.compile(r"[a-z0-9-]{2,30}")
 
 #: Noul answers at or above this read as "yes". The recon thresholds (70/100)
 #: are calibrated against this, so it moves with the pinned model.
@@ -71,12 +77,14 @@ async def _ask(key: str, state, questions: dict) -> dict:
 # ---------------------------------------------------------------------------
 
 #: The fixed catalog Jev ranks over. Jev never invents an extension: it only
-#: scores these, so the FFuf validator's regex can never reject its output.
+#: scores these. Every entry must pass recon's EXT_REGEX (a dot plus 1-8 of
+#: a-z0-9), or recon drops it without an error; test_jev_catalog_contract.py
+#: holds that line.
 FFUF_JEV_CATALOG: tuple[str, ...] = (
     ".php", ".asp", ".aspx", ".jsp", ".do", ".action", ".html", ".htm", ".js",
     ".json", ".xml", ".txt", ".bak", ".old", ".orig", ".save", ".swp", ".tmp",
     ".zip", ".tar", ".gz", ".7z", ".rar", ".sql", ".db", ".sqlite", ".log",
-    ".conf", ".config", ".ini", ".env", ".yml", ".yaml", ".properties", ".inc",
+    ".conf", ".config", ".ini", ".env", ".yml", ".yaml", ".cfg", ".inc",
     ".cgi", ".pl", ".py", ".rb", ".map",
 )
 
@@ -94,7 +102,7 @@ async def ffuf_extensions(key: str, url: str, headers: dict, max_extensions: int
         for i, ext in enumerate(FFUF_JEV_CATALOG)
     }
     state = {
-        "url": _clip(url, _SHORT_CHARS),
+        "url": wrap_untrusted(_clip(url, _SHORT_CHARS), label="TARGET_URL"),
         "headers": wrap_untrusted(_clip(json.dumps(headers), _HEADERS_CHARS), label="TARGET_HEADERS"),
     }
     answers = await _ask(key, state, questions)
@@ -132,7 +140,7 @@ async def nuclei_tags(key: str, technologies: list, servers: list,
     is tool-controlled; the fingerprint is the only target-derived input and
     goes into the state.
     """
-    all_candidates = [c for c in candidates if isinstance(c, str)]
+    all_candidates = [c for c in candidates if isinstance(c, str) and _TAG_RE.fullmatch(c)]
     # The floor is computed over the FULL list; only the questions are bounded.
     universal = {t for t in _NUCLEI_UNIVERSAL if t in all_candidates}
     valid_candidates = all_candidates[:_MAX_CANDIDATES]
@@ -148,16 +156,14 @@ async def nuclei_tags(key: str, technologies: list, servers: list,
     }
     answers = await _ask(key, state, questions) if questions else {}
 
-    scored = sorted(
-        ((answers[f"tag_{i}"]["noul"], tag) for i, tag in enumerate(valid_candidates)
-         if answers[f"tag_{i}"]["noul"] >= _YES),
-        reverse=True,
-    )
-    chosen = sorted(universal)
-    for _, tag in scored:
-        if tag not in chosen:
-            chosen.append(tag)
-    return {"tags": chosen[:max_tags]}
+    score = {tag: answers[f"tag_{i}"]["noul"] for i, tag in enumerate(valid_candidates)}
+    # The floor is ordered by Jev's own ranking, so a max_tags below the number of
+    # universal tags present drops the least relevant ones for THIS target, not
+    # whichever sort last alphabetically.
+    chosen = sorted(universal, key=lambda t: (-score.get(t, 0.0), t))
+    ranked = sorted((t for t, v in score.items() if v >= _YES and t not in universal),
+                    key=lambda t: (-score[t], t))
+    return {"tags": (chosen + ranked)[:max_tags]}
 
 
 # ---------------------------------------------------------------------------
@@ -185,7 +191,7 @@ async def waf_classify(key: str, url: str, status_code: int, headers: dict,
         },
     }
     state = {
-        "url": _clip(url, _SHORT_CHARS),
+        "url": wrap_untrusted(_clip(url, _SHORT_CHARS), label="TARGET_URL"),
         "status_code": status_code,
         "response_time_ms": response_time_ms,
         "headers": wrap_untrusted(_clip(json.dumps(headers), _HEADERS_CHARS), label="TARGET_HEADERS"),
@@ -219,7 +225,7 @@ async def takeover_classify(key: str, hostname: str, expected_provider: str,
             false="A genuine provider unclaimed-site page"),
     }
     state = {
-        "hostname": _clip(hostname, _SHORT_CHARS),
+        "hostname": wrap_untrusted(_clip(hostname, _SHORT_CHARS), label="TARGET_HOST"),
         "claimed_provider": _clip(expected_provider, _SHORT_CHARS),
         "status_code": status_code,
         "headers": wrap_untrusted(_clip(json.dumps(headers), _HEADERS_CHARS), label="TARGET_HEADERS"),

@@ -192,3 +192,104 @@ def test_owner_binding_runs_before_the_token_fetch(client):
                 "tag_2": {"type": "noul", "noul": 0.1}}})):
         _post(client, "/jev/nuclei-tags", NUCLEI_BODY)
     assert order == ["owner", "providers"]
+
+
+# ---------------------------------------------------------------------------
+# The token never reaches a log, on any path
+# ---------------------------------------------------------------------------
+#
+# Driven through the REAL jev_client over a mock HTTP transport, not through a
+# patched system_one: the realistic leak is TypeSafe or httpx echoing the
+# Authorization header back in an error body or an exception message, and a
+# logger that prints either.
+
+import json as _json
+import logging
+
+import httpx
+
+_REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+
+def _mock_typesafe(handler):
+    def factory(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return _REAL_ASYNC_CLIENT(*args, **kwargs)
+    return patch("jev_client.httpx.AsyncClient", side_effect=factory)
+
+
+def _valid_answers(req):
+    body = _json.loads(req.content)
+    answers = {}
+    for name, q in body["questions"].items():
+        if q["type"] == "choice":
+            answers[name] = {"type": "choice", "choice": next(iter(q["criteria"])),
+                             "confidence": 0.9, "probabilities": {}}
+        else:
+            answers[name] = {"type": "noul", "noul": 0.9}
+    return httpx.Response(200, json={"model": "jev-1.13.0", "answers": answers, "usage": {}})
+
+
+def _echo_401(req):
+    return httpx.Response(401, json={"detail": {"error_type": "authentication_error",
+                                                 "message": f"rejected {req.headers['authorization']}"}})
+
+
+def _echo_500_html(req):
+    return httpx.Response(500, text=f"<html>upstream error for {req.headers['authorization']}</html>")
+
+
+def _echo_exception(req):
+    raise httpx.ConnectError(f"cannot reach host with {req.headers['authorization']}")
+
+
+LEAK_SCENARIOS = [
+    ("success", _valid_answers, 200),
+    ("typesafe_401_echoes_the_header", _echo_401, 503),
+    ("typesafe_500_echoes_the_header", _echo_500_html, 503),
+    ("connect_error_echoes_the_header", _echo_exception, 503),
+]
+
+
+@pytest.mark.parametrize("name,handler,status", LEAK_SCENARIOS, ids=[s[0] for s in LEAK_SCENARIOS])
+@pytest.mark.parametrize("path,body", list(PATHS.items()))
+def test_the_token_is_never_logged_or_returned(client, caplog, path, body, name, handler, status):
+    caplog.set_level(logging.DEBUG)
+    with _owner_ok(), _providers([JEV_ROW]), _mock_typesafe(handler):
+        resp = _post(client, path, body)
+    assert resp.status_code == status, resp.text
+    assert CANARY not in resp.text
+    assert CANARY not in caplog.text
+    assert not any(CANARY in r.getMessage() or CANARY in str(r.args) or CANARY in str(r.exc_info)
+                   for r in caplog.records)
+    # Not vacuous: the endpoint did log this call, so a leak here would have shown.
+    assert any(r.getMessage().startswith("jev ") for r in caplog.records), caplog.text
+
+
+@pytest.mark.parametrize("path,body", list(PATHS.items()))
+def test_the_token_is_never_logged_on_the_owner_mismatch_path(client, caplog, path, body):
+    import jev_client
+    caplog.set_level(logging.DEBUG)
+    with patch("jev_client.verify_owner", AsyncMock(side_effect=jev_client.JevError("jev_forbidden"))), \
+            _providers([JEV_ROW]) as fetch:
+        resp = _post(client, path, body)
+    assert resp.status_code == 403
+    assert CANARY not in resp.text and CANARY not in caplog.text
+    fetch.assert_not_called()                      # the token was never even loaded
+    assert any(r.getMessage().startswith("jev ") for r in caplog.records), caplog.text
+
+
+def test_an_unexpected_error_inside_a_hook_is_a_fixed_503_logged_by_class_only(client, caplog):
+    """REGRESSION (a non-JevError became a 500 with a traceback): only JevError was handled, so
+    any other exception escaped as an unhandled 500 and skipped the per-call log line. Recon
+    reads an error_type from a 503, so an unclassified 500 was also the one failure the Jev
+    breaker could not name. The exception text is never returned or logged: it can carry
+    state."""
+    caplog.set_level(logging.DEBUG)
+    boom = RuntimeError(f"unexpected {CANARY}")
+    with _owner_ok(), _providers([JEV_ROW]), patch("jev_hooks.nuclei_tags", AsyncMock(side_effect=boom)):
+        resp = _post(client, "/jev/nuclei-tags", NUCLEI_BODY)
+    assert resp.status_code == 503
+    assert resp.json()["error_type"] == "jev_bad_response"
+    assert CANARY not in resp.text and CANARY not in caplog.text
+    assert any("RuntimeError" in r.getMessage() and r.getMessage().startswith("jev ") for r in caplog.records), caplog.text
