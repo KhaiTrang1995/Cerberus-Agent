@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 
 import requests
 
-from recon.helpers.ai_planner import agent_llm_gate, internal_key_headers
+from recon.helpers.ai_planner import agent_llm_gate, agent_jev_gate, internal_key_headers
 
 SAFE_FALLBACK = ['.bak', '.old', '.config', '.zip']
 EXT_REGEX = re.compile(r'^\.[a-z0-9]{1,8}$')
@@ -51,6 +51,7 @@ def get_ai_extensions(
     cache: Optional[Dict[str, List[str]]] = None,
     user_id: str = '',
     project_id: str = '',
+    engine: str = 'llm',
 ) -> List[str]:
     """
     Probe the target with HEAD, ask the agent for fitting extensions,
@@ -71,27 +72,28 @@ def get_ai_extensions(
         List of extensions like ['.php', '.bak'] (each beginning with a dot).
     """
     cache = cache if cache is not None else {}
+    _TAG = 'FFuf-Jev' if engine == 'jev' else 'FFuf-AI'
     agent_api_url = os.environ.get('AGENT_API_URL', 'http://localhost:8090').rstrip('/')
 
     clean_url = target_url.replace('FUZZ', '').rstrip('/')
-    print(f"[*][FFuf-AI] Planning extensions for {clean_url}")
+    print(f"[*][{_TAG}] Planning extensions for {clean_url}")
 
     try:
         head_resp = requests.head(clean_url, allow_redirects=True, timeout=HEAD_TIMEOUT)
         headers = dict(head_resp.headers)
     except Exception as e:
-        print(f"[!][FFuf-AI] HEAD request failed for {clean_url}: {e}. Using safe fallback.")
+        print(f"[!][{_TAG}] HEAD request failed for {clean_url}: {e}. Using safe fallback.")
         return SAFE_FALLBACK[:max_extensions]
 
     fp = _fingerprint(headers)
     server = headers.get('Server', '<none>')
     powered = headers.get('X-Powered-By', '<none>')
-    print(f"[*][FFuf-AI] Headers: Server={server!r} X-Powered-By={powered!r}")
-    print(f"[*][FFuf-AI] Fingerprint: {fp}")
+    print(f"[*][{_TAG}] Headers: Server={server!r} X-Powered-By={powered!r}")
+    print(f"[*][{_TAG}] Fingerprint: {fp}")
 
     if fp in cache:
         cached = cache[fp]
-        print(f"[+][FFuf-AI] Cache hit -> {cached}")
+        print(f"[+][{_TAG}] Cache hit -> {cached}")
         return cached
 
     payload = {
@@ -102,51 +104,53 @@ def get_ai_extensions(
         'user_id': user_id,
         'project_id': project_id,
     }
-    endpoint = f"{agent_api_url}/llm/ffuf-extensions"
-    print(f"[*][FFuf-AI] Calling agent {endpoint} with model={model}")
+    use_jev = engine == 'jev'
+    route = 'jev' if use_jev else 'llm'
+    endpoint = f"{agent_api_url}/{route}/ffuf-extensions"
+    print(f"[*][{_TAG}] Calling agent {endpoint} with model={model}")
 
-    gate = agent_llm_gate()
+    gate = agent_jev_gate() if use_jev else agent_llm_gate()
     if not gate.allowed:
-        print(f"[!][FFuf-AI] Agent LLM paused (breaker open) - using the fallback.")
+        print(f"[!][{_TAG}] Agent LLM paused (breaker open) - using the fallback.")
         return SAFE_FALLBACK[:max_extensions]
     try:
         resp = requests.post(endpoint, json=payload, headers=internal_key_headers(), timeout=LLM_TIMEOUT)
     except requests.RequestException as e:
         gate.record(exc=e)
-        print(f"[!][FFuf-AI] Agent request failed: {e}. Using safe fallback.")
+        print(f"[!][{_TAG}] Agent request failed: {e}. Using safe fallback.")
         return SAFE_FALLBACK[:max_extensions]
 
     gate.record(resp=resp)
     if resp.status_code != 200:
-        print(f"[!][FFuf-AI] Agent returned HTTP {resp.status_code}: {resp.text[:200]}. Using safe fallback.")
+        print(f"[!][{_TAG}] Agent returned HTTP {resp.status_code}: {resp.text[:200]}. Using safe fallback.")
         return SAFE_FALLBACK[:max_extensions]
 
     try:
         data = resp.json()
     except (json.JSONDecodeError, ValueError) as e:
-        print(f"[!][FFuf-AI] Agent returned non-JSON response: {e}. Using safe fallback.")
+        print(f"[!][{_TAG}] Agent returned non-JSON response: {e}. Using safe fallback.")
         return SAFE_FALLBACK[:max_extensions]
 
     raw = data.get('extensions', None)
     if raw is None:
-        print(f"[!][FFuf-AI] Agent response missing 'extensions' key: {data}. Using safe fallback.")
+        print(f"[!][{_TAG}] Agent response missing 'extensions' key: {data}. Using safe fallback.")
         return SAFE_FALLBACK[:max_extensions]
 
     if not isinstance(raw, list):
-        print(f"[!][FFuf-AI] Agent returned non-list extensions: {raw!r}. Using safe fallback.")
+        print(f"[!][{_TAG}] Agent returned non-list extensions: {raw!r}. Using safe fallback.")
         return SAFE_FALLBACK[:max_extensions]
 
     validated = _validate_extensions(raw)
     if len(validated) < len(raw):
         rejected = [e for e in raw if e not in validated]
-        print(f"[!][FFuf-AI] Rejected invalid extensions (regex): {rejected}")
+        print(f"[!][{_TAG}] Rejected invalid extensions (regex): {rejected}")
 
     capped = validated[:max_extensions]
     cache[fp] = capped
 
     if not capped:
-        print(f"[+][FFuf-AI] Agent says no extensions for this target (path likely static).")
+        print(f"[+][{_TAG}] Agent says no extensions for this target (path likely static).")
     else:
-        print(f"[+][FFuf-AI] Selected extensions for {clean_url}: {capped}")
+        print(f"[+][{_TAG}] Selected extensions for {clean_url}: {capped}")
 
     return capped

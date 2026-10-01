@@ -20,7 +20,7 @@ from typing import Dict, List, Optional
 
 import requests
 
-from recon.helpers.ai_planner import agent_llm_gate, internal_key_headers
+from recon.helpers.ai_planner import agent_llm_gate, agent_jev_gate, internal_key_headers
 
 TEMPLATES_STATS_PATH = '/opt/nuclei-templates-official/TEMPLATES-STATS.json'
 MIN_TEMPLATE_COUNT = 50
@@ -88,6 +88,7 @@ def get_ai_tags(
     user_id: str = '',
     project_id: str = '',
     fallback_urls: Optional[List[str]] = None,
+    engine: str = 'llm',
 ) -> List[str]:
     """
     Ask the agent to prune the Nuclei tag list to ones that match the detected
@@ -107,12 +108,13 @@ def get_ai_tags(
     Returns:
         Validated tag list, or ``current_tags`` if the AI was unhelpful.
     """
+    _TAG = 'Nuclei-Jev' if engine == 'jev' else 'Nuclei-AI'
     techs = list(tech_fingerprint.get('technologies') or [])
     servers = list(tech_fingerprint.get('servers') or [])
 
     if not techs and not servers and fallback_urls:
         probe_urls = fallback_urls[:HEAD_PROBE_LIMIT]
-        print(f"[*][Nuclei-AI] No tech in fingerprint; probing {len(probe_urls)} URL(s) for headers...")
+        print(f"[*][{_TAG}] No tech in fingerprint; probing {len(probe_urls)} URL(s) for headers...")
         for url in probe_urls:
             try:
                 r = requests.head(url, allow_redirects=True, timeout=HEAD_TIMEOUT)
@@ -123,12 +125,12 @@ def get_ai_tags(
                 if pwr:
                     techs.append(pwr)
             except Exception as e:
-                print(f"[!][Nuclei-AI] HEAD probe failed for {url}: {e}")
+                print(f"[!][{_TAG}] HEAD probe failed for {url}: {e}")
         if techs or servers:
-            print(f"[*][Nuclei-AI] HEAD probe yielded servers={sorted(set(servers))} techs={sorted(set(techs))}")
+            print(f"[*][{_TAG}] HEAD probe yielded servers={sorted(set(servers))} techs={sorted(set(techs))}")
 
     if not techs and not servers:
-        print("[!][Nuclei-AI] No tech fingerprint available -- skipping AI call.")
+        print(f"[!][{_TAG}] No tech fingerprint available -- skipping AI call.")
         return current_tags
 
     candidates = _load_candidates()
@@ -144,44 +146,46 @@ def get_ai_tags(
         'user_id': user_id,
         'project_id': project_id,
     }
-    endpoint = f"{agent_api_url}/llm/nuclei-tags"
-    print(f"[*][Nuclei-AI] Calling agent {endpoint} with model={model} ({len(payload['technologies'])} techs, {len(payload['servers'])} servers, {len(candidates)} candidates)")
+    use_jev = engine == 'jev'
+    route = 'jev' if use_jev else 'llm'
+    endpoint = f"{agent_api_url}/{route}/nuclei-tags"
+    print(f"[*][{_TAG}] Calling agent {endpoint} with model={model} ({len(payload['technologies'])} techs, {len(payload['servers'])} servers, {len(candidates)} candidates)")
 
-    gate = agent_llm_gate()
+    gate = agent_jev_gate() if use_jev else agent_llm_gate()
     if not gate.allowed:
-        print(f"[!][Nuclei-AI] Agent LLM paused (breaker open) - using the fallback.")
+        print(f"[!][{_TAG}] Agent LLM paused (breaker open) - using the fallback.")
         return current_tags
     try:
         resp = requests.post(endpoint, json=payload, headers=internal_key_headers(), timeout=LLM_TIMEOUT)
     except requests.RequestException as e:
         gate.record(exc=e)
-        print(f"[!][Nuclei-AI] Agent request failed: {e}. Using current tags as fallback.")
+        print(f"[!][{_TAG}] Agent request failed: {e}. Using current tags as fallback.")
         return current_tags
 
     gate.record(resp=resp)
     if resp.status_code != 200:
-        print(f"[!][Nuclei-AI] Agent returned HTTP {resp.status_code}: {resp.text[:200]}. Using current tags as fallback.")
+        print(f"[!][{_TAG}] Agent returned HTTP {resp.status_code}: {resp.text[:200]}. Using current tags as fallback.")
         return current_tags
 
     try:
         data = resp.json()
     except (json.JSONDecodeError, ValueError) as e:
-        print(f"[!][Nuclei-AI] Agent returned non-JSON response: {e}. Using current tags as fallback.")
+        print(f"[!][{_TAG}] Agent returned non-JSON response: {e}. Using current tags as fallback.")
         return current_tags
 
     raw = data.get('tags', None)
     if raw is None or not isinstance(raw, list):
-        print(f"[!][Nuclei-AI] Agent response missing 'tags' list: {data}. Using current tags as fallback.")
+        print(f"[!][{_TAG}] Agent response missing 'tags' list: {data}. Using current tags as fallback.")
         return current_tags
 
     validated = _validate_tags(raw, candidates)
     if len(validated) < len(raw):
         rejected = [t for t in raw if t not in validated]
-        print(f"[!][Nuclei-AI] Rejected invalid/non-candidate tags: {rejected}")
+        print(f"[!][{_TAG}] Rejected invalid/non-candidate tags: {rejected}")
 
     capped = validated[:max_tags]
     if not capped:
-        print("[!][Nuclei-AI] Validation produced no usable tags. Using current tags as fallback.")
+        print(f"[!][{_TAG}] Validation produced no usable tags. Using current tags as fallback.")
         return current_tags
 
     return capped

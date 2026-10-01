@@ -135,6 +135,7 @@ def run_subdomain_takeover(
     confidence_threshold = int(settings.get("TAKEOVER_CONFIDENCE_THRESHOLD", 60))
     manual_review_auto_publish = bool(settings.get("TAKEOVER_MANUAL_REVIEW_AUTO_PUBLISH", False))
     ai_classifier_enabled = bool(settings.get("TAKEOVER_AI_CLASSIFIER", False))
+    ai_use_jev = bool(settings.get("TAKEOVER_AI_USE_JEV", False))
     ai_pipeline_model = settings.get("AI_PIPELINE_MODEL", "claude-opus-4-6")
 
     # Announce the AI cascade state up-front, regardless of whether candidates
@@ -336,6 +337,7 @@ def run_subdomain_takeover(
                         model=ai_pipeline_model,
                         user_id=os.environ.get("USER_ID", ""),
                         project_id=os.environ.get("PROJECT_ID", ""),
+                        engine=("jev" if ai_use_jev else "llm"),
                     )
                 except Exception as e:
                     # Never let AI failure abort the takeover scan -- emit warning
@@ -928,6 +930,7 @@ def _apply_ai_waf_disambiguation(
     model: str,
     user_id: str,
     project_id: str,
+    engine: str = "llm",
 ) -> None:
     """
     For each takeover finding, probe the hostname, short-circuit on
@@ -977,6 +980,7 @@ def _apply_ai_waf_disambiguation(
                 cache=cache,
                 user_id=user_id,
                 project_id=project_id,
+                engine=engine,
             )
             if result.get("source") == "ai_unavailable":
                 continue
@@ -984,6 +988,7 @@ def _apply_ai_waf_disambiguation(
                 finding["ai_waf_likely"] = True
                 finding["ai_confidence"] = int(result["confidence"])
                 finding["ai_reasoning"] = result.get("reason") or ""
+                finding["ai_engine"] = "jev" if result.get("source") == "jev_classifier" else "llm"
         except Exception as e:
             print(f"[!][Takeover-AI] disambiguation failed for {finding.get('hostname','?')}: {e}")
             continue

@@ -465,6 +465,7 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
     FFUF_SMART_FUZZ_MAX_BASE_PATHS = settings.get('FFUF_SMART_FUZZ_MAX_BASE_PATHS', 20)
     FFUF_PARALLELISM = settings.get('FFUF_PARALLELISM', 20)
     FFUF_AI_EXTENSIONS = settings.get('FFUF_AI_EXTENSIONS', False)
+    FFUF_AI_USE_JEV = settings.get('FFUF_AI_USE_JEV', False)
     AI_PIPELINE_MODEL = settings.get('AI_PIPELINE_MODEL', 'claude-opus-4-6')
 
     # ZAP Ajax Spider settings
@@ -1132,6 +1133,7 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
                     ai_per_target[url] = get_ai_extensions(
                         url, AI_PIPELINE_MODEL, max_extensions=6,
                         cache=fp_cache, user_id=user_id, project_id=project_id,
+                        engine=('jev' if FFUF_AI_USE_JEV else 'llm'),
                     )
                 # Union of per-target extensions (single ffuf job uses one -e list).
                 effective_extensions = sorted({e for exts in ai_per_target.values() for e in exts})

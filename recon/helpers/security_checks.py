@@ -240,6 +240,7 @@ _AI_CTX: Dict[str, Any] = {
     "model": "",
     "user_id": "",
     "project_id": "",
+    "engine": "llm",
     "cache": None,  # populated when enabled
 }
 
@@ -250,13 +251,14 @@ _AI_WAF_PRESENT_THRESHOLD = 70
 _AI_WAF_ABSENT_THRESHOLD = 30
 
 
-def _set_ai_ctx(enabled: bool, model: str, user_id: str, project_id: str) -> None:
+def _set_ai_ctx(enabled: bool, model: str, user_id: str, project_id: str, engine: str = "llm") -> None:
     """Initialize the per-scan AI classifier context. Called from
     run_security_checks() based on the WAF_AI_CLASSIFIER setting."""
     _AI_CTX["enabled"] = bool(enabled and model)
     _AI_CTX["model"] = model or ""
     _AI_CTX["user_id"] = user_id or ""
     _AI_CTX["project_id"] = project_id or ""
+    _AI_CTX["engine"] = engine or "llm"
     _AI_CTX["cache"] = {} if _AI_CTX["enabled"] else None
 
 
@@ -278,6 +280,7 @@ def _classify_waf_ai(response, response_time_ms: int = 0) -> Optional[Dict]:
         user_id=_AI_CTX["user_id"],
         project_id=_AI_CTX["project_id"],
         response_time_ms=response_time_ms,
+        engine=_AI_CTX["engine"],
     )
     if result.get("source") == "ai_unavailable":
         return None
@@ -796,7 +799,9 @@ def check_waf_bypass(
             ai_subdomain = _classify_waf_ai(subdomain_response)
             if ai_subdomain and ai_subdomain.get("waf_detected") and ai_subdomain.get("confidence", 0) >= _AI_WAF_PRESENT_THRESHOLD:
                 subdomain_has_waf = True
-                detection_method = "ai_classifier"
+                detection_method = ("jev_classifier"
+                                    if ai_subdomain.get("source") == "jev_classifier"
+                                    else "ai_classifier")
                 if not ai_ip:
                     ai_ip = _classify_waf_ai(ip_response)
                 if ai_ip and (ai_ip.get("waf_detected") and ai_ip.get("confidence", 0) >= _AI_WAF_PRESENT_THRESHOLD):
@@ -2824,6 +2829,7 @@ def run_security_checks(
     ai_model: str = '',
     ai_user_id: str = '',
     ai_project_id: str = '',
+    ai_engine: str = 'llm',
 ) -> Dict[str, Any]:
     """
     Run all enabled security checks on recon data.
@@ -2849,14 +2855,14 @@ def run_security_checks(
     try:
         return _run_security_checks(
             recon_data, enabled_checks, timeout, tls_expiry_days, max_workers,
-            ai_classifier_enabled, ai_model, ai_user_id, ai_project_id)
+            ai_classifier_enabled, ai_model, ai_user_id, ai_project_id, ai_engine)
     finally:
         _HH_SCOPE = None
 
 
 def _run_security_checks(recon_data, enabled_checks, timeout, tls_expiry_days, max_workers,
-                         ai_classifier_enabled, ai_model, ai_user_id, ai_project_id):
-    _set_ai_ctx(ai_classifier_enabled, ai_model, ai_user_id, ai_project_id)
+                         ai_classifier_enabled, ai_model, ai_user_id, ai_project_id, ai_engine='llm'):
+    _set_ai_ctx(ai_classifier_enabled, ai_model, ai_user_id, ai_project_id, ai_engine)
     if _AI_CTX["enabled"]:
         print(f"[*][WAF-AI] Classifier cascade enabled, model={_AI_CTX['model']}")
 

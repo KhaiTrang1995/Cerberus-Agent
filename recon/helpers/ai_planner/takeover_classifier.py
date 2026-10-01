@@ -30,7 +30,7 @@ from typing import Dict, Optional
 
 import requests
 
-from recon.helpers.ai_planner import agent_llm_gate, internal_key_headers
+from recon.helpers.ai_planner import agent_llm_gate, agent_jev_gate, internal_key_headers
 
 # Returned on any failure (network, auth, schema, validation). Keeps the
 # call graph defensive: callers always get a usable dict.
@@ -137,6 +137,7 @@ def classify_takeover_response(
     cache: Optional[Dict[str, Dict]] = None,
     user_id: str = '',
     project_id: str = '',
+    engine: str = 'llm',
 ) -> Dict:
     """
     Ask the agent whether *response_text* looks like a third-party SaaS
@@ -162,6 +163,7 @@ def classify_takeover_response(
         (0-100), source (str).
     """
     cache = cache if cache is not None else {}
+    _TAG = 'Takeover-Jev' if engine == 'jev' else 'Takeover-AI'
 
     if not response_text or not response_text.strip():
         return dict(SAFE_FALLBACK)
@@ -169,7 +171,7 @@ def classify_takeover_response(
     fp = _fingerprint(response_text, int(status_code or 0))
     if fp in cache:
         cached = cache[fp]
-        print(f"[+][Takeover-AI] Cache hit -> waf_block={cached.get('is_waf_block')} "
+        print(f"[+][{_TAG}] Cache hit -> waf_block={cached.get('is_waf_block')} "
               f"conf={cached.get('confidence')} ({hostname})")
         return cached
 
@@ -195,45 +197,47 @@ def classify_takeover_response(
         'user_id': user_id,
         'project_id': project_id,
     }
-    endpoint = f"{agent_api_url}/llm/takeover-classify"
-    print(f"[*][Takeover-AI] Calling agent {endpoint} with model={model} "
+    use_jev = engine == 'jev'
+    route = 'jev' if use_jev else 'llm'
+    endpoint = f"{agent_api_url}/{route}/takeover-classify"
+    print(f"[*][{_TAG}] Calling agent {endpoint} with model={model} "
           f"(host={hostname}, provider={expected_provider}, status={status_code}, body={len(body_sample)}B)")
 
-    gate = agent_llm_gate()
+    gate = agent_jev_gate() if use_jev else agent_llm_gate()
     if not gate.allowed:
-        print(f"[!][Takeover-AI] Agent LLM paused (breaker open) - using the fallback.")
+        print(f"[!][{_TAG}] Agent LLM paused (breaker open) - using the fallback.")
         return dict(SAFE_FALLBACK)
     try:
         resp = requests.post(endpoint, json=payload, headers=internal_key_headers(), timeout=LLM_TIMEOUT)
     except requests.RequestException as e:
         gate.record(exc=e)
-        print(f"[!][Takeover-AI] Agent request failed: {e}. Using safe fallback.")
+        print(f"[!][{_TAG}] Agent request failed: {e}. Using safe fallback.")
         return dict(SAFE_FALLBACK)
 
     gate.record(resp=resp)
     if resp.status_code != 200:
-        print(f"[!][Takeover-AI] Agent returned HTTP {resp.status_code}: "
+        print(f"[!][{_TAG}] Agent returned HTTP {resp.status_code}: "
               f"{resp.text[:200]}. Using safe fallback.")
         return dict(SAFE_FALLBACK)
 
     try:
         data = resp.json()
     except (json.JSONDecodeError, ValueError) as e:
-        print(f"[!][Takeover-AI] Agent returned non-JSON response: {e}. Using safe fallback.")
+        print(f"[!][{_TAG}] Agent returned non-JSON response: {e}. Using safe fallback.")
         return dict(SAFE_FALLBACK)
 
     validated = _validate_classification(data)
     if validated is None:
-        print(f"[!][Takeover-AI] Agent response failed schema validation: "
+        print(f"[!][{_TAG}] Agent response failed schema validation: "
               f"{str(data)[:200]}. Using safe fallback.")
         return dict(SAFE_FALLBACK)
 
     cache[fp] = validated
 
     if validated["is_waf_block"]:
-        print(f"[+][Takeover-AI] WAF block masquerading as takeover (confidence={validated['confidence']}): "
+        print(f"[+][{_TAG}] WAF block masquerading as takeover (confidence={validated['confidence']}): "
               f"{validated['reason'][:120]}")
     else:
-        print(f"[+][Takeover-AI] Genuine {expected_provider or 'third-party'} unclaimed page (confidence={validated['confidence']})")
+        print(f"[+][{_TAG}] Genuine {expected_provider or 'third-party'} unclaimed page (confidence={validated['confidence']})")
 
     return validated

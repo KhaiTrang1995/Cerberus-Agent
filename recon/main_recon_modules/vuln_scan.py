@@ -289,7 +289,9 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
     NUCLEI_INTERACTSH = settings.get('NUCLEI_INTERACTSH', True)
     NUCLEI_DOCKER_IMAGE = settings.get('NUCLEI_DOCKER_IMAGE', 'projectdiscovery/nuclei:latest')
     NUCLEI_AI_TAGS = settings.get('NUCLEI_AI_TAGS', False)
+    NUCLEI_TAGS_AI_USE_JEV = settings.get('NUCLEI_TAGS_AI_USE_JEV', False)
     WAF_AI_CLASSIFIER = settings.get('WAF_AI_CLASSIFIER', False)
+    WAF_AI_USE_JEV = settings.get('WAF_AI_USE_JEV', False)
     NUCLEI_AI_RESPONSE_FILTER = settings.get('NUCLEI_AI_RESPONSE_FILTER', False)
     AI_PIPELINE_MODEL = settings.get('AI_PIPELINE_MODEL', 'claude-opus-4-6')
     KATANA_DEPTH = settings.get('KATANA_DEPTH', 2)
@@ -500,6 +502,7 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
                 user_id=os.environ.get('USER_ID', ''),
                 project_id=os.environ.get('PROJECT_ID', ''),
                 fallback_urls=fallback_urls,
+                engine=('jev' if NUCLEI_TAGS_AI_USE_JEV else 'llm'),
             )
             if ai_tags != NUCLEI_TAGS:
                 ai_tags_used = True
@@ -1057,6 +1060,7 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
                 ai_model=AI_PIPELINE_MODEL,
                 ai_user_id=os.environ.get('USER_ID', ''),
                 ai_project_id=os.environ.get('PROJECT_ID', ''),
+                ai_engine=('jev' if WAF_AI_USE_JEV else 'llm'),
             )
 
             # Merge security checks into vuln_scan results
