@@ -274,6 +274,27 @@ def _gau_provider_paused(provider: str) -> bool:
     return any(cb.is_open(key) for key in _GAU_PROVIDER_BREAKERS.get(provider, ()))
 
 
+def _note_jsluice_feed_cut(feed_cut, crawl_urls, crawled_seeds) -> None:
+    """Keep jsluice's previous findings when the crawl that feeds it fell short.
+
+    jsluice only reads JS files the crawlers found, so a crawler that failed, or
+    a crawl that came back empty from its seeds, means its secrets were not
+    re-checked; without this the prune deletes them as if they were gone. A
+    crawl that found URLs but no JS is not a cut, and neither is a run with every
+    crawler switched off (`crawled_seeds` empty): that is the operator's choice.
+    """
+    if feed_cut:
+        reason = f"crawl incomplete ({', '.join(sorted(set(feed_cut)))})"
+    elif not crawl_urls and crawled_seeds:
+        reason = f"crawl returned no URLs from {len(crawled_seeds)} seed(s)"
+    else:
+        return
+    print(f"[!][jsluice] {reason}: keeping its previous findings out of the prune")
+    from recon.helpers import circuit_breaker as cb
+    cb.note_degraded("resource_enum", sources=("jsluice",),
+                     reason=f"{reason}, JS secrets not re-checked")
+
+
 def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, settings: dict = None) -> dict:
     """
     Run resource enumeration to discover and classify all endpoints.
@@ -572,6 +593,8 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
     # Pull Docker images and ensure Kiterunner binary in parallel
     print("\n[*][ResourceEnum] Setting up tools...")
     kr_binary_path = None
+    # Crawlers meant to feed jsluice that did not deliver (_note_jsluice_feed_cut).
+    jsluice_feed_cut = []
 
     with ThreadPoolExecutor(max_workers=5) as executor:
         if KATANA_ENABLED:
@@ -605,8 +628,10 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
 
         if KATANA_ENABLED and not _pull_ok(katana_future, "katana", "Katana"):
             KATANA_ENABLED = False
+            jsluice_feed_cut.append("katana")
         if HAKRAWLER_ENABLED and not _pull_ok(hakrawler_future, "hakrawler", "Hakrawler"):
             HAKRAWLER_ENABLED = False
+            jsluice_feed_cut.append("hakrawler")
         if GAU_ENABLED and not _pull_ok(gau_future, "gau", "GAU"):
             GAU_ENABLED = False
         if ZAP_AJAX_SPIDER_ENABLED and not _pull_ok(zap_ajax_future, "zap_ajax", "ZAP Ajax"):
@@ -926,6 +951,8 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
                 if name == 'katana':
                     katana_urls, katana_meta = future.result(timeout=KATANA_TIMEOUT + 120)
                     print(f"\n[+][Katana] Completed: {len(katana_urls)} URLs")
+                    if katana_meta.get("failed"):
+                        jsluice_feed_cut.append("katana")
                 elif name == 'hakrawler':
                     # HAKRAWLER_TIMEOUT is per URL; the crawl covers every seed.
                     hakrawler_wait = hakrawler_job_budget(
@@ -946,6 +973,13 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
                 # the operator what happened; and the result is now incomplete.
                 print(f"[!][ResourceEnum] {name} failed ({type(e).__name__}: {str(e) or 'no detail'}); "
                       f"continuing WITHOUT its URLs, so this run's URL coverage has a gap")
+                from recon.helpers import circuit_breaker as _cb
+                _cb.note_degraded("resource_enum", entries=[
+                    {"source": name, "reason": f"{type(e).__name__}: results lost",
+                     "skipped": len(target_domains) if name in ("gau", "paramspider")
+                     else len(target_urls)}])
+                if name in ("katana", "hakrawler"):
+                    jsluice_feed_cut.append(name)
 
     # Run Kiterunner in parallel for each wordlist
     if KITERUNNER_ENABLED and target_urls and kr_binary_path and KITERUNNER_WORDLISTS:
@@ -1048,6 +1082,10 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
 
     if JSLUICE_ENABLED and (JSLUICE_EXTRACT_URLS or JSLUICE_EXTRACT_SECRETS):
         all_crawl_urls = list(set(katana_urls + hakrawler_urls))
+        if JSLUICE_EXTRACT_SECRETS:
+            _note_jsluice_feed_cut(
+                jsluice_feed_cut, all_crawl_urls,
+                target_urls if (KATANA_ENABLED or HAKRAWLER_ENABLED) else [])
         if all_crawl_urls:
             jsluice_result = run_jsluice_analysis(
                 all_crawl_urls,
@@ -1096,6 +1134,8 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
                     print(f"[+][jsluice] Skipped (unverified): {jsluice_stats['jsluice_skipped_unverified']}")
             elif JSLUICE_VERIFY_URLS and jsluice_stats.get("jsluice_verify_total", 0) > 0:
                 print(f"[-][jsluice] No URLs survived validation ({jsluice_stats['jsluice_skipped_blacklist']} blacklisted, {jsluice_stats['jsluice_skipped_unverified']} unverified)")
+        else:
+            print("[-][jsluice] Skipped: the crawl returned no URLs to take JavaScript files from")
 
     # FFuf directory fuzzing (runs after crawlers and jsluice, before GAU merge)
     ffuf_stats = {

@@ -257,8 +257,8 @@ def run_hakrawler_crawler(
 
     # Skip a seed whose host another module already found unreachable: each
     # crawl otherwise costs its full per-seed timeout against a dead host. The
-    # discovered URLs land under source 'resource_enum', so the skip is
-    # reported per host and the prune keeps that host's endpoints.
+    # skip is noted per host (gap 'resource_enum'), so the prune keeps every
+    # finding on that host; Endpoints are assets, which the prune never touches.
     from recon.helpers import circuit_breaker as _cb
     _scope = _cb.scope((), label="Hakrawler", unit="seed(s)")
     live_urls = [u for u in valid_urls if not _scope.skip_if_down(u)]

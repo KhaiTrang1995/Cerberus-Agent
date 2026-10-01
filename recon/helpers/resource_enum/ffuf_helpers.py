@@ -217,9 +217,9 @@ def run_ffuf_discovery(
     print(f"[*][FFuf] Fuzz targets (root + base paths): {len(fuzz_targets)}")
 
     # Skip a fuzz target whose host another module already found unreachable:
-    # ffuf otherwise burns its per-target max_time against a dead host. Results
-    # land under source 'resource_enum', so the skip is reported per host and
-    # the prune keeps that host's endpoints.
+    # ffuf otherwise burns its per-target max_time against a dead host. The skip
+    # is noted per host (gap 'resource_enum'), so the prune keeps every finding
+    # on that host; Endpoints are assets, which the prune never touches.
     from recon.helpers import circuit_breaker as _cb
     _scope = _cb.scope((), label="FFuf", unit="target(s)")
     fuzz_targets = [u for u in fuzz_targets if not _scope.skip_if_down(u)]

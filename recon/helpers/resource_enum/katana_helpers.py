@@ -81,6 +81,11 @@ def run_katana_crawler(
     discovered_urls = set()
     filtered_out_of_scope = 0
     external_domain_entries = []  # Collect out-of-scope domains for situational awareness
+    # Katana exits 0 on a crawl that genuinely found nothing, so an empty result
+    # alone cannot be read as a failure; a non-zero exit, stderr output or an
+    # exception can. The caller uses this to keep the findings of the tools fed
+    # by this crawl (jsluice) out of the prune.
+    crawl_failed = False
 
     # Filter to valid HTTP(S) URLs
     valid_urls = [u for u in target_urls if u.startswith(('http://', 'https://'))]
@@ -258,6 +263,8 @@ def run_katana_crawler(
                     print(f"[!][Katana] Found 0 URLs in {elapsed:.1f}s "
                           f"(exit code {process.returncode}). Seed list: {url_file} "
                           f"({len(valid_urls)} URL(s))")
+                    if process.returncode != 0 or stderr_output.strip():
+                        crawl_failed = True
                     if stderr_output.strip():
                         print("[!][Katana] stderr:")
                         for line in stderr_output.strip().splitlines()[:20]:
@@ -267,6 +274,7 @@ def run_katana_crawler(
                               "but the target returned no crawlable links)")
 
         except Exception as e:
+            crawl_failed = True
             print(f"[!][Katana] Error: {e}")
 
     finally:
@@ -281,7 +289,7 @@ def run_katana_crawler(
     if filtered_out_of_scope > 0:
         print(f"[+][Katana] Filtered {filtered_out_of_scope} out-of-scope URLs")
 
-    return urls_list, {"external_domains": external_domain_entries}
+    return urls_list, {"external_domains": external_domain_entries, "failed": crawl_failed}
 
 
 def fetch_forms_from_urls(

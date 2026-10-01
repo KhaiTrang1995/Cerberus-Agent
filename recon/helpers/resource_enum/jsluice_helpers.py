@@ -13,7 +13,7 @@ import subprocess
 import urllib.request
 import uuid
 from pathlib import Path
-from typing import Dict, List, Set, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse, urljoin
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -53,6 +53,35 @@ def _jsl_failed(url, exc) -> None:
         else:
             from recon.helpers import circuit_breaker as cb
             cb.host_health.record_failure(url, exc)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _note_secrets_not_rechecked(reason: str) -> None:
+    """jsluice's secrets are findings: a run that could not re-check them must
+    keep the previous ones out of the prune instead of deleting them as gone."""
+    try:
+        from recon.helpers import circuit_breaker as cb
+        cb.note_degraded("resource_enum", sources=("jsluice",),
+                         reason=f"{reason}, JS secrets not re-checked")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _note_verification_failed(dropped: int, why: str) -> None:
+    """Record a coverage gap when the liveness check could not run.
+
+    The check fails closed (unverified URLs are not published), so a broken
+    httpx run drops every jsluice URL; without this the run looks complete.
+    The URLs are assets, not findings, so this is a gap only, not a prune cut.
+    """
+    try:
+        from recon.helpers import circuit_breaker as cb
+        cb.note_degraded("resource_enum", entries=[{
+            "source": "jsluice:verify",
+            "reason": f"URL verification failed ({why}), unverified URLs dropped",
+            "skipped": dropped,
+        }])
     except Exception:  # noqa: BLE001
         pass
 
@@ -229,10 +258,12 @@ def verify_jsluice_urls(
         except subprocess.TimeoutExpired:
             print("[!][jsluice] URL verification timeout; dropping unverified jsluice URLs")
             stats["jsluice_skipped_unverified"] = len(candidates)
+            _note_verification_failed(len(candidates), "timed out")
             return set(), stats
         except Exception as e:
             print(f"[!][jsluice] URL verification error: {e}; dropping unverified jsluice URLs")
             stats["jsluice_skipped_unverified"] = len(candidates)
+            _note_verification_failed(len(candidates), type(e).__name__)
             return set(), stats
 
         if proc.returncode != 0:
@@ -242,6 +273,7 @@ def verify_jsluice_urls(
                 f"dropping unverified jsluice URLs. stderr: {' | '.join(stderr_tail)}"
             )
             stats["jsluice_skipped_unverified"] = len(candidates)
+            _note_verification_failed(len(candidates), f"httpx exit {proc.returncode}")
             return set(), stats
 
         verified = set()
@@ -343,6 +375,8 @@ def run_jsluice_analysis(
     """
     if not shutil.which('jsluice'):
         print("[!][jsluice] jsluice binary not found in PATH, skipping")
+        if extract_secrets:
+            _note_secrets_not_rechecked("jsluice binary missing")
         return {"urls": [], "secrets": [], "external_domains": []}
 
     js_urls = [u for u in discovered_urls if _is_js_url(u)]
@@ -363,9 +397,16 @@ def run_jsluice_analysis(
     _JSLUICE_SCOPE = _cb.scope((), label="jsluice", unit="host(s)")
 
     try:
-        downloaded = _download_js_files(js_urls, work_dir, parallelism=parallelism)
+        download_errors = []
+        downloaded = _download_js_files(js_urls, work_dir, parallelism=parallelism,
+                                        errors=download_errors)
         if not downloaded:
             print("[-][jsluice] No JS files downloaded successfully")
+            # Every file answering non-200 means the files are gone and their
+            # secrets may be pruned; any fetch that raised means nothing was read.
+            if extract_secrets and download_errors:
+                _note_secrets_not_rechecked(
+                    f"no JS file downloaded ({len(download_errors)} fetch error(s))")
             return result
 
         print(f"[+][jsluice] Downloaded {len(downloaded)} JS files")
@@ -418,6 +459,7 @@ def run_jsluice_analysis(
                         all_secrets.extend(secrets)
                     except Exception as e:
                         print(f"[!][jsluice] Error: {e}")
+                        _note_secrets_not_rechecked(f"secret extraction raised ({type(e).__name__})")
 
             if all_secrets:
                 print(f"[+][jsluice] Found {len(all_secrets)} potential secrets in JS files")
@@ -564,12 +606,15 @@ def _download_js_files(
     js_urls: List[str],
     work_dir: Path,
     parallelism: int = 5,
+    errors: Optional[list] = None,
 ) -> Dict[str, str]:
     """Download JavaScript files to a local directory.
 
     Parallel (a dead host used to serialise 10s timeouts across the whole list)
     and host-gated: a host HostHealth already marked down is skipped, and each
     fetch records what it saw so a host that dies mid-download stops early.
+    ``errors``, when given, collects the URLs whose fetch raised, as opposed to
+    answering with a non-200 status.
     """
     ssl_context = ssl.create_default_context()
     ssl_context.check_hostname = False
@@ -616,6 +661,8 @@ def _download_js_files(
             return (url, filepath)
         except Exception as e:
             _jsl_failed(url, e)
+            if errors is not None:
+                errors.append(url)
             print(f"[!][jsluice] Failed to download {url}: {e}")
             return None
 
@@ -698,12 +745,17 @@ def _run_jsluice_secrets(
             except json.JSONDecodeError:
                 continue
 
+        if result.returncode != 0 and not entries:
+            print(f"[!][jsluice] Secret extraction exited with code {result.returncode}")
+            _note_secrets_not_rechecked(f"secret extraction exited {result.returncode}")
         return entries
     except subprocess.TimeoutExpired:
         print(f"[!][jsluice] Secret extraction timed out after {timeout}s")
+        _note_secrets_not_rechecked(f"secret extraction timed out after {timeout}s")
         return []
     except Exception as e:
         print(f"[!][jsluice] Secret extraction error: {e}")
+        _note_secrets_not_rechecked(f"secret extraction failed ({type(e).__name__})")
         return []
 
 
