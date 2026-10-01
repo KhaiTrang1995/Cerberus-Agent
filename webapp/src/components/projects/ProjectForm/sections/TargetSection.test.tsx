@@ -9,7 +9,7 @@
  * Run: npx vitest run src/components/projects/ProjectForm/sections/TargetSection.test.tsx
  */
 import { describe, test, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup, within } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, within, waitFor } from '@testing-library/react'
 import { TargetSection } from './TargetSection'
 import { groupHostsByRootDomain } from '@/lib/domainBatch'
 
@@ -197,5 +197,66 @@ describe('the wildcard Root control', () => {
   test('a literal-only list does not warn', () => {
     renderSection({ domainBatchMode: true, domainBatchHosts: ['api.a.com'] })
     expect(screen.queryByText(/will be\s+fully enumerated/i)).toBeNull()
+  })
+})
+
+describe('the AI in Pipeline panel', () => {
+  const HOOKS = ['ffufAiExtensions', 'nucleiAiTags', 'wafAiClassifier', 'nucleiAiResponseFilter', 'takeoverAiClassifier']
+  const AI_ON: Data = {
+    domainBatchMode: false, aiInPipeline: true,
+    ffufAiExtensions: true, nucleiAiTags: false, wafAiClassifier: true, nucleiAiResponseFilter: true,
+    takeoverAiClassifier: true,
+    ffufAiUseJev: false, nucleiTagsAiUseJev: false, wafAiUseJev: true, takeoverAiUseJev: false,
+  }
+
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => ({
+      ok: true, status: 200,
+      json: async () => url.includes('llm-providers') ? [{ id: 'j', providerType: 'jev', apiKey: '••••c0de', modelIdentifier: 'jev-1.13.0' }] : {},
+    })))
+  })
+  afterEach(() => vi.unstubAllGlobals())
+
+  test('the model picker and the Jev token sit side by side', async () => {
+    renderSection(AI_ON)
+    const panel = await screen.findByTestId('jev-token-panel')
+    const row = screen.getByText('AI Model').closest('div')!.parentElement!
+    expect(row).toContainElement(panel)
+  })
+
+  test('each hook is ONE card holding its label, summary, toggle and engine', () => {
+    renderSection(AI_ON)
+    for (const field of HOOKS) {
+      const card = screen.getByTestId(`ai-hook-${field}`)
+      expect(within(card).getByRole('switch')).toBeInTheDocument()
+      expect(within(card).getByText('Engine')).toBeInTheDocument()
+    }
+    expect(screen.getByTestId('ai-hook-list').children).toHaveLength(HOOKS.length)
+  })
+
+  test('the false-positive filter offers no Jev engine, and says why', () => {
+    renderSection(AI_ON)
+    const card = screen.getByTestId('ai-hook-nucleiAiResponseFilter')
+    expect(within(card).queryByRole('button', { name: 'Jev' })).not.toBeInTheDocument()
+    expect(within(card).getByText('LLM only')).toHaveAttribute('title', expect.stringMatching(/drop a finding/))
+  })
+
+  test('a hook that is off keeps its engine visible but disabled, with a reason that fits', () => {
+    renderSection(AI_ON)
+    const card = screen.getByTestId('ai-hook-nucleiAiTags')
+    const jev = within(card).getByRole('button', { name: 'Jev' })
+    expect(jev).toBeDisabled()
+    expect(jev).toHaveAttribute('title', 'Turn this hook on to choose its engine.')
+  })
+
+  test('picking an engine in a card writes that hook\'s own field, and the stored choice is shown', async () => {
+    const s = renderSection(AI_ON)
+    const ffuf = screen.getByTestId('ai-hook-ffufAiExtensions')
+    const jev = within(ffuf).getByRole('button', { name: 'Jev' })
+    await waitFor(() => expect(jev).toBeEnabled())          // once the token lookup says yes
+    fireEvent.click(jev)
+    expect(s.updateField).toHaveBeenCalledWith('ffufAiUseJev', true)
+    expect(within(screen.getByTestId('ai-hook-wafAiClassifier')).getByRole('button', { name: 'Jev' }))
+      .toHaveAttribute('aria-pressed', 'true')
   })
 })

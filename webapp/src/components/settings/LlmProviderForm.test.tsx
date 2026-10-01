@@ -348,3 +348,65 @@ describe('LlmProviderForm Jev branch', () => {
     }
   })
 })
+
+// Embedded in the project form (the Target AI panel), this form sits INSIDE a <form>.
+// A <button> with no type is a submit button there, and Enter in a text input
+// submits too: either would save the whole project from the token input.
+describe('LlmProviderForm inside another <form>', () => {
+  beforeEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+    toastSuccess.mockReset()
+    toastError.mockReset()
+  })
+  afterEach(cleanup)
+
+  function inOuterForm(props: Partial<React.ComponentProps<typeof LlmProviderForm>> = {}) {
+    const outerSubmit = vi.fn((e: React.FormEvent) => e.preventDefault())
+    render(
+      <form onSubmit={outerSubmit}>
+        <LlmProviderForm userId="user-1" lockedType="jev" embedded onSave={vi.fn()} onCancel={vi.fn()} {...props} />
+      </form>,
+    )
+    return outerSubmit
+  }
+
+  test('REGRESSION (untyped buttons submitted the enclosing form): Test and Save never submit it', async () => {
+    const fetchMock = mockFetch({ provider: { ok: true, status: 200, json: async () => ({ success: true }) } })
+    const outerSubmit = inOuterForm()
+    fireEvent.change(screen.getByPlaceholderText('apikey_...'), { target: { value: 'apikey_abc_def' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Test Connection' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save token' }))
+    await waitFor(() => expect(providerCalls(fetchMock)).toHaveLength(2))
+    expect(outerSubmit).not.toHaveBeenCalled()
+    for (const button of screen.getAllByRole('button')) expect(button).toHaveAttribute('type', 'button')
+  })
+
+  test('REGRESSION: Enter in the key field does not submit the enclosing form', () => {
+    mockFetch({})
+    const outerSubmit = inOuterForm()
+    const input = screen.getByPlaceholderText('apikey_...')
+    fireEvent.change(input, { target: { value: 'apikey_abc_def' } })
+    const notCancelled = fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' })
+    expect(notCancelled).toBe(false)             // default prevented: no implicit submit
+    expect(outerSubmit).not.toHaveBeenCalled()
+  })
+
+  test('embedded: no frame title, no Cancel, no pinned-model block; Save sits beside Test', () => {
+    mockFetch({})
+    inOuterForm()
+    expect(screen.queryByText(/Add TypeSafe AI \(Jev\) Provider/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('jev-model')).not.toBeInTheDocument()
+    const test = screen.getByRole('button', { name: 'Test Connection' })
+    expect(test.parentElement).toContainElement(screen.getByRole('button', { name: 'Save token' }))
+  })
+
+  test('not embedded (Global Settings) is unchanged: title, Cancel and the model line are there', () => {
+    mockFetch({})
+    render(<LlmProviderForm userId="user-1" lockedType="jev" onSave={vi.fn()} onCancel={vi.fn()} />)
+    expect(screen.getByText(/Add TypeSafe AI \(Jev\) Provider/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+    expect(screen.getByTestId('jev-model')).toHaveTextContent('jev-1.13.0')
+  })
+})

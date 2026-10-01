@@ -12,6 +12,8 @@ interface JevEngineControlProps {
   /** Whether AI is active for this hook (aiInPipeline, and any per-hook flag). */
   enabled: boolean
   jevStatus: JevProviderStatus
+  /** Why the control is disabled when `enabled` is false. Defaults to the master switch. */
+  disabledHint?: string
 }
 
 /**
@@ -22,7 +24,7 @@ interface JevEngineControlProps {
  * badge says so. Switching a disabled-but-selected Jev back to LLM is allowed.
  * The server (validateJevEngineChange) is the authority on a switch-on.
  */
-export function JevEngineControl({ value, onSelect, enabled, jevStatus }: JevEngineControlProps) {
+export function JevEngineControl({ value, onSelect, enabled, jevStatus, disabledHint }: JevEngineControlProps) {
   const noToken = jevStatus === 'no'
   const loading = jevStatus === 'loading'
   const error = jevStatus === 'error'
@@ -31,7 +33,7 @@ export function JevEngineControl({ value, onSelect, enabled, jevStatus }: JevEng
   const jevButtonDisabled = !enabled || loading || (noToken && !value)
 
   const jevTitle = !enabled
-    ? 'Enable "AI in Pipeline" in the Target tab to choose an engine.'
+    ? disabledHint ?? 'Enable "AI in Pipeline" in the Target tab to choose an engine.'
     : loading
     ? 'Checking whether you have a Jev token…'
     : noToken
@@ -46,6 +48,7 @@ export function JevEngineControl({ value, onSelect, enabled, jevStatus }: JevEng
           className={`${styles.option} ${!value ? styles.active : ''}`}
           aria-pressed={!value}
           disabled={!enabled}
+          title={!enabled ? jevTitle : 'Answer this hook with the LLM in the AI Model picker.'}
           onClick={() => onSelect(false)}
         >
           LLM

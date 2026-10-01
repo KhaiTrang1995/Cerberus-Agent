@@ -25,6 +25,12 @@ interface LlmProviderFormProps {
    * (Jev) are only reachable this way: the generic picker never lists them.
    */
   lockedType?: 'jev'
+  /**
+   * Rendered inside another panel (the project form's AI panel): no frame, no
+   * title, no Cancel, and the pinned-model block shortened to a hint, because the
+   * host panel already says what this is.
+   */
+  embedded?: boolean
 }
 
 export interface ProviderData {
@@ -68,7 +74,7 @@ const EMPTY_PROVIDER: ProviderData = {
   awsBearerToken: '',
 }
 
-export function LlmProviderForm({ userId, provider, existingProviderTypes = [], onSave, onCancel, onDirtyChange, lockedType }: LlmProviderFormProps) {
+export function LlmProviderForm({ userId, provider, existingProviderTypes = [], onSave, onCancel, onDirtyChange, lockedType, embedded = false }: LlmProviderFormProps) {
   const isEditing = !!provider?.id
   const toast = useToast()
   const [form, setForm] = useState<ProviderData>(() => ({
@@ -220,7 +226,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
           {PROVIDER_TYPES.filter(pt => !NON_CHAT_PROVIDER_TYPES.has(pt.id)).map(pt => {
             const alreadyAdded = pt.id !== 'openai_compatible' && existingProviderTypes.includes(pt.id)
             return (
-              <button
+              <button type="button"
                 key={pt.id}
                 className={styles.providerTypeCard}
                 onClick={() => selectType(pt.id)}
@@ -240,7 +246,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
           })}
         </div>
         <div className={styles.formActions}>
-          <button className="secondaryButton" onClick={() => guardedNavigate(onCancel)}>Cancel</button>
+          <button type="button" className="secondaryButton" onClick={() => guardedNavigate(onCancel)}>Cancel</button>
         </div>
       </div>
     )
@@ -255,16 +261,36 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
   const isJev = ptype === 'jev'
   const apiKeyUrl = providerDef?.apiKeyUrl
   const apiKeyLinkLabel = isBedrock ? 'Get AWS credentials' : 'Get API key'
+  const saveButton = (
+    <button type="button"
+      className="primaryButton"
+      onClick={handleSave}
+      disabled={
+        saving ||
+        !isDirty ||
+        !form.name ||
+        (!isCompat && !form.apiKey && !isBedrock) ||
+        (isBedrock && bedrockAuth === 'iam' && (!form.awsAccessKeyId || !form.awsSecretKey)) ||
+        (isBedrock && bedrockAuth === 'bearer' && !form.awsBearerToken) ||
+        (isCompat && (!form.baseUrl || !form.modelIdentifier))
+      }
+    >
+      {saving ? <Loader2 size={14} className={styles.spin} /> : null}
+      {embedded ? 'Save token' : `${isEditing ? 'Update' : 'Save'} Provider`}
+    </button>
+  )
   return (
-    <div className={styles.formSection}>
-      <div className={styles.formHeader}>
-        <h3 className={styles.formTitle}>
-          {isEditing ? 'Edit' : 'Add'} {providerDef?.name || ptype} Provider
-        </h3>
-        {!isEditing && !lockedType && (
-          <button className="textButton" onClick={() => setStep('type')}>Change type</button>
-        )}
-      </div>
+    <div className={embedded ? styles.formEmbedded : styles.formSection}>
+      {!embedded && (
+        <div className={styles.formHeader}>
+          <h3 className={styles.formTitle}>
+            {isEditing ? 'Edit' : 'Add'} {providerDef?.name || ptype} Provider
+          </h3>
+          {!isEditing && !lockedType && (
+            <button type="button" className="textButton" onClick={() => setStep('type')}>Change type</button>
+          )}
+        </div>
+      )}
       {apiKeyUrl && (
         <a
           href={apiKeyUrl}
@@ -299,6 +325,9 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
               type={showApiKey ? 'text' : 'password'}
               value={form.apiKey}
               onChange={e => updateForm('apiKey', e.target.value)}
+              // Inside the project form, Enter would submit the whole project.
+              onKeyDown={e => { if (e.key === 'Enter') e.preventDefault() }}
+              aria-label={isJev ? 'TypeSafe Jev API key' : 'API key'}
               placeholder={isJev ? 'apikey_...' : 'sk-...'}
             />
             <button
@@ -312,7 +341,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
         </div>
       )}
 
-      {isJev && (
+      {isJev && !embedded && (
         <div className="formGroup">
           <label className="formLabel">Model</label>
           <div className={styles.readonlyValue} data-testid="jev-model">{JEV_MODEL}</div>
@@ -496,7 +525,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
               <div key={k} className={styles.headerRow}>
                 <code className={styles.headerKey}>{k}</code>
                 <code className={styles.headerValue}>{v}</code>
-                <button className={styles.headerRemove} onClick={() => removeHeader(k)}>
+                <button type="button" className={styles.headerRemove} onClick={() => removeHeader(k)}>
                   <Trash2 size={12} />
                 </button>
               </div>
@@ -516,7 +545,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
                 placeholder="Value"
                 style={{ flex: 1 }}
               />
-              <button className="secondaryButton" onClick={addHeader} disabled={!headerKey.trim()}>
+              <button type="button" className="secondaryButton" onClick={addHeader} disabled={!headerKey.trim()}>
                 <Plus size={12} />
               </button>
             </div>
@@ -585,7 +614,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
         </div>
       )}
       <div className={styles.testSection}>
-        <button
+        <button type="button"
           className="secondaryButton"
           onClick={handleTest}
           // Never gate on 'unknown': a slow probe must not block a working setup.
@@ -597,6 +626,7 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
           {testing ? <Loader2 size={14} className={styles.spin} /> : null}
           {testing ? 'Testing...' : 'Test Connection'}
         </button>
+        {embedded && saveButton}
         {testResult && (
           <div className={`${styles.testResult} ${testResult.success ? styles.testSuccess : styles.testError}`}>
             {testResult.success ? <CheckCircle size={14} /> : <XCircle size={14} />}
@@ -605,26 +635,12 @@ export function LlmProviderForm({ userId, provider, existingProviderTypes = [], 
         )}
       </div>
 
-      {/* Actions */}
-      <div className={styles.formActions}>
-        <button className="secondaryButton" onClick={() => guardedNavigate(onCancel)}>Cancel</button>
-        <button
-          className="primaryButton"
-          onClick={handleSave}
-          disabled={
-            saving ||
-            !isDirty ||
-            !form.name ||
-            (!isCompat && !form.apiKey && !isBedrock) ||
-            (isBedrock && bedrockAuth === 'iam' && (!form.awsAccessKeyId || !form.awsSecretKey)) ||
-            (isBedrock && bedrockAuth === 'bearer' && !form.awsBearerToken) ||
-            (isCompat && (!form.baseUrl || !form.modelIdentifier))
-          }
-        >
-          {saving ? <Loader2 size={14} className={styles.spin} /> : null}
-          {isEditing ? 'Update' : 'Save'} Provider
-        </button>
-      </div>
+      {!embedded && (
+        <div className={styles.formActions}>
+          <button type="button" className="secondaryButton" onClick={() => guardedNavigate(onCancel)}>Cancel</button>
+          {saveButton}
+        </div>
+      )}
     </div>
   )
 }

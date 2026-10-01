@@ -2173,19 +2173,6 @@
 
 /* A list inside a panel sits recessed like a field, so its rows read as one
    control rather than more of the panel. */
-.nestedList {
-  max-height: 240px;
-  overflow-y: auto;
-  padding: 0 var(--space-3);
-  background: var(--form-field-bg);
-  border: 1px solid var(--form-field-border);
-  border-radius: var(--radius-default);
-}
-
-.nestedList > .toggleRow {
-  gap: var(--space-3);
-}
-
 .statusLine {
   padding: 8px 12px;
   font-size: 11px;
