@@ -5,6 +5,7 @@ import prisma from '@/lib/prisma'
 import { getGraphSession } from '@/app/api/graph/neo4j'
 import { isBlankModelField } from '@/components/projects/ProjectForm/projectLlmGate.logic'
 import { requireEffectiveUser, ownerScope } from '@/lib/access'
+import { validateJevEngineChange } from '@/lib/reconSettings/jevEngine'
 import { validateDomainBatch, splitWildcard } from '@/lib/domainBatch'
 
 const AGENT_API_URL = process.env.AGENT_API_URL || 'http://localhost:8080'
@@ -118,6 +119,13 @@ export async function POST(request: NextRequest) {
         { error: 'name is required' },
         { status: 400 }
       )
+    }
+
+    // A new project starts with every engine on the LLM, so any Jev flag in the
+    // body is a switch-on and needs a Jev token on the creating user's account.
+    const jevError = await validateJevEngineChange(null, optionalParams, userId)
+    if (jevError) {
+      return NextResponse.json({ error: jevError }, { status: 400 })
     }
 
     // A client-supplied id becomes the project's primary key AND a path/pattern

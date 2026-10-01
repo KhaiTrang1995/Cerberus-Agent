@@ -35,6 +35,7 @@ import {
 } from '@/lib/reconSettings/filter'
 import { enforceRate, type McpContext } from '@/lib/mcp/tools'
 import { validateCrossFieldRules, writeFireteamAudit } from '@/lib/reconSettings/crossField'
+import { validateJevEngineChange } from '@/lib/reconSettings/jevEngine'
 
 const RECON_ORCHESTRATOR_URL = process.env.RECON_ORCHESTRATOR_URL || 'http://localhost:8010'
 
@@ -275,7 +276,7 @@ export async function updateReconSettings(
 
   const before = await prisma.project.findUnique({
     where: { id: projectId },
-    select: { ...reconSettingsSelect(), updatedAt: true },
+    select: { ...reconSettingsSelect(), updatedAt: true, userId: true },
   })
   if (!before) throw new McpToolError('Project not found', 'not_found')
 
@@ -286,6 +287,12 @@ export async function updateReconSettings(
     { ...(before as Record<string, unknown>), ...filtered.data }, Object.keys(filtered.data), ctx.token.userId
   )
   if (crossField) throw new McpToolError(crossField, 'setting_rejected')
+
+  // A switch onto the Jev engine needs a Jev token on the project OWNER's
+  // account (not the token's user): recon resolves credentials from the owner.
+  const jevError = await validateJevEngineChange(
+    before as Record<string, unknown>, filtered.data, before.userId)
+  if (jevError) throw new McpToolError(jevError, 'setting_rejected')
 
   // Always a compare-and-swap, on the caller's expectedUpdatedAt or else on the
   // value just read. Without the second, two agents writing at once each read,

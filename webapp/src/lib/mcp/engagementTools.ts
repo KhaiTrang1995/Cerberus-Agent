@@ -57,6 +57,7 @@ import { settingsFingerprint } from '@/lib/jobQueue'
 import { filterReconSettings, reconSettingsSelect } from '@/lib/reconSettings/filter'
 import { fieldsWhere, field, loadRegistry } from '@/lib/reconSettings/registry'
 import { checkHeader, isInsideProjectFileRoot } from '@/lib/reconSettings/validators'
+import { validateJevEngineChange } from '@/lib/reconSettings/jevEngine'
 
 // --- create_project -----------------------------------------------------------------
 
@@ -309,6 +310,11 @@ export async function createProject(ctx: McpContext, args: CreateProjectArgs) {
   }
 
   if (args.settings) Object.assign(data, filterSettingsAtCreate(args.settings))
+
+  // A new project starts with every engine on the LLM, so a Jev flag in the
+  // settings is a switch-on and needs a Jev token on the creating account.
+  const jevError = await validateJevEngineChange(null, data, ctx.token.userId)
+  if (jevError) throw new McpToolError(jevError, 'setting_rejected')
 
   // The rule third_party projects live under, checked BEFORE the row exists so
   // a refused creation leaves nothing behind.

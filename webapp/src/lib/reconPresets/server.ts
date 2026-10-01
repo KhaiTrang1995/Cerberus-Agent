@@ -24,6 +24,7 @@ import { DENY_REASON_DOC } from '@/lib/reconSettings/filter'
 import { field, type RegistryField } from '@/lib/reconSettings/registry'
 import { validateValue } from '@/lib/reconSettings/validators'
 import { validateCrossFieldRules } from '@/lib/reconSettings/crossField'
+import { JEV_VERIFY_FAILED, jevSwitchedOn, validateJevEngineChange } from '@/lib/reconSettings/jevEngine'
 
 /** Constants rather than env vars: an env var would need the four-hop deploy chain. */
 export const MAX_USER_PRESETS = 200
@@ -382,5 +383,22 @@ export async function validateApplication(
   const crossField = await validateCrossFieldRules(
     { ...currentRow, ...application.data }, application.changed, actorUserId
   )
-  return crossField ? { key: '', error: crossField } : null
+  if (crossField) return { key: '', error: crossField }
+
+  // A saved preset may name an engine flag. Switching a hook onto Jev needs a
+  // token on the project OWNER's account, and the row selected for an apply is
+  // limited to readable fields, so the owner is looked up here, only when a
+  // switch-on is actually in play. The key stays '' so the caller does not tell
+  // the person to re-save the preset: the fix is a token, not a different preset.
+  if (jevSwitchedOn(currentRow, application.data).length > 0) {
+    let owner: string | null = null
+    try {
+      owner = (await prisma.project.findUnique({ where: { id: projectId }, select: { userId: true } }))?.userId ?? null
+    } catch {
+      return { key: '', error: JEV_VERIFY_FAILED.replace(/\.$/, '') }
+    }
+    const jevError = await validateJevEngineChange(currentRow, application.data, owner)
+    if (jevError) return { key: '', error: jevError.replace(/\.$/, '') }
+  }
+  return null
 }

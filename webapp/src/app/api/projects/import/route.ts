@@ -22,6 +22,7 @@ import {
 } from '@/lib/reconPresets/server'
 import { MUTEABLE_FINDING_LABELS } from '@/lib/mcp/findingLabels'
 import { pickProjectColumns } from '@/lib/projectColumns'
+import { jevImportWarnings } from '@/lib/reconSettings/jevEngine'
 
 const MUTEABLE_LABELS = new Set<string>(MUTEABLE_FINDING_LABELS)
 
@@ -756,11 +757,16 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // Kept as imported, not refused: a bundle exported from an account with a
+    // Jev token must still import elsewhere. The warning says what will fall back.
+    const warnings = await jevImportWarnings(projectFields, userId)
+
     return NextResponse.json({
       success: true,
       projectId: newProject.id,
       projectName: newProject.name,
       stats,
+      warnings,
     })
   } catch (error) {
     console.error('Import failed:', error)

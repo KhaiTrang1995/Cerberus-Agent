@@ -19,6 +19,7 @@ import { canonicalJson } from '@/lib/fingerprint'
 import { field, fieldsWhere } from '@/lib/reconSettings/registry'
 import { STALE_SAVE_MESSAGE } from '@/lib/projectVersion'
 import { validateCrossFieldRules, writeFireteamAudit } from '@/lib/reconSettings/crossField'
+import { validateJevEngineChange } from '@/lib/reconSettings/jevEngine'
 import { seedProjectDomains } from '@/lib/graphSeedDomains'
 
 // Path to output directories (fallback for local deletion)
@@ -262,6 +263,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       select: {
         domainBatchMode: true, domainBatchGroups: true,
         userId: true, targetGuardrailEnabled: true,
+        ffufAiUseJev: true, nucleiTagsAiUseJev: true, wafAiUseJev: true, takeoverAiUseJev: true,
       },
     })
     const willBeBatch = 'domainBatchMode' in updateData
@@ -384,6 +386,13 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
     const crossFieldError = await validateCrossFieldRules(updateData, Object.keys(updateData), eff.userId)
     if (crossFieldError) {
       return NextResponse.json({ error: crossFieldError }, { status: 400 })
+    }
+
+    // A switch onto the Jev engine needs a Jev token on the OWNER's account. The
+    // form's own token lookup is a convenience; this is the authority.
+    if (existing) {
+      const jevError = await validateJevEngineChange(existing, updateData, existing.userId)
+      if (jevError) return NextResponse.json({ error: jevError }, { status: 400 })
     }
 
     // The values being replaced, for the fireteam audit and the save's own.
