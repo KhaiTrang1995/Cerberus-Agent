@@ -8,7 +8,8 @@ description: >
   Trigger: adding or editing a recon AI hook; a new
   recon/helpers/ai_planner/{tool}_{feature}.py; a /llm/{tool}-{feature} endpoint
   in agentic/api.py; a data.{tool}Ai{feature} toggle; editing
-  apply_ai_pipeline_overrides in recon/project_settings.py.
+  apply_ai_pipeline_overrides in recon/project_settings.py; an LLM | Jev engine
+  switch (a {tool}AiUseJev field, a /jev/* endpoint, agent_jev_gate).
 license: MIT
 metadata:
   author: redamon
@@ -17,6 +18,7 @@ metadata:
   auto_invoke:
     - "Wiring an LLM into a recon tool's decisions (AI in pipeline)"
     - "Adding or editing a recon/helpers/ai_planner hook or its /llm endpoint"
+    - "Adding an LLM | Jev engine switch to a recon AI hook"
 ---
 
 ## When to Use
@@ -51,6 +53,24 @@ that toggles it, use `project-settings-cascade`.
   The cache is checked first so a cached answer is still served while the breaker
   is open. This is the same never-raise/never-empty fallback as above — the
   breaker just skips the call that would fail anyway when the agent is down.
+- **A hook with an LLM | Jev engine switch takes `engine: str = "llm"` and uses
+  its OWN breaker.** `engine == "jev"` posts to `/jev/<hook>` (same request body,
+  same response shape as `/llm/<hook>`, so the existing validator is reused),
+  takes `agent_jev_gate()` and logs `[*][<Tool>-Jev]`. Never record a Jev outcome
+  on `agent_llm`: that breaker marks 401/402/403 FATAL for the whole run, so a Jev
+  auth or credit failure would silence every LLM hook. The Jev gate reads the
+  agent's 503 `error_type` (no token, auth, no credit, forbidden are FATAL; rate
+  limited carries `retry_after`; the rest are transient). A Jev failure uses the
+  hook's static fallback: never re-route to the LLM, never return empty.
+- **The engine field is the THIRD level, and the master switch must not touch
+  it.** `aiInPipeline` forces each per-hook AI flag; the `{tool}AiUseJev` engine
+  fields stay OUT of `apply_ai_pipeline_overrides`, are in `KEPT_WHEN_ABSENT`
+  (`webapp/src/lib/project-preset-utils.ts`) so a preset apply does not reset
+  them, and a switch-ON is refused server-side unless the project OWNER has a Jev
+  token (`validateJevEngineChange`, every write path, fail closed). Give a hook a
+  Jev engine only when a wrong answer cannot drop a finding: the Nuclei
+  false-positive filter deletes findings from target-controlled bytes and has no
+  Jev engine.
 - **NEVER hook the AI separately in partial recon.** Most tools share one entry
   function (e.g. `run_vuln_scan` is called by both `main_recon_modules/` and
   `partial_recon_modules/`); hook it **once** and both paths inherit. `grep` the

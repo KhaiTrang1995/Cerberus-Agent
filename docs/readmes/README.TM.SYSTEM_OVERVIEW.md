@@ -46,6 +46,7 @@
 | Graph DB | **Neo4j 5.26 Community** + APOC plugin; bolt protocol (`docker-compose.yml`) |
 | AI agent | **Python / FastAPI / Uvicorn**, **LangGraph + LangChain**, LangGraph Postgres checkpointer (`agentic/`) |
 | LLM providers | OpenAI, Anthropic, Google Gemini, AWS Bedrock, OpenRouter, DeepSeek, Mistral, XAI, Qwen, GLM, Kimi, plus OpenAI-compatible / Ollama-local custom (`agentic/orchestrator_helpers/model_providers.py`) |
+| Decision model (non-chat) | **TypeSafe AI (Jev)**, `api.typesafe.ai`, called only by the agent (`agentic/jev_client.py`, `agentic/jev_hooks.py`) for four recon AI hooks when a project's `*AiUseJev` engine flag is on. The one external service that receives **target-derived data** (response headers, body sample, tech fingerprint) besides the LLM provider the project's model routes to |
 | Recon orchestration | **Python / FastAPI**, **Docker SDK** (`recon_orchestrator/`) — spawns scan containers |
 | Offensive tooling (MCP) | **Kali sandbox** exposing **MCP servers over SSE**: network-recon, nmap, nuclei, metasploit, playwright; plus interactive terminal + tunnel manager (`mcp/servers/`) |
 | Privilege separation | **docker-broker** — filtering reverse proxy for the Docker socket (`services/docker_broker/`) |
@@ -119,6 +120,7 @@ graph TD
 | User password hashes (`users.password`, bcrypt) | Auth data | **CRITICAL** | Operator account takeover |
 | `AUTH_SECRET` (JWT signing key) | Cryptographic key | **CRITICAL** | Session forgery / full UI auth bypass |
 | LLM provider API keys (`user_llm_providers`: `apiKey`, `awsAccessKeyId`, `awsSecretKey`, `awsBearerToken`) | Credentials | **CRITICAL** | Cloud/LLM billing abuse, lateral cloud access |
+| TypeSafe AI (Jev) token (`user_llm_providers` row with `providerType = 'jev'`, one per user, plaintext like every provider key) | Credential | **HIGH** | TypeSafe billing abuse (about $0.04 per million input tokens). Read unmasked only by the agent, per call, and sent only in the `Authorization` header to `api.typesafe.ai` (a constant URL, redirects refused). Never in a scan container, a log (the redaction filter knows the key shape), an error body, an MCP output or an export. The type is locked on update and test, so a stored token cannot be re-pointed at another host |
 | ~35 OSINT/recon service keys (`user_settings`: Shodan, Censys, VirusTotal, GitHub token, FOFA, Tavily, ngrok, etc.) | Credentials | **CRITICAL** | Third-party account abuse, data leakage |
 | Discovered secrets in graph (`GithubSecret`, `MultiscannerFinding`, `Secret` nodes) | Harvested credentials | **CRITICAL** | Target compromise; secondary breach |
 | Neo4j credentials (`NEO4J_PASSWORD`) | DB credential | **CRITICAL** | Full read/write of all engagement findings |
@@ -590,7 +592,7 @@ Notable internal reachability: the webapp is the only container multi-homed onto
 
 ### 6.9 Egress (outbound)
 
-Outbound connections leave the host to: external **LLM providers** (agent, per-user keys), ~35 **OSINT/recon APIs** (scanners; and the webapp, which calls provider account/usage endpoints on demand for the API usage report, off with `API_USAGE_CHECK_ENABLED=false`), **scan targets** (Kali tools and recon probes, on the host network / `pentest-net`), **upstream feeds** (KB ingestion, MSF/Nuclei/image updates), and **tunnel edges** (ngrok cloud / chisel server) when `TUNNELS_ENABLED` and a tunnel is configured. The reverse-shell catcher (`4444`) accepts inbound from engagement targets only when opened per-engagement (`./deploy.sh revshell-open`).
+Outbound connections leave the host to: external **LLM providers** (agent, per-user keys), **TypeSafe AI** (`api.typesafe.ai`; agent only, per-user token, and only for a project whose AI hook engine is set to Jev: it carries the target's response headers, body sample and tech fingerprint, wrapped as untrusted data, so enabling it makes TypeSafe a third party that receives target data), ~35 **OSINT/recon APIs** (scanners; and the webapp, which calls provider account/usage endpoints on demand for the API usage report, off with `API_USAGE_CHECK_ENABLED=false`), **scan targets** (Kali tools and recon probes, on the host network / `pentest-net`), **upstream feeds** (KB ingestion, MSF/Nuclei/image updates), and **tunnel edges** (ngrok cloud / chisel server) when `TUNNELS_ENABLED` and a tunnel is configured. The reverse-shell catcher (`4444`) accepts inbound from engagement targets only when opened per-engagement (`./deploy.sh revshell-open`).
 
 ---
 
