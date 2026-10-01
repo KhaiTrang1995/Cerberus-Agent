@@ -250,6 +250,11 @@ _AI_CTX: Dict[str, Any] = {
 _AI_WAF_PRESENT_THRESHOLD = 70
 _AI_WAF_ABSENT_THRESHOLD = 30
 
+#: detection_method values for a WAF found by the AI cascade, one per engine. Every
+#: branch that attaches the AI fields to a finding tests membership here, so a new
+#: engine is added in one place and cannot be recorded but then handled as "static".
+_AI_DETECTION_METHODS = ("ai_classifier", "jev_classifier")
+
 
 def _set_ai_ctx(enabled: bool, model: str, user_id: str, project_id: str, engine: str = "llm") -> None:
     """Initialize the per-scan AI classifier context. Called from
@@ -812,12 +817,12 @@ def check_waf_bypass(
         # WAF bypass: subdomain has WAF but IP doesn't, and IP returns valid response
         if subdomain_has_waf and not ip_has_waf and ip_response.status_code < 500:
             waf_label = (
-                ai_subdomain.get("waf_type") if (detection_method == "ai_classifier" and ai_subdomain)
+                ai_subdomain.get("waf_type") if (detection_method in _AI_DETECTION_METHODS and ai_subdomain)
                 else (subdomain_server or "unknown")
             )
             evidence = (
                 f"AI classifier flagged subdomain as {waf_label} (confidence={ai_subdomain.get('confidence')}); IP response did not match WAF fingerprint"
-                if detection_method == "ai_classifier" and ai_subdomain
+                if detection_method in _AI_DETECTION_METHODS and ai_subdomain
                 else f"WAF detected on subdomain ({subdomain_server}) but not on IP"
             )
             finding = {
@@ -835,7 +840,7 @@ def check_waf_bypass(
                 "evidence": evidence,
                 "detection_method": detection_method,
             }
-            if detection_method == "ai_classifier" and ai_subdomain:
+            if detection_method in _AI_DETECTION_METHODS and ai_subdomain:
                 finding["waf_type"] = ai_subdomain.get("waf_type")
                 finding["waf_confidence"] = ai_subdomain.get("confidence")
                 finding["ai_reasoning"] = ai_subdomain.get("reasoning")

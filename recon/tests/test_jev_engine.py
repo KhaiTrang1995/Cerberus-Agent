@@ -330,3 +330,35 @@ def test_a_takeover_below_the_threshold_is_not_annotated_at_all():
                        return_value=verdict):
         st._apply_ai_waf_disambiguation([finding], "m", "u", "p", engine="jev")
     assert "ai_waf_likely" not in finding and "ai_engine" not in finding
+
+
+@pytest.mark.parametrize("engine,source", [("jev", "jev_classifier"), ("llm", "ai_classifier")])
+def test_an_ai_waf_bypass_finding_keeps_the_waf_type_confidence_and_evidence_whatever_the_engine(
+        engine, source, ai_ctx_reset):
+    """REGRESSION (Jev WAF bypass finding lost its AI fields): only the assignment of
+    detection_method learned about "jev_classifier"; three later checks still compared
+    it to "ai_classifier", so a Jev-detected bypass fell into the static-header branch:
+    waf_label came from the (empty) Server header and the type, confidence and reasoning
+    were never attached. The evidence/description are what the graph persists."""
+    sc._set_ai_ctx(True, "m", "u", "p", engine)
+    sub = _http_resp(403, {"Server": "nginx"}, b"<html>Attention Required</html>")
+    ip = _http_resp(200, {"Server": "nginx"}, b"<html>origin</html>")
+
+    def fake_classify(response, response_time_ms=0):
+        if response is sub:
+            return {"waf_detected": True, "waf_type": "cloudflare", "confidence": 92,
+                    "reasoning": "challenge page", "source": source}
+        return {"waf_detected": False, "waf_type": None, "confidence": 80, "reasoning": "", "source": source}
+
+    with mock.patch("recon.helpers.security_checks.requests.get", side_effect=[sub, ip]), \
+            mock.patch.object(sc, "_waf_payload_differential", return_value=None), \
+            mock.patch.object(sc, "_classify_waf_ai", side_effect=fake_classify):
+        result = sc.check_waf_bypass("api.target.com", "1.2.3.4")
+
+    assert result["detection_method"] == source
+    assert result["waf_type"] == "cloudflare"
+    assert result["waf_confidence"] == 92
+    assert result["ai_reasoning"] == "challenge page"
+    assert "cloudflare" in result["description"]
+    assert "AI classifier flagged subdomain as cloudflare" in result["evidence"]
+    assert "(unknown)" not in result["description"] and "()" not in result["evidence"]
