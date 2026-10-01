@@ -24,6 +24,109 @@ _PROBED_ENDPOINT = """
                 WITH b, head(collect(probe)) AS probe
 """
 
+#: Rebuilds the http_probe by_url "technologies" strings the full pipeline
+#: hands the CVE lookup and the Nuclei AI tag fingerprint: httpx's
+#: "Name:version" (bare "Name" without one), with wappalyzer's merged in the
+#: same spelling. http_mixin split each on its first ':' into Technology
+#: {name, version ''|v}. Only the httpx/wappalyzer edges, since an AI-surface
+#: or nmap Technology was never in that list; the 0-hop BaseURL edge is a graph
+#: from before technologies moved onto the Endpoint.
+_URL_TECHNOLOGIES = """
+                MATCH (b:BaseURL {user_id: $uid, project_id: $pid})-[:HAS_ENDPOINT*0..1]->(n)
+                      -[r:USES_TECHNOLOGY]->(t:Technology {user_id: $uid, project_id: $pid})
+                WHERE coalesce(r.detected_by, 'httpx') IN ['httpx', 'wappalyzer']
+                  AND t.name IS NOT NULL AND t.name <> ''
+                  AND ($urls IS NULL OR b.url IN $urls)
+                WITH b.url AS url, t.name AS name, coalesce(t.version, '') AS version
+                ORDER BY url, name, version
+                RETURN url, collect(DISTINCT CASE WHEN version = '' THEN name
+                                                  ELSE name + ':' + version END) AS technologies
+"""
+
+
+def _field(record, key):
+    """A column a query may not return in every caller's graph, read as None when absent."""
+    try:
+        return record[key]
+    except (KeyError, IndexError):
+        return None
+
+
+def _graph_url_technologies(session, user_id: str, project_id: str, urls=None) -> dict:
+    """{baseurl: ["Name:version", ...]} for the BaseURLs that carry any."""
+    out = {}
+    for record in session.run(_URL_TECHNOLOGIES, uid=user_id, pid=project_id, urls=urls):
+        url = _field(record, "url")
+        techs = [t for t in (_field(record, "technologies") or []) if isinstance(t, str) and t]
+        if isinstance(url, str) and techs:
+            out[url] = techs
+    return out
+
+
+def _graph_nmap_services(session, user_id: str, project_id: str, ips: list) -> list:
+    """nmap -sV product/version on this run's IPs, shaped like nmap_scan.services_detected."""
+    if not ips:
+        return []
+    result = session.run(
+        """
+        MATCH (p:Port {user_id: $uid, project_id: $pid})
+        WHERE p.ip_address IN $ips
+          AND p.product IS NOT NULL AND p.product <> ''
+          AND p.version IS NOT NULL AND p.version <> ''
+        RETURN p.ip_address AS ip, p.number AS port, p.product AS product,
+               p.version AS version, p.cpe AS cpe
+        ORDER BY ip, port
+        """,
+        ips=ips, uid=user_id, pid=project_id,
+    )
+    services = []
+    for record in result:
+        product, version = _field(record, "product"), _field(record, "version")
+        if isinstance(product, str) and isinstance(version, str) and product and version:
+            services.append({"product": product, "version": version,
+                             "port": _field(record, "port"), "host": _field(record, "ip"),
+                             "cpe": _field(record, "cpe") or ""})
+    return services
+
+
+def graph_url_fingerprints(base_urls, user_id: str, project_id: str) -> dict:
+    """{baseurl: {"technologies": [...], "server": str|None}} from the graph. Never raises.
+
+    For URLs a user typed into partial Nuclei: without the BaseURL's
+    fingerprint they reach the CVE lookup and the AI tag selector empty.
+    """
+    urls = sorted({u for u in (base_urls or []) if isinstance(u, str) and u})
+    if not urls:
+        return {}
+    try:
+        from graph_db import Neo4jClient
+        with Neo4jClient() as graph_client:
+            if not graph_client.verify_connection():
+                return {}
+            with graph_client.driver.session() as session:
+                out = {}
+                result = session.run(
+                    """
+                    MATCH (b:BaseURL {user_id: $uid, project_id: $pid})
+                    WHERE b.url IN $urls
+                    """ + _PROBED_ENDPOINT + """
+                    RETURN b.url AS url, coalesce(b.server, probe.server) AS server
+                    """,
+                    urls=urls, uid=user_id, pid=project_id,
+                )
+                for record in result:
+                    url = _field(record, "url")
+                    if isinstance(url, str):
+                        out.setdefault(url, {"technologies": [], "server": None})["server"] = (
+                            _field(record, "server"))
+                for url, techs in _graph_url_technologies(session, user_id, project_id,
+                                                          urls=urls).items():
+                    out.setdefault(url, {"technologies": [], "server": None})["technologies"] = techs
+                return out
+    except Exception as e:
+        print(f"[!][Partial Recon] Could not read technologies for user URLs: {e}")
+        return {}
+
 
 def _as_roots(domains) -> list:
     """A builder's roots: a list, or one root from a caller not yet migrated."""
@@ -740,7 +843,8 @@ def _build_vuln_scan_data_from_graph(domains, user_id: str, project_id: str,
                 RETURN b.url AS url, coalesce(b.status_code, probe.status_code) AS status_code,
                        b.host AS host, coalesce(b.content_type, probe.content_type) AS content_type,
                        coalesce(b.is_cdn, probe.is_cdn) AS is_cdn,
-                       coalesce(b.cdn, probe.cdn) AS cdn, coalesce(b.asn, probe.asn) AS asn
+                       coalesce(b.cdn, probe.cdn) AS cdn, coalesce(b.asn, probe.asn) AS asn,
+                       coalesce(b.server, probe.server) AS server
                 """,
                 uid=user_id, pid=project_id,
             )
@@ -772,6 +876,8 @@ def _build_vuln_scan_data_from_graph(domains, user_id: str, project_id: str,
                     "cdn": record["cdn"],
                     "asn": record["asn"],
                     "ip": resolved_ip,
+                    "server": _field(record, "server"),
+                    "technologies": [],
                 }
                 # If the URL is CDN-flagged AND the cdn name is a reliable
                 # edge provider (not generic "aws"/"azure"), also stamp
@@ -790,6 +896,24 @@ def _build_vuln_scan_data_from_graph(domains, user_id: str, project_id: str,
                             entry["is_cdn"] = True
                             if not entry.get("cdn"):
                                 entry["cdn"] = record["cdn"]
+
+            # 3b) The CVE lookup (cve_helpers.run_cve_lookup) reads only by_url
+            #     technologies + server and nmap_scan services, and the Nuclei
+            #     AI tag selector the first two. Without them a partial run's
+            #     "CVE lookup" option looked up nothing.
+            by_url = recon_data["http_probe"]["by_url"]
+            if by_url:
+                for url, techs in _graph_url_technologies(session, user_id, project_id).items():
+                    if url in by_url:
+                        by_url[url]["technologies"] = techs
+            scoped_ips = sorted({
+                addr
+                for entry in [recon_data["dns"]["domain"], *recon_data["dns"]["subdomains"].values()]
+                for addr in (entry["ips"]["ipv4"] + entry["ips"]["ipv6"])
+            })
+            services = _graph_nmap_services(session, user_id, project_id, scoped_ips)
+            if services:
+                recon_data["nmap_scan"] = {"services_detected": services}
 
             # 4) Endpoints with parameters (for DAST mode). run_vuln_scan keeps
             #    only URLs carrying `?` and `=`. The crawlers' raw URLs are not
