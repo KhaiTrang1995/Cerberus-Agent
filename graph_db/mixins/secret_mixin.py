@@ -235,17 +235,37 @@ class SecretMixin:
 
         scan_statistics = github_hunt_data.get("statistics", {})
 
+        # Only a hunt that finished without a coverage gap re-checked every
+        # repository. A stopped one ("interrupted", or "in_progress" when it was
+        # killed), a failed one, or one GitHub throttled must neither prune nor
+        # pre-clear: the clear deletes every GithubPath, which orphans the
+        # findings of repos the run never reached, and the next run's orphan
+        # sweep then deletes them. Every node MERGEs on a deterministic id, so
+        # upserting without the clear cannot duplicate anything.
+        run_status = str(github_hunt_data.get("status") or "").strip().lower()
+        try:
+            coverage_gaps = (int(github_hunt_data.get("coverage_gap_count") or 0)
+                             or len(github_hunt_data.get("coverage_gaps") or []))
+        except (TypeError, ValueError):
+            coverage_gaps = 1  # unreadable: assume the run missed something
+        run_complete = run_status == "completed" and not coverage_gaps
+
         # Taken BEFORE the ingest: everything it writes gets a later
         # `updated_at` and therefore survives the prune at the end (X7).
         run_started_at = run_timestamp()
 
         with self.driver.session() as session:
 
-            # Clear the hunt's CONTAINERS (paths, repos, the hunt node). The
-            # findings are no longer deleted here; they are pruned after a
-            # successful ingest, below.
-            clear_stats = self.clear_github_hunt_data(user_id, project_id)
-            print(f"[*][graph-db] Pre-cleared: {clear_stats}")
+            if run_complete:
+                # Clear the hunt's CONTAINERS (paths, repos, the hunt node). The
+                # findings are no longer deleted here; they are pruned after a
+                # successful ingest, below.
+                clear_stats = self.clear_github_hunt_data(user_id, project_id)
+                print(f"[*][graph-db] Pre-cleared: {clear_stats}")
+            else:
+                print(f"[*][graph-db] GitHub hunt is '{run_status or 'unknown'}' with "
+                      f"{coverage_gaps} coverage gap(s): keeping its previous findings, "
+                      f"no clear and no prune")
 
             # 1. Create GithubHunt node (scan metadata)
             hunt_id = f"github-hunt-{user_id}-{project_id}"
@@ -264,6 +284,10 @@ class SecretMixin:
                 "secrets_found": scan_statistics.get("secrets_found", 0),
                 "sensitive_files": scan_statistics.get("sensitive_files", 0),
             }
+            if not run_complete:
+                # Written on every incomplete run, so a later one does not
+                # inherit a stale count; a complete run recreates the node.
+                hunt_props["coverage_gap_count"] = coverage_gaps
 
             try:
                 session.run(
@@ -407,6 +431,10 @@ class SecretMixin:
                 # 3c. Create leaf finding node (GithubSecret or GithubSensitiveFile)
                 finding_hash = self._github_digest(dedup_key)
                 details = finding.get("details", {})
+                # Triage gives a public repository full reach. Written only when
+                # the hunt knew it, so an older artifact never sets false on a
+                # node whose visibility is simply unknown.
+                visibility = finding.get("repository_public")
 
                 if finding_type == "SECRET":
                     node_id = f"github-secret-{user_id}-{project_id}-{finding_hash}"
@@ -427,6 +455,8 @@ class SecretMixin:
                         node_props["matches"] = details["matches"]
                     if details.get("sample"):
                         node_props["sample"] = details["sample"]
+                    if isinstance(visibility, bool):
+                        node_props["repository_public"] = visibility
 
                     try:
                         session.run(
@@ -466,6 +496,8 @@ class SecretMixin:
                         "path": clean_path,
                         "timestamp": finding.get("timestamp", ""),
                     }
+                    if isinstance(visibility, bool):
+                        node_props["repository_public"] = visibility
 
                     try:
                         session.run(
@@ -509,8 +541,9 @@ class SecretMixin:
         # evidence the findings are gone - it is evidence the scan failed - so
         # the prune is skipped rather than emptying the project.
         if stats["secrets_created"] or stats["sensitive_files_created"]:
-            stats["pruned"] = self.prune_unseen_findings(
-                user_id, project_id, ["github_hunt"], run_started_at)
+            if run_complete:
+                stats["pruned"] = self.prune_unseen_findings(
+                    user_id, project_id, ["github_hunt"], run_started_at)
 
         return stats
 
@@ -723,15 +756,29 @@ class SecretMixin:
         asset_label = self.TRUFFLEHOG_ASSET_LABELS.get(
             asset_kind, "MultiscannerEndpoint")
 
+        # Only a finished run re-checked everything its source covers. A stopped
+        # container leaves its incremental save ("in_progress") and a failed run
+        # writes "error" with no findings, so clearing or pruning on either
+        # deletes findings nobody re-checked. Those runs are upserted only; every
+        # node MERGEs on a deterministic id, so skipping the clear cannot
+        # duplicate anything.
+        run_status = str(trufflehog_data.get("status") or "").strip().lower()
+        run_completed = run_status == "completed"
+
         # X7: taken BEFORE the clear and the ingest, so everything this run
         # writes has a later `updated_at` and survives the prune at the end.
         run_started_at = run_timestamp()
 
         with self.driver.session() as session:
-            # SCOPED clear, never the blanket one: this reaps only this source's
-            # previous run (and any partial nodes a crashed run left behind).
-            clear_stats = self.clear_trufflehog_data(user_id, project_id, source=source)
-            print(f"[*][graph-db] Pre-cleared {source}: {clear_stats}")
+            if run_completed:
+                # SCOPED clear, never the blanket one: this reaps only this
+                # source's previous run (and any partial nodes a crashed run
+                # left behind).
+                clear_stats = self.clear_trufflehog_data(user_id, project_id, source=source)
+                print(f"[*][graph-db] Pre-cleared {source}: {clear_stats}")
+            else:
+                print(f"[*][graph-db] {source} run is '{run_status or 'unknown'}', not "
+                      f"completed: keeping its previous findings, no clear and no prune")
 
             scan_id = f"multiscanner-scan-{user_id}-{project_id}-{source}"
             scan_props = {
@@ -916,7 +963,8 @@ class SecretMixin:
         # Docker run cannot touch HuggingFace findings. Only after an ingest
         # that wrote something: a run that wrote nothing is a failed scan.
         if stats["findings_created"]:
-            stats["pruned"] = self.prune_unseen_findings(
-                user_id, project_id, [source], run_started_at)
+            if run_completed:
+                stats["pruned"] = self.prune_unseen_findings(
+                    user_id, project_id, [source], run_started_at)
 
         return stats

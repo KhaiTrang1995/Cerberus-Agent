@@ -31,6 +31,17 @@ except ImportError:
     print("[!] PyGithub not installed. Run: pip install PyGithub")
     raise
 
+try:
+    from requests.exceptions import ConnectionError as _RequestsConnectionError
+    from requests.exceptions import Timeout as _RequestsTimeout
+    _TRANSPORT_ERRORS = (_RequestsConnectionError, _RequestsTimeout)
+except ImportError:
+    _TRANSPORT_ERRORS = ()
+
+#: Gap records kept in the artifact. The count is always exact; the list is
+#: capped so a run throttled for an hour does not write megabytes of them.
+MAX_COVERAGE_GAP_RECORDS = 100
+
 # Default settings for GitHub scanning (used when no settings provided)
 DEFAULT_GITHUB_SETTINGS = {
     'GITHUB_ACCESS_TOKEN': os.getenv('GITHUB_ACCESS_TOKEN', ''),
@@ -479,6 +490,13 @@ def find_high_entropy_strings(content: str, threshold: float = 4.5) -> List[Dict
 class GitHubSecretHunter:
     """Advanced GitHub secret scanning tool."""
 
+    #: What this run could not scan because GitHub throttled or failed, as
+    #: opposed to content that is simply unreadable (a submodule entry). A run
+    #: with any is incomplete, and the graph write will not prune on it.
+    #: Rebound rather than mutated, so these class defaults are never shared.
+    coverage_gap_count = 0
+    coverage_gaps: tuple = ()
+
     def __init__(self, token: str, target: str, project_id: str = "", settings: Optional[Dict] = None):
         self.token = token
         self.target = target
@@ -553,6 +571,7 @@ class GitHubSecretHunter:
             "status": "in_progress",
             "last_update": datetime.now().isoformat(),
             "statistics": self.stats,
+            **self._coverage_fields(),
             "findings": self.findings
         }
 
@@ -593,6 +612,80 @@ class GitHubSecretHunter:
         else:
             time.sleep(60)  # Default wait
 
+    @staticmethod
+    def _is_rate_limit(error: BaseException) -> bool:
+        """A primary or secondary rate limit, however PyGithub surfaced it.
+
+        RateLimitExceededException is itself a GithubException with status 403,
+        so a handler testing only the status reads a throttled request as
+        "forbidden". Older PyGithub releases also raise a plain GithubException
+        for some throttles, which only the headers or the message give away.
+        """
+        if isinstance(error, RateLimitExceededException):
+            return True
+        if not isinstance(error, GithubException):
+            return False
+        status = getattr(error, "status", None)
+        if status == 429:
+            return True
+        if status != 403:
+            return False
+        headers = getattr(error, "headers", None) or {}
+        try:
+            remaining = next((str(v) for k, v in headers.items()
+                              if str(k).lower() == "x-ratelimit-remaining"), None)
+        except AttributeError:
+            remaining = None
+        if remaining == "0":
+            return True
+        data = getattr(error, "data", None)
+        message = data.get("message") if isinstance(data, dict) else None
+        message = str(message or getattr(error, "message", None) or "").lower()
+        return "rate limit" in message or "abuse" in message
+
+    def _loses_coverage(self, error: BaseException) -> bool:
+        """Whether `error` left content unscanned that a later run would read.
+
+        Deliberately narrow: a submodule entry, a symlink or an empty
+        repository fails the same way on every run, and counting those would
+        mark every such project's hunts incomplete for ever.
+        """
+        if self._is_rate_limit(error):
+            return True
+        if isinstance(error, GithubException):
+            status = getattr(error, "status", None)
+            return isinstance(status, int) and status >= 500
+        return bool(_TRANSPORT_ERRORS) and isinstance(error, _TRANSPORT_ERRORS)
+
+    def _record_gap(self, kind: str, where: str, error: BaseException):
+        """Note something this run did not scan, so the graph write keeps the
+        findings it would otherwise have pruned as gone."""
+        reason = type(error).__name__
+        status = getattr(error, "status", None)
+        if status:
+            reason = f"{reason} {status}"
+        self.coverage_gap_count += 1
+        if len(self.coverage_gaps) < MAX_COVERAGE_GAP_RECORDS:
+            self.coverage_gaps = [*self.coverage_gaps,
+                                  {"kind": kind, "where": where, "reason": reason}]
+        print(f"    [!] Not scanned ({kind}): {where} - {reason}")
+
+    def _coverage_fields(self) -> Dict:
+        """The artifact's gap keys, present only on a run that had gaps, so a
+        clean run's JSON keeps exactly the shape it always had."""
+        if not self.coverage_gap_count:
+            return {}
+        return {"coverage_gap_count": self.coverage_gap_count,
+                "coverage_gaps": list(self.coverage_gaps)}
+
+    @staticmethod
+    def _is_public(private) -> Optional[bool]:
+        """Visibility from the listing payload's `private`, or None if unknown.
+
+        Read from the object the listing already returned: no extra API call.
+        """
+        return (not private) if isinstance(private, bool) else None
+
     def _should_skip_file(self, filename: str) -> bool:
         """Check if file should be skipped based on extension."""
         ext = os.path.splitext(filename)[1].lower()
@@ -606,7 +699,8 @@ class GitHubSecretHunter:
         )
 
     def _add_finding(self, finding_type: str, repo: str, path: str,
-                     secret_type: str, details: Optional[Dict] = None):
+                     secret_type: str, details: Optional[Dict] = None,
+                     repository_public: Optional[bool] = None):
         """Add a finding to the results and save incrementally."""
         finding = {
             "timestamp": datetime.now().isoformat(),
@@ -616,6 +710,10 @@ class GitHubSecretHunter:
             "secret_type": secret_type,
             "details": details or {}
         }
+        # Only when known: triage reads a public repository as fully reachable,
+        # and an absent key is "unknown", which a guessed false would erase.
+        if isinstance(repository_public, bool):
+            finding["repository_public"] = repository_public
         self.findings.append(finding)
 
         # Color-coded output
@@ -647,14 +745,16 @@ class GitHubSecretHunter:
         # Save incrementally after each finding
         self._save_incremental()
 
-    def scan_file_content(self, repo_name: str, content: str, path: str):
+    def scan_file_content(self, repo_name: str, content: str, path: str,
+                          repository_public: Optional[bool] = None):
         """Scan file content for secrets using regex patterns."""
         for secret_type, compiled_re in COMPILED_SECRET_PATTERNS.items():
             matches = compiled_re.findall(content)
             if matches:
                 self._add_finding(
                     "SECRET", repo_name, path, secret_type,
-                    {"matches": len(matches), "sample": str(matches[0])[:100]}
+                    {"matches": len(matches), "sample": str(matches[0])[:100]},
+                    repository_public=repository_public,
                 )
 
         # Entropy-based detection
@@ -663,11 +763,13 @@ class GitHubSecretHunter:
             self._add_finding(
                 "HIGH_ENTROPY", repo_name, path,
                 f"High Entropy ({finding['entropy']})",
-                finding
+                finding,
+                repository_public=repository_public,
             )
 
     def scan_repo_contents(self, repo, path: str = ""):
         """Recursively scan repository contents."""
+        public = self._is_public(getattr(repo, "private", None))
         try:
             contents = repo.get_contents(path)
             if not isinstance(contents, list):
@@ -681,7 +783,8 @@ class GitHubSecretHunter:
                     if self._is_sensitive_filename(item.path):
                         self._add_finding(
                             "SENSITIVE_FILE", repo.full_name, item.path,
-                            "Sensitive Filename"
+                            "Sensitive Filename",
+                            repository_public=public,
                         )
 
                     # Skip binary/large files
@@ -692,12 +795,15 @@ class GitHubSecretHunter:
                     try:
                         if item.size < 500000:  # Skip files > 500KB
                             decoded = item.decoded_content.decode('utf-8', errors='ignore')
-                            self.scan_file_content(repo.full_name, decoded, item.path)
+                            self.scan_file_content(repo.full_name, decoded, item.path,
+                                                   repository_public=public)
                             self.stats["files_scanned"] += 1
                             # Save every 50 files to track progress
                             if self.stats["files_scanned"] % 50 == 0:
                                 self._save_incremental()
-                    except Exception:
+                    except Exception as e:
+                        if self._loses_coverage(e):
+                            self._record_gap("file", f"{repo.full_name}:{item.path}", e)
                         continue
 
         except RateLimitExceededException:
@@ -706,12 +812,15 @@ class GitHubSecretHunter:
         except GithubException as e:
             if e.status != 404:  # Ignore not found (empty repos)
                 print(f"    [!] Error accessing {path}: {e}")
+                if self._loses_coverage(e):
+                    self._record_gap("directory", f"{repo.full_name}:{path or '/'}", e)
 
     def scan_commit_history(self, repo):
         """Scan commit history for leaked secrets."""
         if not self.settings.get('GITHUB_SCAN_COMMITS', True):
             return
 
+        public = self._is_public(getattr(repo, "private", None))
         try:
             commits = repo.get_commits()
             count = 0
@@ -728,20 +837,27 @@ class GitHubSecretHunter:
                             self.scan_file_content(
                                 repo.full_name,
                                 file.patch,
-                                f"{file.filename} (commit: {commit.sha[:7]})"
+                                f"{file.filename} (commit: {commit.sha[:7]})",
+                                repository_public=public,
                             )
                     self.stats["commits_scanned"] += 1
                     count += 1
                     # Save every 20 commits to track progress
                     if count % 20 == 0:
                         self._save_incremental()
-                except Exception:
+                except Exception as e:
+                    if self._loses_coverage(e):
+                        sha = str(getattr(commit, "sha", "") or "")[:7]
+                        self._record_gap("commit", f"{repo.full_name}@{sha}", e)
                     continue
 
-        except RateLimitExceededException:
+        except RateLimitExceededException as e:
             self._handle_rate_limit()
+            self._record_gap("commits", repo.full_name, e)
         except Exception as e:
             print(f"    [!] Error scanning commits: {e}")
+            if self._loses_coverage(e):
+                self._record_gap("commits", repo.full_name, e)
 
     def scan_repo(self, repo):
         """Scan a single repository."""
@@ -777,6 +893,8 @@ class GitHubSecretHunter:
         try:
             for gist in user.get_gists():
                 print(f"    [*] Scanning gist: {gist.id}")
+                public = getattr(gist, "public", None)
+                public = public if isinstance(public, bool) else None
                 for filename, file in gist.files.items():
                     if not self._should_skip_file(filename):
                         try:
@@ -784,19 +902,26 @@ class GitHubSecretHunter:
                             self.scan_file_content(
                                 f"gist:{user.login}",
                                 content,
-                                f"{gist.id}/{filename}"
+                                f"{gist.id}/{filename}",
+                                repository_public=public,
                             )
                             self.stats["gists_scanned"] += 1
-                        except Exception:
+                        except Exception as e:
+                            if self._loses_coverage(e):
+                                self._record_gap("gist", f"{gist.id}/{filename}", e)
                             continue
 
-        except RateLimitExceededException:
+        except RateLimitExceededException as e:
             self._handle_rate_limit()
+            self._record_gap("gists", f"gist:{user.login}", e)
         except Exception as e:
             print(f"    [!] Error scanning gists: {e}")
+            if self._loses_coverage(e):
+                self._record_gap("gists", f"gist:{user.login}", e)
 
     def scan_organization(self):
         """Scan an organization and its members."""
+        org = None
         try:
             org = self.github.get_organization(self.target)
             print(f"\n[*] Organization found: {org.login}")
@@ -820,7 +945,19 @@ class GitHubSecretHunter:
                         self.scan_gists(member)
 
         except GithubException as e:
+            # A throttled request is also a 403. Read as "not an organisation"
+            # it rescanned the target as a user and dropped the org's members.
+            if self._is_rate_limit(e):
+                if org is None:
+                    raise  # nothing scanned yet: run()'s wait-and-retry is cheap
+                # Part-way through: run() would restart every repo from the top.
+                self._record_gap("organization", self.target, e)
+                return
             if e.status in (404, 403):
+                if org is not None:
+                    # The org resolved, so this failed part-way through it and
+                    # whatever was left of it is not rescanned below.
+                    self._record_gap("organization", self.target, e)
                 # Not an organization (404) or no org access (403) — try as a user
                 self.scan_user()
             else:
@@ -828,6 +965,7 @@ class GitHubSecretHunter:
 
     def scan_user(self):
         """Scan a user's repositories and gists."""
+        user = None
         try:
             user = self.github.get_user(self.target)
             print(f"\n[*] User found: {user.login}")
@@ -841,7 +979,11 @@ class GitHubSecretHunter:
                 self.scan_gists(user)
 
         except GithubException as e:
+            if self._is_rate_limit(e) and user is None:
+                raise  # nothing scanned yet: run()'s wait-and-retry is cheap
             print(f"[!] Error: {e}")
+            # Every repo and gist after the failure point went unscanned.
+            self._record_gap("target", self.target, e)
 
     def save_results(self, status: str = "completed"):
         """Save final results to JSON file."""
@@ -859,6 +1001,7 @@ class GitHubSecretHunter:
             "status": status,
             "last_update": scan_end_time.isoformat(),
             "statistics": self.stats,
+            **self._coverage_fields(),
             "findings": self.findings
         }
 
@@ -882,6 +1025,9 @@ class GitHubSecretHunter:
         print(f"\033[93m  Sensitive Files:     {self.stats['sensitive_files']}\033[0m")
         print(f"\033[95m  High Entropy:        {self.stats['high_entropy']}\033[0m")
         print(f"  Rate Limit Hits:     {self.rate_limit_hits}")
+        if self.coverage_gap_count:
+            print(f"  Not Scanned:         {self.coverage_gap_count} "
+                  f"(throttled or failed; old findings are kept, not pruned)")
         print("=" * 70)
 
         if self.stats['secrets_found'] > 0:
