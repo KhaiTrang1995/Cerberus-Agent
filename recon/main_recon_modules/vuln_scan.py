@@ -20,6 +20,7 @@ import copy
 import ipaddress
 import json
 import os
+import shutil
 import subprocess
 import threading
 import time
@@ -116,6 +117,15 @@ def _nuclei_watch_stats(line: str, label: str, state: dict) -> None:
               f"with no matches after 10 min - consider lowering NUCLEI_MAX_RUNTIME", flush=True)
 
 
+def _keep_nuclei_findings(reason: str) -> None:
+    """Record that Nuclei re-checked nothing this run, so the prune keeps its findings."""
+    try:
+        from recon.helpers import circuit_breaker
+        circuit_breaker.note_degraded("vuln_scan", sources=["nuclei", "vuln_scan"], reason=reason)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _nuclei_kill_container(container_name: str) -> None:
     """`docker kill` a named nuclei container. The daemon owns it, so killing the
     docker CLI (process.terminate) would leave it running; mirror _run_baddns."""
@@ -205,6 +215,7 @@ def _execute_nuclei_pass(cmd: list, output_file: str, label: str,
 
     findings = []
     false_positives = []
+    parsed_lines = 0
     if Path(output_file).exists():
         with open(output_file, 'r') as f:
             for line in f:
@@ -213,6 +224,7 @@ def _execute_nuclei_pass(cmd: list, output_file: str, label: str,
                     continue
                 try:
                     raw_finding = json.loads(line)
+                    parsed_lines += 1
                     is_fp, fp_reason = is_false_positive(raw_finding)
                     if is_fp:
                         false_positives.append({
@@ -224,6 +236,14 @@ def _execute_nuclei_pass(cmd: list, output_file: str, label: str,
                     findings.append(parse_nuclei_finding(raw_finding))
                 except json.JSONDecodeError:
                     continue
+
+    # Nuclei exits 0 whether or not it matched anything; a non-zero exit is a
+    # docker error (125-127), a kill or a fatal nuclei error. With no output at
+    # all, nothing was scanned. A run truncated by the cap is recorded above.
+    if process.returncode != 0 and not parsed_lines and not truncated["hit"]:
+        print(f"[!][Nuclei] {label} pass failed (exit {process.returncode}) with no results "
+              f"- previous Nuclei findings are kept")
+        _keep_nuclei_findings(f"nuclei {label} pass exited {process.returncode}")
 
     return findings, false_positives, duration, process.returncode
 
@@ -436,25 +456,31 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
             ],
         )
 
+    # Nuclei being unavailable skips only the Nuclei passes: the CVE lookup and
+    # the security checks below need neither Docker nor templates.
+    nuclei_unavailable = ""
+    if NUCLEI_ENABLED:
         # Docker mode is required
         if not is_docker_installed():
             print("[!][Nuclei] Docker not found. Please install Docker to use Nuclei scanner.")
             print("[!][Nuclei] Skipping nuclei scan.")
-            return recon_data
-
-        if not is_docker_running():
+            nuclei_unavailable = "Docker not found"
+        elif not is_docker_running():
             print("[!][Nuclei] Docker daemon is not running. Start it with: sudo systemctl start docker")
             print("[!][Nuclei] Skipping nuclei scan.")
-            return recon_data
+            nuclei_unavailable = "Docker daemon not running"
+        else:
+            # Pull image if needed (will skip if already present)
+            pull_nuclei_docker_image(NUCLEI_DOCKER_IMAGE)
 
-        # Pull image if needed (will skip if already present)
-        pull_nuclei_docker_image(NUCLEI_DOCKER_IMAGE)
+            # Ensure templates volume exists and has templates
+            if not ensure_templates_volume(NUCLEI_DOCKER_IMAGE, NUCLEI_AUTO_UPDATE_TEMPLATES):
+                print("[!][Nuclei] Could not setup nuclei templates. Skipping scan.")
+                nuclei_unavailable = "nuclei templates unavailable"
+        if nuclei_unavailable:
+            _keep_nuclei_findings(nuclei_unavailable)
 
-        # Ensure templates volume exists and has templates
-        if not ensure_templates_volume(NUCLEI_DOCKER_IMAGE, NUCLEI_AUTO_UPDATE_TEMPLATES):
-            print("[!][Nuclei] Could not setup nuclei templates. Skipping scan.")
-            return recon_data
-
+    if NUCLEI_ENABLED and not nuclei_unavailable:
         print(f"[*][Nuclei] Execution Mode: DOCKER ({NUCLEI_DOCKER_IMAGE})")
         nuclei_version = f"Docker: {NUCLEI_DOCKER_IMAGE}"
         template_count = 8000  # Approximate, Docker image includes templates
@@ -591,11 +617,11 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
             print(f"[*][Nuclei]   Max workers: {SECURITY_CHECK_MAX_WORKERS}")
         print("=" * 70 + "\n")
     
-        # Create a temporary directory for nuclei files
-        # Use /tmp/redamon to avoid spaces in paths (snap Docker issue)
-        nuclei_temp_dir = Path("/tmp/redamon/.nuclei_temp")
-        nuclei_temp_dir.mkdir(parents=True, exist_ok=True)
-    
+        # Use /tmp/redamon to avoid spaces in paths (snap Docker issue). It is a
+        # host bind mount shared by every concurrent scan, so each run gets its
+        # own directory and only ever removes that one.
+        nuclei_temp_dir = Path(f"/tmp/redamon/.nuclei_temp_{uuid.uuid4().hex}")
+
         # Two-pass design:
         #   Pass A (DETECTION) — always runs when Nuclei is enabled. Honours all
         #     user-configured templates, tags, custom templates. Targets the
@@ -627,6 +653,8 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
             skip_detection_pass = True
         else:
             skip_detection_pass = False
+
+        nuclei_temp_dir.mkdir(parents=True, exist_ok=True)
 
         # Detection pass targets
         detection_targets_file = str(nuclei_temp_dir / "targets_detection.txt")
@@ -972,10 +1000,8 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
                         capture_output=True,
                     )
 
-            try:
-                nuclei_temp_dir.rmdir()  # Only removes if empty
-            except Exception:
-                pass
+            # The directory is this run's alone, so whatever is left in it can go.
+            shutil.rmtree(nuclei_temp_dir, ignore_errors=True)
 
     # Run CVE lookup for detected technologies (like Nmap's vulners)
     if CVE_LOOKUP_ENABLED and recon_data.get("http_probe"):

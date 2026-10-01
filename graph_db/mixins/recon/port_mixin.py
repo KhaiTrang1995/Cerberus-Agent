@@ -10,6 +10,31 @@ from urllib.parse import urlparse, parse_qs
 from graph_db.cpe_resolver import _is_ip_address
 from graph_db.technology_identity import resolve_tech_name, resolve_tech_version
 
+
+def _matched(result) -> int:
+    """The `matched` count a MATCH ... RETURN count(...) AS matched query returned."""
+    try:
+        record = result.single()
+        return int(record["matched"]) if record is not None else 0
+    except Exception:  # noqa: BLE001
+        return 0
+
+
+def _nmap_service_on(services: list, ip_addr: str, port_number):
+    """The nmap-detected service on this IP's port, or None.
+
+    An entry without an `ip` (written before nmap recorded one) matches on the
+    port alone, as it always did.
+    """
+    for svc in services:
+        if svc.get("port") != port_number or not svc.get("product"):
+            continue
+        if svc.get("ip") and svc["ip"] != ip_addr:
+            continue
+        return svc
+    return None
+
+
 class PortMixin:
     def update_graph_from_port_scan(self, recon_data: dict, user_id: str, project_id: str) -> dict:
         """
@@ -263,6 +288,8 @@ class PortMixin:
         Update the Neo4j graph database with Nmap service detection and NSE vuln data.
 
         This function:
+        - Creates Port (and Service) nodes for nmap_scan.new_open_ports, the open
+          ports nmap confirmed that the port scan did not report
         - Enriches existing Port nodes with product, version, CPE from Nmap -sV
         - Updates existing Service nodes with version info
         - Creates Vulnerability nodes from NSE script findings
@@ -287,6 +314,49 @@ class PortMixin:
 
         with self.driver.session() as session:
 
+            # 0. Open ports nmap confirmed that the port scan missed have no Port
+            #    node yet; create them the way update_graph_from_port_scan does,
+            #    so step 1 enriches them like every other port.
+            for added in nmap_data.get("new_open_ports", []):
+                ip_addr = added.get("ip")
+                port_number = added.get("port")
+                protocol = added.get("protocol") or "tcp"
+                service_name = added.get("service")
+                if not ip_addr or not port_number:
+                    continue
+                try:
+                    session.run(
+                        """
+                        MERGE (i:IP {address: $ip_addr, user_id: $user_id, project_id: $project_id})
+                        SET i.updated_at = datetime()
+                        MERGE (p:Port {number: $port_number, protocol: $protocol, ip_address: $ip_addr, user_id: $user_id, project_id: $project_id})
+                        ON CREATE SET p.source = 'nmap'
+                        SET p.state = 'open',
+                            p.updated_at = datetime()
+                        MERGE (i)-[:HAS_PORT]->(p)
+                        """,
+                        ip_addr=ip_addr, port_number=port_number, protocol=protocol,
+                        user_id=user_id, project_id=project_id
+                    )
+                    stats.setdefault("ports_created", 0)
+                    stats["ports_created"] += 1
+                    stats["relationships_created"] += 1
+
+                    if service_name:
+                        session.run(
+                            """
+                            MATCH (p:Port {number: $port_number, protocol: $protocol, ip_address: $ip_addr, user_id: $user_id, project_id: $project_id})
+                            MERGE (svc:Service {name: $service_name, port_number: $port_number, ip_address: $ip_addr, user_id: $user_id, project_id: $project_id})
+                            SET svc.updated_at = datetime()
+                            MERGE (p)-[:RUNS_SERVICE]->(svc)
+                            """,
+                            port_number=port_number, protocol=protocol, ip_addr=ip_addr,
+                            service_name=service_name, user_id=user_id, project_id=project_id
+                        )
+                        stats["relationships_created"] += 1
+                except Exception as e:
+                    stats["errors"].append(f"Port {port_number}/{protocol} on {ip_addr} create failed: {e}")
+
             # 1. Enrich Port and Service nodes with Nmap version data
             for host, host_info in nmap_data.get("by_host", {}).items():
                 ip_addr = host_info.get("ip", "")
@@ -304,7 +374,7 @@ class PortMixin:
 
                     try:
                         # Enrich Port node
-                        session.run(
+                        port_result = session.run(
                             """
                             MATCH (p:Port {number: $port_number, ip_address: $ip_addr, user_id: $user_id, project_id: $project_id})
                             SET p.product = $product,
@@ -312,28 +382,32 @@ class PortMixin:
                                 p.cpe = $cpe,
                                 p.nmap_scanned = true,
                                 p.updated_at = datetime()
+                            RETURN count(p) AS matched
                             """,
                             port_number=port_number, ip_addr=ip_addr,
                             product=product, version=version, cpe=cpe,
                             user_id=user_id, project_id=project_id
                         )
-                        stats["ports_enriched"] += 1
+                        if _matched(port_result):
+                            stats["ports_enriched"] += 1
 
                         # Enrich Service node
                         if product:
-                            session.run(
+                            service_result = session.run(
                                 """
                                 MATCH (svc:Service {port_number: $port_number, ip_address: $ip_addr, user_id: $user_id, project_id: $project_id})
                                 SET svc.product = $product,
                                     svc.version = $version,
                                     svc.cpe = $cpe,
                                     svc.updated_at = datetime()
+                                RETURN count(svc) AS matched
                                 """,
                                 port_number=port_number, ip_addr=ip_addr,
                                 product=product, version=version, cpe=cpe,
                                 user_id=user_id, project_id=project_id
                             )
-                            stats["services_enriched"] += 1
+                            if _matched(service_result):
+                                stats["services_enriched"] += 1
 
                         # AI surface recon: promote ai_runtime_version onto the Service
                         # so downstream CVE lookups can join against AI library CVE clusters.
@@ -365,12 +439,13 @@ class PortMixin:
                     continue
                 tech_name = f"{product}/{version}" if version else product
 
-                # Find the IP for this service from by_host data
-                svc_ip = ""
-                for host_info in nmap_data.get("by_host", {}).values():
-                    if any(pd.get("port") == port_number for pd in host_info.get("port_details", [])):
-                        svc_ip = host_info.get("ip", "")
-                        break
+                svc_ip = svc.get("ip") or ""
+                if not svc_ip:
+                    # An entry without its IP: the first host with this port open.
+                    for host_info in nmap_data.get("by_host", {}).values():
+                        if any(pd.get("port") == port_number for pd in host_info.get("port_details", [])):
+                            svc_ip = host_info.get("ip", "")
+                            break
 
                 try:
                     tech_name = resolve_tech_name(session, tech_name, user_id, project_id)
@@ -420,7 +495,7 @@ class PortMixin:
             # 3. Create Vulnerability nodes from NSE script findings
             for vuln in nmap_data.get("nse_vulns", []):
                 script_id = vuln.get("script_id", "")
-                ip_addr = vuln.get("host", "")
+                ip_addr = vuln.get("ip") or vuln.get("host", "")
                 port_number = vuln.get("port")
                 output = vuln.get("output", "")
                 state = vuln.get("state", "")
@@ -479,26 +554,27 @@ class PortMixin:
                         )
                         stats["relationships_created"] += 1
 
+                    # The Technology nmap detected on this finding's own IP and port
+                    svc = (_nmap_service_on(nmap_data.get("services_detected", []), ip_addr, port_number)
+                           if port_number else None)
+                    svc_tech_name = ""
+                    if svc:
+                        svc_version = svc.get("version", "")
+                        svc_tech_name = f"{svc['product']}/{svc_version}" if svc_version else svc["product"]
+
                     # Link Vulnerability to the Technology on that port
-                    if port_number:
-                        # Find the technology name for this port from services_detected
-                        for svc in nmap_data.get("services_detected", []):
-                            if svc.get("port") == port_number and svc.get("product"):
-                                svc_product = svc["product"]
-                                svc_version = svc.get("version", "")
-                                svc_tech_name = f"{svc_product}/{svc_version}" if svc_version else svc_product
-                                session.run(
-                                    """
-                                    MATCH (v:Vulnerability {name: $vuln_name, ip_address: $ip_addr, port_number: $port_number, user_id: $user_id, project_id: $project_id})
-                                    MATCH (t:Technology {name: $tech_name, user_id: $user_id, project_id: $project_id})
-                                    MERGE (v)-[:FOUND_ON]->(t)
-                                    """,
-                                    vuln_name=script_id, ip_addr=ip_addr, port_number=port_number,
-                                    tech_name=svc_tech_name,
-                                    user_id=user_id, project_id=project_id
-                                )
-                                stats["relationships_created"] += 1
-                                break
+                    if svc_tech_name:
+                        session.run(
+                            """
+                            MATCH (v:Vulnerability {name: $vuln_name, ip_address: $ip_addr, port_number: $port_number, user_id: $user_id, project_id: $project_id})
+                            MATCH (t:Technology {name: $tech_name, user_id: $user_id, project_id: $project_id})
+                            MERGE (v)-[:FOUND_ON]->(t)
+                            """,
+                            vuln_name=script_id, ip_addr=ip_addr, port_number=port_number,
+                            tech_name=svc_tech_name,
+                            user_id=user_id, project_id=project_id
+                        )
+                        stats["relationships_created"] += 1
 
                     # Create CVE node if NSE reported a specific CVE
                     if cve_id:
@@ -534,28 +610,24 @@ class PortMixin:
                         stats["relationships_created"] += 1
 
                         # Link Technology to CVE (so agent can traverse Service -> Tech -> CVE)
-                        if port_number:
-                            for svc in nmap_data.get("services_detected", []):
-                                if svc.get("port") == port_number and svc.get("product"):
-                                    svc_product = svc["product"]
-                                    svc_version = svc.get("version", "")
-                                    svc_tech_name = f"{svc_product}/{svc_version}" if svc_version else svc_product
-                                    session.run(
-                                        """
-                                        MATCH (t:Technology {name: $tech_name, user_id: $user_id, project_id: $project_id})
-                                        MATCH (c:CVE {id: $cve_id})
-                                        MERGE (t)-[:HAS_KNOWN_CVE]->(c)
-                                        """,
-                                        tech_name=svc_tech_name, cve_id=cve_id,
-                                        user_id=user_id, project_id=project_id
-                                    )
-                                    stats["relationships_created"] += 1
-                                    break
+                        if svc_tech_name:
+                            session.run(
+                                """
+                                MATCH (t:Technology {name: $tech_name, user_id: $user_id, project_id: $project_id})
+                                MATCH (c:CVE {id: $cve_id})
+                                MERGE (t)-[:HAS_KNOWN_CVE]->(c)
+                                """,
+                                tech_name=svc_tech_name, cve_id=cve_id,
+                                user_id=user_id, project_id=project_id
+                            )
+                            stats["relationships_created"] += 1
 
                 except Exception as e:
                     stats["errors"].append(f"NSE vuln {script_id} failed: {e}")
 
         print(f"[+][graph-db] Nmap Graph Update Summary:")
+        if stats.get("ports_created"):
+            print(f"[+][graph-db] Created {stats['ports_created']} Port nodes for open ports only nmap found")
         print(f"[+][graph-db] Enriched {stats['ports_enriched']} Port nodes with version data")
         print(f"[+][graph-db] Enriched {stats['services_enriched']} Service nodes")
         print(f"[+][graph-db] Created {stats['technologies_created']} Technology nodes")

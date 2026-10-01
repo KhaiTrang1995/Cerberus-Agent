@@ -13,6 +13,7 @@ Features:
 - Normalized output with by_host, services_detected, nse_vulns
 """
 
+import ipaddress
 import json
 import re
 import subprocess
@@ -39,6 +40,88 @@ from helpers.ai_signal_catalog import match_ai_nmap_version
 def is_nmap_installed() -> bool:
     """Check if nmap binary is available."""
     return shutil.which("nmap") is not None
+
+
+# nmap prints this and still exits 0 when --host-timeout fires; the host is then
+# written without <ports>, so none of its previous NSE findings was re-checked.
+_HOST_TIMEOUT_MARKER = "due to host timeout"
+
+
+def normalize_ip(ip) -> str:
+    """One spelling per address, so nmap's and the port scan's compare equal."""
+    text = str(ip or "").strip()
+    try:
+        return str(ipaddress.ip_address(text))
+    except ValueError:
+        return text.lower()
+
+
+def nmap_scanned_ip(xml_path: str, target_ip: str) -> bool:
+    """True only when the XML holds a completed scan of ``target_ip``.
+
+    nmap exits 0 for a host it gave up on: a host timeout (``timedout="true"``),
+    a host that looked down, or a target it could not route to (no <host> at
+    all). An unreadable file is the same: nothing in it was re-checked.
+    """
+    try:
+        root = ET.parse(xml_path).getroot()
+    except (ET.ParseError, OSError):
+        return False
+    want = normalize_ip(target_ip)
+    for host_elem in root.findall("host"):
+        addresses = {normalize_ip(a.get("addr")) for a in host_elem.findall("address")
+                     if a.get("addrtype") in ("ipv4", "ipv6")}
+        if want not in addresses:
+            continue
+        if host_elem.get("timedout") == "true":
+            return False
+        status = host_elem.find("status")
+        if status is not None and status.get("state") != "up":
+            return False
+        return host_elem.find("ports") is not None
+    return False
+
+
+def _keep_every_nse_finding(reason: str) -> None:
+    """Record that this run re-checked no nmap_nse finding, so the prune keeps them all."""
+    try:
+        from recon.helpers import circuit_breaker
+        circuit_breaker.note_degraded("nmap", sources=["nmap_nse"], reason=reason)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _keep_nse_findings_on(ips, payload: dict) -> None:
+    """Record IPs nmap did not scan to completion: their nmap_nse findings are kept."""
+    try:
+        from recon.helpers import circuit_breaker
+        nmap_scope = circuit_breaker.scope((), label="Nmap", unit="host(s)")
+        for ip in sorted(ips):
+            nmap_scope.note_host_skipped(ip)
+        nmap_scope.finish("nmap", host_source="nmap_nse", payload=payload)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _merge_key(host_key: str, ip: str, owners: Dict[str, str], preferred: Dict[str, str],
+               contenders: Dict[str, List[str]]) -> str:
+    """The by_host key for one IP's entry. Two IPs never share one.
+
+    The primary hostname stays the key for the IP the port scan maps that
+    hostname to (else the first such IP in scan order), so a unique hostname
+    keeps today's key. Every other IP behind the same name is keyed by itself.
+    """
+    ips = contenders.get(host_key, [])
+    if len(ips) > 1:
+        owner = preferred.get(host_key)
+        if owner not in ips:
+            owner = ips[0]
+        if normalize_ip(ip) != owner:
+            host_key = ip
+    if host_key in owners and owners[host_key] != normalize_ip(ip):
+        host_key = f"{host_key} ({ip})"
+    owners[host_key] = normalize_ip(ip)
+    return host_key
 
 
 # =============================================================================
@@ -308,6 +391,7 @@ def parse_nmap_xml(xml_path: str, ip_to_hostnames: Dict[str, List[str]], setting
                     "version": version,
                     "port": port_num,
                     "host": primary_hostname,
+                    "ip": ip,
                     "cpe": cpe,
                 })
 
@@ -336,6 +420,7 @@ def parse_nmap_xml(xml_path: str, ip_to_hostnames: Dict[str, List[str]], setting
 
                         nse_vulns.append({
                             "host": ip,
+                            "ip": ip,
                             "port": port_num,
                             "script_id": script_id,
                             "state": vuln_state,
@@ -419,6 +504,7 @@ def run_nmap_scan(recon_data: dict, output_file: Path = None, settings: dict = N
 
     if not is_nmap_installed():
         print("[!][Nmap] Binary not found. Ensure nmap is installed.")
+        _keep_every_nse_finding("nmap binary not found")
         return recon_data
 
     # Check that port_scan data exists
@@ -454,7 +540,11 @@ def run_nmap_scan(recon_data: dict, output_file: Path = None, settings: dict = N
     scan_temp_dir.mkdir(parents=True, exist_ok=True)
 
     def _scan_single_ip(target_ip, idx, total, port_string, nmap_timeout, output_dir):
-        """Scan a single IP with nmap and return parsed results."""
+        """Scan a single IP with nmap and return parsed results.
+
+        None when nmap failed outright; otherwise a tuple whose last item says
+        whether the IP was scanned to completion.
+        """
         xml_output = str(output_dir / f"nmap_{idx}_{target_ip.replace(':', '_')}.xml")
 
         cmd = build_nmap_command(target_ip, port_string, xml_output, settings)
@@ -469,11 +559,11 @@ def run_nmap_scan(recon_data: dict, output_file: Path = None, settings: dict = N
                 text=True,
             )
 
-            _, stderr = process.communicate(timeout=nmap_timeout)
+            stdout, stderr = process.communicate(timeout=nmap_timeout)
 
             if process.returncode != 0 and not Path(xml_output).exists():
                 print(f"[!][Nmap] Scan failed for {target_ip}: {(stderr or '')[:200]}")
-                return [], [], ""
+                return None
 
         except subprocess.TimeoutExpired:
             print(f"[!][Nmap] Scan timed out for {target_ip} after {nmap_timeout}s -- killing")
@@ -482,10 +572,10 @@ def run_nmap_scan(recon_data: dict, output_file: Path = None, settings: dict = N
                 process.wait(timeout=10)
             except Exception:
                 pass
-            return [], [], ""
+            return None
         except Exception as e:
             print(f"[!][Nmap] Error scanning {target_ip}: {e}")
-            return [], [], ""
+            return None
 
         # Parse XML results for this target
         parsed = parse_nmap_xml(xml_output, ip_to_hostnames, settings=settings)
@@ -495,7 +585,13 @@ def run_nmap_scan(recon_data: dict, output_file: Path = None, settings: dict = N
         vulns = parsed.get("nse_vulns", [])
         version = parsed.get("nmap_version", "")
 
-        return hosts, services, vulns, version, " ".join(cmd)
+        scanned = (_HOST_TIMEOUT_MARKER not in (stdout or "")
+                   and nmap_scanned_ip(xml_output, target_ip))
+        if not scanned:
+            print(f"[!][Nmap] {target_ip} was not scanned to completion (host timeout, "
+                  f"host down or unreadable output) -- its previous NSE findings are kept")
+
+        return hosts, services, vulns, version, " ".join(cmd), scanned
 
     try:
         # Aggregate results across all target IPs
@@ -507,6 +603,7 @@ def run_nmap_scan(recon_data: dict, output_file: Path = None, settings: dict = N
 
         start_time = datetime.now()
 
+        results_by_ip: Dict = {}
         max_workers = min(nmap_parallelism, len(ip_list))
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
@@ -519,35 +616,40 @@ def run_nmap_scan(recon_data: dict, output_file: Path = None, settings: dict = N
             for future in as_completed(futures):
                 ip = futures[future]
                 try:
-                    result = future.result()
-                    if len(result) == 3:
-                        # Error path returns 3-tuple
-                        continue
-                    hosts, services, vulns, version, cmd_str = result
-
-                    if not full_command and cmd_str:
-                        full_command = cmd_str
-                    if not nmap_version and version:
-                        nmap_version = version
-
-                    # Merge host results
-                    for host_key, host_data in hosts:
-                        if host_key in merged_by_host:
-                            existing_ports = set(merged_by_host[host_key]["ports"])
-                            for pd in host_data.get("port_details", []):
-                                if pd["port"] not in existing_ports:
-                                    merged_by_host[host_key]["ports"].append(pd["port"])
-                                    merged_by_host[host_key]["port_details"].append(pd)
-                                    existing_ports.add(pd["port"])
-                            merged_by_host[host_key]["ports"].sort()
-                            merged_by_host[host_key]["port_details"].sort(key=lambda x: x["port"])
-                        else:
-                            merged_by_host[host_key] = host_data
-
-                    merged_services.extend(services)
-                    merged_vulns.extend(vulns)
+                    results_by_ip[ip] = future.result()
                 except Exception as e:
                     print(f"[!][Nmap] Error scanning {ip}: {e}")
+                    results_by_ip[ip] = None
+
+        # Merged in scan order, not completion order, so which IP keeps a
+        # shared hostname as its key does not depend on thread timing.
+        unscanned_ips = {ip for ip, result in results_by_ip.items()
+                         if result is None or not result[-1]}
+        preferred = {h: normalize_ip(d.get("ip"))
+                     for h, d in (port_scan.get("by_host") or {}).items() if isinstance(d, dict)}
+        contenders: Dict[str, List[str]] = {}
+        for ip in ip_list:
+            result = results_by_ip.get(ip)
+            for host_key, _ in (result[0] if result else []):
+                contenders.setdefault(host_key, []).append(normalize_ip(ip))
+        owners: Dict[str, str] = {}
+
+        for ip in ip_list:
+            result = results_by_ip.get(ip)
+            if result is None:
+                continue
+            hosts, services, vulns, version, cmd_str, _ = result
+
+            if not full_command and cmd_str:
+                full_command = cmd_str
+            if not nmap_version and version:
+                nmap_version = version
+
+            for host_key, host_data in hosts:
+                merged_by_host[_merge_key(host_key, ip, owners, preferred, contenders)] = host_data
+
+            merged_services.extend(services)
+            merged_vulns.extend(vulns)
 
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
@@ -596,6 +698,9 @@ def run_nmap_scan(recon_data: dict, output_file: Path = None, settings: dict = N
                 cve_tag = f" ({vuln['cve']})" if vuln.get("cve") else ""
                 print(f"[+][Nmap] VULN: {vuln['script_id']} on {vuln['host']}:{vuln['port']}{cve_tag}")
 
+        if unscanned_ips:
+            _keep_nse_findings_on(unscanned_ips, nmap_results)
+
         recon_data["nmap_scan"] = nmap_results
 
         if output_file:
@@ -607,6 +712,7 @@ def run_nmap_scan(recon_data: dict, output_file: Path = None, settings: dict = N
 
     except Exception as e:
         print(f"[!][Nmap] Error during scan: {e}")
+        _keep_every_nse_finding("the nmap scan failed")
         return recon_data
     finally:
         try:

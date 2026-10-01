@@ -42,9 +42,10 @@ class _RateLimiter:
             time.sleep(delay)
 
 try:
-    from recon.main_recon_modules.ip_filter import filter_ips_for_enrichment
+    from recon.main_recon_modules.ip_filter import (
+        collect_cdn_ips, filter_ips_for_enrichment, in_published_cdn_range)
 except ImportError:
-    from ip_filter import filter_ips_for_enrichment
+    from ip_filter import collect_cdn_ips, filter_ips_for_enrichment, in_published_cdn_range
 
 logger = logging.getLogger(__name__)
 
@@ -609,6 +610,36 @@ def run_shodan_enrichment(combined_result: dict, settings: dict[str, Any]) -> di
     shodan_scope.finish("shodan_enrich", payload=shodan_data)
     combined_result["shodan"] = shodan_data
     return combined_result
+
+
+def drop_cdn_ips(shodan_data: dict, combined_result: dict) -> int:
+    """Drop Shodan results for IPs that turned out to be CDN edges. Returns how many.
+
+    In the full pipeline Shodan runs beside the port scan, on a snapshot taken
+    before naabu flagged any CDN IP, so its own filter could not skip them. An
+    edge's ports and CVEs belong to the CDN, not to the target. Domain DNS
+    records are kept: they say what the names resolve to, not what runs there.
+    """
+    cdn_ips = collect_cdn_ips(combined_result)
+
+    def is_cdn(ip) -> bool:
+        return bool(ip) and (ip in cdn_ips or in_published_cdn_range(ip))
+
+    hosts = shodan_data.get("hosts") or []
+    reverse_dns = shodan_data.get("reverse_dns") or {}
+    cves = shodan_data.get("cves") or []
+    dropped = ({h.get("ip") for h in hosts if is_cdn(h.get("ip"))}
+               | {ip for ip in reverse_dns if is_cdn(ip)}
+               | {c.get("ip") for c in cves if is_cdn(c.get("ip"))})
+    if not dropped:
+        return 0
+    if "hosts" in shodan_data:
+        shodan_data["hosts"] = [h for h in hosts if h.get("ip") not in dropped]
+    if "reverse_dns" in shodan_data:
+        shodan_data["reverse_dns"] = {ip: v for ip, v in reverse_dns.items() if ip not in dropped}
+    if "cves" in shodan_data:
+        shodan_data["cves"] = [c for c in cves if c.get("ip") not in dropped]
+    return len(dropped)
 
 
 def run_shodan_enrichment_isolated(combined_result: dict, settings: dict[str, Any]) -> dict:

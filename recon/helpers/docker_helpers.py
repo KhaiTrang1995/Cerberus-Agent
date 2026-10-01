@@ -156,15 +156,23 @@ def ensure_templates_volume(docker_image: str, auto_update: bool = False) -> boo
             print(f"[*][Docker] Checking for template updates...")
         
         if needs_download or auto_update:
-            update_result = subprocess.run(
-                ["docker", "run", "--rm",
-                 "-v", f"{NUCLEI_TEMPLATES_VOLUME}:/root/nuclei-templates",
-                 docker_image,
-                 "-ut"],  # Update templates
-                capture_output=True,
-                text=True,
-                timeout=600  # 10 minutes for initial download
-            )
+            try:
+                update_result = subprocess.run(
+                    ["docker", "run", "--rm",
+                     "-v", f"{NUCLEI_TEMPLATES_VOLUME}:/root/nuclei-templates",
+                     docker_image,
+                     "-ut"],  # Update templates
+                    capture_output=True,
+                    text=True,
+                    timeout=600  # 10 minutes for initial download
+                )
+            except subprocess.TimeoutExpired:
+                if needs_download:
+                    raise
+                # The volume already holds templates: scan with those, as a
+                # failed (non-zero) update below already does.
+                print("[!][Docker] Template update timed out - using the templates already in the volume")
+                return True
             
             if update_result.returncode != 0:
                 print(f"[!][Docker] Warning: Template update may have issues")

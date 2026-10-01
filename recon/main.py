@@ -684,13 +684,120 @@ def merge_port_scan_results(combined_result: dict) -> None:
     }
 
 
+def _drop_shodan_cdn_ips(combined_result: dict) -> None:
+    """Drop Shodan results for the IPs the port scan flagged as CDN. Never raises.
+
+    Shodan runs beside the port scan, so its IP filter could not see naabu's
+    CDN flags; this is the first point where both results are known.
+    """
+    shodan_data = combined_result.get("shodan")
+    if not shodan_data or not combined_result.get("port_scan"):
+        return
+    try:
+        from recon.main_recon_modules.shodan_enrich import drop_cdn_ips
+        dropped = drop_cdn_ips(shodan_data, combined_result)
+    except Exception as e:  # noqa: BLE001 - keeping the results beats losing the run
+        print(f"[!][Shodan] Could not drop CDN IPs from the results: {type(e).__name__}")
+        return
+    if dropped:
+        print(f"[*][Shodan] Dropped results for {dropped} CDN IP(s) flagged by the port scan")
+
+
+def _apply_nmap_detail(ps_pd: dict, nmap_pd: dict) -> None:
+    if nmap_pd.get("product"):
+        ps_pd["product"] = nmap_pd["product"]
+    if nmap_pd.get("version"):
+        ps_pd["version"] = nmap_pd["version"]
+    if nmap_pd.get("cpe"):
+        ps_pd["cpe"] = nmap_pd["cpe"]
+    if nmap_pd.get("scripts"):
+        ps_pd["scripts"] = nmap_pd["scripts"]
+
+
+def _add_nmap_confirmed_ports(nmap_data: dict, port_scan: dict) -> list:
+    """Add the open ports nmap confirmed that the port scan did not report.
+
+    nmap probes every IP with the union of all IPs' ports, so it can confirm a
+    port naabu/masscan missed on one of them. Each one joins by_ip, every
+    by_host entry on that IP, all_ports and the summary counts in naabu's
+    shape, and is returned for the graph writer, which creates its Port node.
+    A CDN edge is skipped: NAABU_EXCLUDE_CDN limits those to 80/443 on purpose,
+    and an edge's other ports belong to the CDN, not to the target.
+    """
+    from recon.main_recon_modules.nmap_scan import normalize_ip
+
+    by_ip = port_scan.get("by_ip") or {}
+    by_host = port_scan.get("by_host") or {}
+    ip_keys = {normalize_ip(ip): ip for ip in by_ip}
+    hosts_on: dict = {}
+    for entry in by_host.values():
+        if isinstance(entry, dict) and entry.get("ip"):
+            hosts_on.setdefault(normalize_ip(entry["ip"]), []).append(entry)
+
+    added = []
+    for nmap_host in (nmap_data.get("by_host") or {}).values():
+        ip = normalize_ip(nmap_host.get("ip"))
+        if not ip:
+            continue
+        ip_entry = by_ip.get(ip_keys.get(ip))
+        if not isinstance(ip_entry, dict):
+            ip_entry = None
+        if ip_entry is not None and ip_entry.get("is_cdn"):
+            continue
+        entries = hosts_on.get(ip, [])
+        known = set((ip_entry or {}).get("ports") or [])
+        for entry in entries:
+            known.update(entry.get("ports") or [])
+
+        for nmap_pd in nmap_host.get("port_details", []):
+            port = nmap_pd.get("port")
+            if not port or port in known or nmap_pd.get("state", "open") != "open":
+                continue
+            known.add(port)
+            protocol = nmap_pd.get("protocol") or "tcp"
+            service = nmap_pd.get("service") or ""
+            if ip_entry is not None:
+                ip_entry.setdefault("ports", []).append(port)
+                ip_entry["ports"].sort()
+                if isinstance(ip_entry.get("port_details"), list):
+                    ip_entry["port_details"].append(
+                        {"port": port, "protocol": protocol, "service": service})
+            for entry in entries:
+                entry.setdefault("ports", []).append(port)
+                entry["ports"].sort()
+                detail = {"port": port, "protocol": protocol, "service": service}
+                _apply_nmap_detail(detail, nmap_pd)
+                entry.setdefault("port_details", []).append(detail)
+                entry["port_details"].sort(key=lambda x: x["port"])
+            added.append({"ip": ip_keys.get(ip) or nmap_host.get("ip"), "port": port,
+                          "protocol": protocol, "service": service})
+
+    if added:
+        all_ports = sorted(set(port_scan.get("all_ports") or []) | {a["port"] for a in added})
+        port_scan["all_ports"] = all_ports
+        summary = port_scan.get("summary")
+        if isinstance(summary, dict):
+            if "total_open_ports" in summary:
+                summary["total_open_ports"] = sum(len(h.get("ports", [])) for h in by_host.values())
+            if "hosts_with_open_ports" in summary:
+                summary["hosts_with_open_ports"] = len([h for h in by_host.values() if h.get("ports")])
+            if "unique_ports" in summary:
+                summary["unique_ports"] = all_ports
+            if "unique_port_count" in summary:
+                summary["unique_port_count"] = len(all_ports)
+    return added
+
+
 def merge_nmap_into_port_scan(combined_result: dict) -> None:
     """
     Merge Nmap service version data into port_scan.port_details.
 
     Enriches existing port_details entries (from Naabu/Masscan) with Nmap's
-    product, version, CPE, and NSE script results. Does NOT add new ports.
+    product, version, CPE, and NSE script results, and adds the open ports nmap
+    confirmed that the port scan missed (listed in nmap_scan.new_open_ports).
     """
+    from recon.main_recon_modules.nmap_scan import normalize_ip
+
     nmap_data = combined_result.get("nmap_scan", {})
     port_scan = combined_result.get("port_scan", {})
     if not nmap_data or not port_scan:
@@ -702,19 +809,21 @@ def merge_nmap_into_port_scan(combined_result: dict) -> None:
         ps_host = port_scan.get("by_host", {}).get(host)
         if not ps_host:
             continue
+        # A hostname can front several IPs; never copy one IP's versions onto another's ports.
+        if (ps_host.get("ip") and nmap_host.get("ip")
+                and normalize_ip(ps_host["ip"]) != normalize_ip(nmap_host["ip"])):
+            continue
         for nmap_pd in nmap_host.get("port_details", []):
             for ps_pd in ps_host.get("port_details", []):
                 if ps_pd.get("port") == nmap_pd.get("port"):
-                    if nmap_pd.get("product"):
-                        ps_pd["product"] = nmap_pd["product"]
-                    if nmap_pd.get("version"):
-                        ps_pd["version"] = nmap_pd["version"]
-                    if nmap_pd.get("cpe"):
-                        ps_pd["cpe"] = nmap_pd["cpe"]
-                    if nmap_pd.get("scripts"):
-                        ps_pd["scripts"] = nmap_pd["scripts"]
+                    _apply_nmap_detail(ps_pd, nmap_pd)
                     enriched_count += 1
                     break
+
+    added = _add_nmap_confirmed_ports(nmap_data, port_scan)
+    if added:
+        nmap_data["new_open_ports"] = added
+        print(f"[+][Nmap] Added {len(added)} open port(s) the port scan did not report")
 
     # Update scan_metadata to include nmap
     scanners = port_scan.get("scan_metadata", {}).get("scanners", [])
@@ -1026,6 +1135,8 @@ def run_ip_recon(target_ips: list, settings: dict) -> dict:
         if "masscan_scan" in combined_result:
             merge_port_scan_results(combined_result)
 
+        _drop_shodan_cdn_ips(combined_result)
+
         save_recon_file(combined_result, output_file)
 
         if "shodan" in combined_result:
@@ -1048,18 +1159,24 @@ def run_ip_recon(target_ips: list, settings: dict) -> dict:
         print(f"\n[*][Pipeline] GROUP 3.5: Nmap Service Detection (IP mode)")
         print("-" * 40)
 
-        from recon.main_recon_modules.nmap_scan import run_nmap_scan
-        combined_result = run_nmap_scan(combined_result, output_file=output_file, settings=settings)
-        combined_result["metadata"]["modules_executed"].append("nmap_scan")
+        try:
+            from recon.main_recon_modules.nmap_scan import run_nmap_scan
+            combined_result = run_nmap_scan(combined_result, output_file=output_file, settings=settings)
+            combined_result["metadata"]["modules_executed"].append("nmap_scan")
 
-        # Merge Nmap service versions (incl. ai_runtime_version) into port_scan.port_details
-        if "nmap_scan" in combined_result:
-            merge_nmap_into_port_scan(combined_result)
+            # Merge Nmap service versions (incl. ai_runtime_version) into port_scan.port_details
+            if "nmap_scan" in combined_result:
+                merge_nmap_into_port_scan(combined_result)
 
-        save_recon_file(combined_result, output_file)
+            save_recon_file(combined_result, output_file)
 
-        if "nmap_scan" in combined_result:
-            _graph_update_bg("update_graph_from_nmap", combined_result, USER_ID, PROJECT_ID)
+            if "nmap_scan" in combined_result:
+                _graph_update_bg("update_graph_from_nmap", combined_result, USER_ID, PROJECT_ID)
+        except Exception as e:
+            print(f"[!][Pipeline] nmap failed: {e}")
+            combined_result["metadata"].setdefault("phase_errors", {})["nmap"] = str(e)
+            _note_phase_error("nmap")
+            save_recon_file(combined_result, output_file)
 
     # =====================================================================
     # GROUP 3.6 — TLS certificate grab (tlsx), IP mode.
@@ -1652,6 +1769,8 @@ def run_domain_recon(target: str, bruteforce: bool = False,
         if "masscan_scan" in combined_result:
             merge_port_scan_results(combined_result)
 
+        _drop_shodan_cdn_ips(combined_result)
+
         save_recon_file(combined_result, output_file)
 
         # Background graph updates for Shodan + port scan
@@ -1671,18 +1790,24 @@ def run_domain_recon(target: str, bruteforce: bool = False,
         print(f"\n[*][Pipeline] GROUP 3.5: Nmap Service Detection + NSE Vuln Scripts")
         print("-" * 40)
 
-        from recon.main_recon_modules.nmap_scan import run_nmap_scan
-        combined_result = run_nmap_scan(combined_result, output_file=output_file, settings=_settings)
-        combined_result["metadata"]["modules_executed"].append("nmap_scan")
+        try:
+            from recon.main_recon_modules.nmap_scan import run_nmap_scan
+            combined_result = run_nmap_scan(combined_result, output_file=output_file, settings=_settings)
+            combined_result["metadata"]["modules_executed"].append("nmap_scan")
 
-        # Merge Nmap service versions into port_scan.port_details
-        if "nmap_scan" in combined_result:
-            merge_nmap_into_port_scan(combined_result)
+            # Merge Nmap service versions into port_scan.port_details
+            if "nmap_scan" in combined_result:
+                merge_nmap_into_port_scan(combined_result)
 
-        save_recon_file(combined_result, output_file)
+            save_recon_file(combined_result, output_file)
 
-        if "nmap_scan" in combined_result:
-            _graph_update_bg("update_graph_from_nmap", combined_result, USER_ID, PROJECT_ID)
+            if "nmap_scan" in combined_result:
+                _graph_update_bg("update_graph_from_nmap", combined_result, USER_ID, PROJECT_ID)
+        except Exception as e:
+            print(f"[!][Pipeline] nmap failed: {e}")
+            combined_result["metadata"].setdefault("phase_errors", {})["nmap"] = str(e)
+            _note_phase_error("nmap")
+            save_recon_file(combined_result, output_file)
 
     # =====================================================================
     # GROUP 3.6 — TLS certificate grab (tlsx)
@@ -2160,6 +2285,7 @@ def _prune_recon_findings():
 # re-checked none of them, so its sources are left out of the prune.
 _PHASE_FINDING_SOURCES = {
     "http_probe": ("http_probe",),
+    "nmap": ("nmap_nse",),
     "resource_enum": ("resource_enum", "jsluice"),
     "ai_surface_recon": ("ai_surface_recon",),
     "js_recon": ("js_recon",),

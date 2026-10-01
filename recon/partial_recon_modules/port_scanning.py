@@ -395,6 +395,54 @@ def run_masscan(config: dict) -> None:
     )
 
 
+def _norm_ip(ip) -> str:
+    import ipaddress as _ipaddress
+    text = str(ip or "").strip()
+    try:
+        return str(_ipaddress.ip_address(text))
+    except ValueError:
+        return text.lower()
+
+
+def _drop_ports_nmap_found_closed(recon_data: dict, injected: dict) -> int:
+    """Remove the custom ports nmap scanned on an IP and did not find open.
+
+    `injected` maps a by_host key to the custom ports this run added to it;
+    ports the graph already had are never touched. When nmap did not run, or
+    gave up on that IP (its `unreachable_hosts`), the operator's explicit input
+    is all there is, so those ports stay. by_ip is left as it is: the port_scan
+    writer reads it only to decide whether to write the IP node.
+
+    Returns how many (IP, port) pairs were removed.
+    """
+    nmap_data = recon_data.get("nmap_scan")
+    if not isinstance(nmap_data, dict):
+        return 0
+    gave_up = {_norm_ip(ip) for ip in nmap_data.get("unreachable_hosts", [])}
+    open_on: dict = {}
+    for entry in (nmap_data.get("by_host") or {}).values():
+        ip = _norm_ip(entry.get("ip"))
+        for pd in entry.get("port_details", []):
+            if pd.get("state", "open") == "open":
+                open_on.setdefault(ip, set()).add(pd.get("port"))
+
+    dropped = set()
+    by_host = recon_data.get("port_scan", {}).get("by_host", {})
+    for host, ports in injected.items():
+        entry = by_host.get(host)
+        ip = _norm_ip((entry or {}).get("ip"))
+        if not entry or not ip or ip in gave_up:
+            continue
+        closed = {p for p in ports if p not in open_on.get(ip, set())}
+        if not closed:
+            continue
+        entry["ports"] = [p for p in entry.get("ports", []) if p not in closed]
+        entry["port_details"] = [pd for pd in entry.get("port_details", [])
+                                 if pd.get("port") not in closed]
+        dropped.update((ip, p) for p in closed)
+    return len(dropped)
+
+
 def run_nmap(config: dict) -> None:
     """
     Run partial Nmap service detection + NSE vulnerability scanning
@@ -572,6 +620,7 @@ def run_nmap(config: dict) -> None:
                     recon_data["dns"]["domain"]["has_records"] = True
 
     # Inject user-provided ports into port_scan (global -- applies to all IPs)
+    injected_ports = {}  # by_host key -> the custom ports added to it, not already in the graph
     if user_ports:
         for port in user_ports:
             if port not in recon_data["port_scan"]["all_ports"]:
@@ -583,12 +632,13 @@ def run_nmap(config: dict) -> None:
                     ip_data["port_details"].append({
                         "port": port, "protocol": "tcp", "service": "",
                     })
-            for host_data in recon_data["port_scan"]["by_host"].values():
+            for host, host_data in recon_data["port_scan"]["by_host"].items():
                 if port not in host_data["ports"]:
                     host_data["ports"].append(port)
                     host_data["port_details"].append({
                         "port": port, "protocol": "tcp", "service": "",
                     })
+                    injected_ports.setdefault(host, set()).add(port)
         recon_data["port_scan"]["all_ports"].sort()
         print(f"[+][Partial Recon] Injected {len(user_ports)} custom ports into scan targets")
 
@@ -611,6 +661,11 @@ def run_nmap(config: dict) -> None:
     print(f"[*][Partial Recon] Running Nmap service detection + NSE vuln scripts...")
     result = run_nmap_scan(recon_data, output_file=None, settings=settings)
 
+    dropped = _drop_ports_nmap_found_closed(result, injected_ports)
+    if dropped:
+        print(f"[*][Partial Recon] {dropped} custom IP:port pair(s) nmap found closed or "
+              f"filtered are not written as open ports")
+
     # Merge Nmap service versions into port_scan.port_details
     if "nmap_scan" in result:
         merge_nmap_into_port_scan(result)
@@ -627,7 +682,8 @@ def run_nmap(config: dict) -> None:
                 stats = {}
 
                 # If user provided custom ports, create Port nodes first
-                # (update_graph_from_nmap uses MATCH, so Port nodes must exist)
+                # (update_graph_from_nmap only enriches Port nodes that exist, and
+                # a custom port is not one of the new ports it creates itself)
                 if user_ports and "port_scan" in result:
                     ps_stats = graph_client.update_graph_from_port_scan(
                         recon_data=result,
