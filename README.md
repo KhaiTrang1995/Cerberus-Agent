@@ -17,7 +17,7 @@
 
 <p align="center">
   <a href="https://www.redamon.org/"><img height="34" src="https://img.shields.io/badge/🌐_Website-redamon.org-A01025?style=for-the-badge&labelColor=000000" alt="RedAmon Website"/></a>
-  <a href="https://discord.com/invite/dxSrH2gaC"><img height="34" src="https://img.shields.io/badge/Discord-Join_Community-5865F2?style=for-the-badge&logo=discord&logoColor=white&labelColor=000000" alt="Discord Community"/></a>
+  <a href="https://discord.gg/5Zyff6PrUF"><img height="34" src="https://img.shields.io/badge/Discord-Join_Community-5865F2?style=for-the-badge&logo=discord&logoColor=white&labelColor=000000" alt="Discord Community"/></a>
   <a href="https://t.me/redamon_ai"><img height="34" src="https://img.shields.io/badge/Telegram-Join_Channel-26A5E4?style=for-the-badge&logo=telegram&logoColor=white&labelColor=000000" alt="Telegram Channel"/></a>
   <a href="https://youtu.be/XJyQHa4RTbI"><img height="34" src="https://img.shields.io/badge/YouTube-Platform_Tour-FF0000?style=for-the-badge&logo=youtube&logoColor=white&labelColor=000000" alt="RedAmon Platform Tour"/></a>
 </p>
