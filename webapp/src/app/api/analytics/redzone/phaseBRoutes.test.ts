@@ -109,6 +109,18 @@ describe('/api/analytics/redzone/webInitAccess', () => {
     expect(c).toMatch(/HAS_HEADER.*is_security_header = true/s)
   })
 
+  // httpx writes status, Server and headers onto the probed Endpoint, never onto
+  // the thin BaseURL, so reading them only from `bu` left both columns null and
+  // every header missing.
+  test('reads status, Server and security headers from the probed Endpoint too', async () => {
+    await webInitRoute.GET(makeRequest('p1'))
+    const c = runCalls[0].cypher
+    expect(c).toMatch(/\(bu\)-\[:HAS_ENDPOINT\*0\.\.1\]->\(\)-\[:HAS_HEADER\]->\(h:Header\)/)
+    expect(c).toMatch(/coalesce\(bu\.status_code, probe\.status_code\) AS statusCode/)
+    expect(c).toMatch(/coalesce\(bu\.server, probe\.server\)\s+AS server/)
+    expect(c).toMatch(/WHEN probe\.path = '\/' THEN 0/)
+  })
+
   test('passes the merged WEB_AUTH + HEADER_HYGIENE type list as $allTypes', async () => {
     await webInitRoute.GET(makeRequest('p1'))
     const types = runCalls[0].params.allTypes as string[]

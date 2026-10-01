@@ -49,6 +49,12 @@ export async function GET(request: NextRequest) {
     //   (a) hosts an Endpoint classified as auth/login/admin, OR
     //   (b) has a web-auth / header-hygiene security_check Vulnerability
     // Aggregates per-BaseURL: endpoint breakdown + linked vuln tags + security-header presence.
+    //
+    // A BaseURL is a thin service node: httpx writes the status, Server banner
+    // and response headers onto the Endpoint it probed (graph_db http_mixin), so
+    // they are read from there, the root path first. The BaseURL-level reads stay
+    // for a graph written before that split. Each OPTIONAL MATCH is aggregated
+    // before the next one so the endpoint, vuln and header rows never multiply.
     const result = await session.run(
       `MATCH (bu:BaseURL {project_id: $pid})
        OPTIONAL MATCH (bu)-[:HAS_ENDPOINT]->(ep:Endpoint)
@@ -56,29 +62,34 @@ export async function GET(request: NextRequest) {
            ep.category IN $authCategories OR
            ep.path =~ '(?i).*/(login|signin|sign-in|admin|auth|authenticate|oauth|sso)(/|$|\\\\?).*'
          )
-       OPTIONAL MATCH (bu)-[:HAS_ENDPOINT]->(anyEp:Endpoint)
+       WITH bu, collect(DISTINCT ep) AS authEps
        OPTIONAL MATCH (bu)-[:HAS_VULNERABILITY]->(v:Vulnerability)
          WHERE (v.type IN $allTypes OR v.vulnerability_type IN $allTypes OR v.name IN $allTypes)
            AND ${notMuted('v')}
-       OPTIONAL MATCH (bu)-[:HAS_HEADER]->(h:Header)
-         WHERE h.is_security_header = true
-       OPTIONAL MATCH (sd:Subdomain)-[:HAS_BASE_URL]->(bu)
-       WITH bu, sd,
-            collect(DISTINCT ep) AS authEps,
-            collect(DISTINCT anyEp) AS allEps,
-            collect(DISTINCT h.name) AS secHeaders,
-            collect(DISTINCT coalesce(v.type, v.vulnerability_type, v.name)) AS vulnTags
+       WITH bu, authEps, collect(DISTINCT coalesce(v.type, v.vulnerability_type, v.name)) AS vulnTags
        WHERE size(authEps) > 0 OR size([x IN vulnTags WHERE x IS NOT NULL]) > 0
+       OPTIONAL MATCH (bu)-[:HAS_ENDPOINT]->(anyEp:Endpoint)
+       WITH bu, authEps, vulnTags, count(DISTINCT anyEp) AS totalEndpointCount
+       OPTIONAL MATCH (bu)-[:HAS_ENDPOINT*0..1]->()-[:HAS_HEADER]->(h:Header)
+         WHERE h.is_security_header = true
+       WITH bu, authEps, vulnTags, totalEndpointCount, collect(DISTINCT h.name) AS secHeaders
+       OPTIONAL MATCH (bu)-[:HAS_ENDPOINT]->(probe:Endpoint)
+         WHERE probe.status_code IS NOT NULL
+       WITH bu, authEps, vulnTags, totalEndpointCount, secHeaders, probe
+       ORDER BY CASE WHEN probe.path = '/' THEN 0
+                     WHEN probe.server IS NOT NULL THEN 1 ELSE 2 END, probe.path
+       WITH bu, authEps, vulnTags, totalEndpointCount, secHeaders, head(collect(probe)) AS probe
+       OPTIONAL MATCH (sd:Subdomain)-[:HAS_BASE_URL]->(bu)
        RETURN toString(id(bu))                       AS nodeId,
               bu.url                                 AS baseUrl,
               bu.scheme                              AS scheme,
-              bu.status_code                         AS statusCode,
-              bu.server                              AS server,
+              coalesce(bu.status_code, probe.status_code) AS statusCode,
+              coalesce(bu.server, probe.server)      AS server,
               sd.name                                AS subdomain,
               [e IN authEps | e.path]                AS authEndpointPaths,
               [e IN authEps | e.method]              AS authEndpointMethods,
               [e IN authEps WHERE e.category IS NOT NULL | e.category] AS authCategories,
-              size(allEps)                           AS totalEndpointCount,
+              totalEndpointCount,
               size(authEps)                          AS authEndpointCount,
               [x IN vulnTags WHERE x IS NOT NULL]    AS vulnTags,
               [h IN secHeaders WHERE h IS NOT NULL]  AS securityHeadersPresent,
