@@ -133,7 +133,7 @@ def _fofa_classify(resp):
     return cb.CallResult(data, cb.Outcome.OK, res.detail)
 
 
-def _fofa_query(query: str, keys, size: int, *, admitted: bool = False):
+def _fofa_query(query: str, keys, size: int, *, admitted: bool = False, page: int = 1):
     """Run FOFA search/all through the FOFA breaker; returns a CallResult.
 
     ``keys`` is a KeyPool: the key is read per request, so rotation happens,
@@ -149,6 +149,9 @@ def _fofa_query(query: str, keys, size: int, *, admitted: bool = False):
             "fields": FOFA_FIELDS,
             "size": size,
         }
+        # FOFA's default page is 1, so the first request is sent unchanged.
+        if page > 1:
+            params["page"] = page
         return requests.get(FOFA_API_URL, params=params, timeout=30)
 
     return cb.guarded_call(_fofa_breaker(), send, _fofa_classify, keys=keys, admitted=admitted)
@@ -204,6 +207,39 @@ def _parse_fofa_rows(data: dict) -> tuple[list[dict], int]:
                 d[k] = str(d[k])
         rows.append(d)
     return rows, int(total) if total is not None else len(rows)
+
+
+def _fofa_fetch_pages(query: str, keys, per_page: int, max_results: int, *,
+                      admitted: bool = False, before_next_page=None, sink: list | None = None):
+    """Rows for ``query``, page by page, until ``max_results`` rows, a short
+    page, or FOFA's reported total. Returns (rows, total_hint, answered).
+
+    One request returns at most ``per_page`` rows, so a single call silently
+    capped FOFA_MAX_RESULTS at 100. A page that fails ends the walk and keeps
+    the pages already fetched. ``before_next_page`` paces the next request and
+    may return False to stop (a paused breaker). Rows are appended to ``sink``
+    as they arrive, so a caller's error path still holds them.
+    """
+    rows_out = sink if sink is not None else []
+    total_hint = 0
+    answered = False
+    page = 1
+    while True:
+        res = _fofa_query(query, keys, per_page, admitted=admitted, page=page)
+        if not res.answered:
+            break
+        answered = True
+        rows, total = _parse_fofa_rows(res.data or {})
+        if page == 1:
+            total_hint = total
+        rows_out.extend(rows)
+        if (len(rows_out) >= max_results or len(rows) < per_page
+                or (total and page * per_page >= total)):
+            break
+        page += 1
+        if before_next_page is not None and before_next_page() is False:
+            break
+    return rows_out, total_hint, answered
 
 
 def run_fofa_enrichment(combined_result: dict, settings: dict[str, Any]) -> dict:
@@ -273,10 +309,18 @@ def run_fofa_enrichment(combined_result: dict, settings: dict[str, Any]) -> dict
                 rate_limiter.wait()
                 q = f'ip="{ip}"'
                 size = min(per_request_size, max_results)
-                res = _fofa_query(q, keys, size, admitted=True)
-                if not res.answered:
+
+                def _admit_next_page():
+                    if not breaker.allow():
+                        return False
+                    rate_limiter.wait()
+                    return True
+
+                rows, t, answered = _fofa_fetch_pages(
+                    q, keys, size, max_results, admitted=True,
+                    before_next_page=_admit_next_page)
+                if not answered:
                     return None
-                rows, t = _parse_fofa_rows(res.data or {})
                 return rows, t
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -300,10 +344,9 @@ def run_fofa_enrichment(combined_result: dict, settings: dict[str, Any]) -> dict
             else:
                 print(f"[+][FOFA] Domain mode — {domain}")
                 q = f'domain="{domain}"'
-                res = _fofa_query(q, keys, per_request_size)
-                if res.answered:
-                    rows, total_hint = _parse_fofa_rows(res.data or {})
-                    aggregated = rows[:max_results]
+                _, total_hint, _ = _fofa_fetch_pages(
+                    q, keys, per_request_size, max_results,
+                    before_next_page=lambda: time.sleep(1), sink=aggregated)
                 time.sleep(1)
 
         fofa_data["results"] = aggregated[:max_results]
