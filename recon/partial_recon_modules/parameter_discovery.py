@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -99,6 +100,7 @@ def run_paramspider(config: dict) -> None:
         target_domains,
         PARAMSPIDER_PLACEHOLDER,
         PARAMSPIDER_TIMEOUT,
+        settings.get('PARAMSPIDER_WORKERS', 5),
     )
     print(f"[+][Partial Recon] ParamSpider discovered {len(paramspider_urls)} parameterized URLs")
 
@@ -315,39 +317,56 @@ def run_kiterunner(config: dict) -> None:
     KITERUNNER_METHOD_DETECT_THREADS = settings.get('KITERUNNER_METHOD_DETECT_THREADS', 20)
     GAU_VERIFY_DOCKER_IMAGE = settings.get('GAU_VERIFY_DOCKER_IMAGE', 'projectdiscovery/httpx:latest')
 
-    # Ensure Kiterunner binary and run discovery for each wordlist
-    kr_results = []
-    for wordlist_name in KITERUNNER_WORDLISTS:
+    # Ensure Kiterunner binary and run discovery for each wordlist, as many
+    # wordlists at once as KITERUNNER_PARALLELISM allows (the full pipeline's
+    # behaviour). The binary is fetched once up front so the parallel calls only
+    # resolve their wordlists.
+    def _run_wordlist(wordlist_name):
         print(f"\n[*][Partial Recon] Processing wordlist: {wordlist_name}")
+        kr_binary_path, wordlist_path = ensure_kiterunner_binary(wordlist_name)
+        if not kr_binary_path or not wordlist_path:
+            print(f"[!][Partial Recon] Could not get binary/wordlist: {wordlist_name}")
+            return []
+        return run_kiterunner_discovery(
+            target_urls,
+            kr_binary_path,
+            wordlist_path,
+            wordlist_name,
+            KITERUNNER_RATE_LIMIT,
+            KITERUNNER_CONNECTIONS,
+            KITERUNNER_TIMEOUT,
+            KITERUNNER_SCAN_TIMEOUT,
+            KITERUNNER_THREADS,
+            KITERUNNER_IGNORE_STATUS,
+            KITERUNNER_MATCH_STATUS,
+            KITERUNNER_MIN_CONTENT_LENGTH,
+            KITERUNNER_HEADERS,
+        )
+
+    futures = {}
+    if KITERUNNER_WORDLISTS:
         try:
-            kr_binary_path, wordlist_path = ensure_kiterunner_binary(wordlist_name)
-            if not kr_binary_path or not wordlist_path:
-                print(f"[!][Partial Recon] Could not get binary/wordlist: {wordlist_name}")
-                continue
-            wordlist_results = run_kiterunner_discovery(
-                target_urls,
-                kr_binary_path,
-                wordlist_path,
-                wordlist_name,
-                KITERUNNER_RATE_LIMIT,
-                KITERUNNER_CONNECTIONS,
-                KITERUNNER_TIMEOUT,
-                KITERUNNER_SCAN_TIMEOUT,
-                KITERUNNER_THREADS,
-                KITERUNNER_IGNORE_STATUS,
-                KITERUNNER_MATCH_STATUS,
-                KITERUNNER_MIN_CONTENT_LENGTH,
-                KITERUNNER_HEADERS,
-            )
-            # Merge results, avoiding duplicates
-            existing_urls = {(r['url'], r['method']) for r in kr_results}
-            for result in wordlist_results:
-                if (result['url'], result['method']) not in existing_urls:
-                    kr_results.append(result)
-                    existing_urls.add((result['url'], result['method']))
-            print(f"[+][Partial Recon] {wordlist_name}: {len(wordlist_results)} endpoints found, {len(kr_results)} total unique")
+            ensure_kiterunner_binary(KITERUNNER_WORDLISTS[0])
+        except Exception as e:
+            print(f"[!][Partial Recon] Kiterunner binary setup failed: {e}")
+        workers = max(1, min(settings.get('KITERUNNER_PARALLELISM', 2), len(KITERUNNER_WORDLISTS)))
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {wl: executor.submit(_run_wordlist, wl) for wl in KITERUNNER_WORDLISTS}
+
+    # Merge in wordlist order, not completion order, so a run is reproducible.
+    kr_results = []
+    existing_urls = set()
+    for wordlist_name in KITERUNNER_WORDLISTS:
+        try:
+            wordlist_results = futures[wordlist_name].result()
         except Exception as e:
             print(f"[!][Partial Recon] Failed for {wordlist_name}: {e}")
+            continue
+        for result in wordlist_results:
+            if (result['url'], result['method']) not in existing_urls:
+                kr_results.append(result)
+                existing_urls.add((result['url'], result['method']))
+        print(f"[+][Partial Recon] {wordlist_name}: {len(wordlist_results)} endpoints found, {len(kr_results)} total unique")
 
     print(f"[+][Partial Recon] Kiterunner found {len(kr_results)} total API endpoints")
 

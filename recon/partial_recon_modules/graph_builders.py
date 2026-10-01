@@ -1,11 +1,28 @@
 import os
 import sys
 from pathlib import Path
+from urllib.parse import urlencode
 
 PROJECT_ROOT = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from recon.partial_recon_modules.helpers import _classify_ip, allowed_hosts_for, include_root_for, root_for_host
+
+#: A BaseURL is a thin service-identity node: httpx writes the response data
+#: (status, content type, CDN flags) onto the Endpoint it probed, never onto the
+#: BaseURL. Reading `b.status_code` therefore always saw null, so every partial
+#: target looked like a 200 and the CDN prefilter never fired. Pick the probed
+#: Endpoint: the root path first, then one httpx wrote (it alone sets `server`).
+#: The `coalesce(b.x, probe.x)` readers still honour a graph from before the split.
+_PROBED_ENDPOINT = """
+                OPTIONAL MATCH (b)-[:HAS_ENDPOINT]->(probe:Endpoint)
+                WHERE probe.status_code IS NOT NULL
+                WITH b, probe
+                ORDER BY CASE WHEN probe.path = '/' THEN 0
+                              WHEN probe.server IS NOT NULL THEN 1 ELSE 2 END,
+                         probe.path
+                WITH b, head(collect(probe)) AS probe
+"""
 
 
 def _as_roots(domains) -> list:
@@ -56,6 +73,40 @@ def _other_domains(session, user_id: str, project_id: str, roots: list) -> list:
     return [r["name"] for r in result if r["name"] and r["name"].lower() not in wanted]
 
 
+def _co_hosted_vhost_hosts(session, user_id: str, project_id: str) -> frozenset:
+    """Hostnames the graph knows only as a co-hosted third party's virtual host.
+
+    VHost/SNI enumeration keeps a BaseURL for a name it found on a target IP
+    even when the name is outside the engagement (hung off the Service, owned by
+    no Subdomain). That is a record of what the IP serves, not a target: the
+    name resolves wherever its own DNS says, usually a third party's server.
+    A host some other writer also recorded is left alone. Never raises; on a
+    failed read nothing extra is dropped.
+    """
+    try:
+        result = session.run(
+            """
+            MATCH (b:BaseURL {user_id: $uid, project_id: $pid})
+            WHERE b.discovery_source = 'vhost_sni_enum' AND b.host IS NOT NULL
+              AND NOT EXISTS { MATCH (b)<-[:HAS_BASE_URL]-(:Subdomain) }
+            WITH DISTINCT toLower(b.host) AS host
+            WHERE NOT EXISTS {
+                MATCH (o:BaseURL {user_id: $uid, project_id: $pid})
+                WHERE toLower(o.host) = host
+                  AND coalesce(o.discovery_source, '') <> 'vhost_sni_enum'
+            }
+            RETURN collect(host) AS co_hosted_vhost_hosts
+            """,
+            uid=user_id, pid=project_id,
+        )
+        hosts = set()
+        for record in result:
+            hosts.update(h for h in (record.get("co_hosted_vhost_hosts") or []) if h)
+        return frozenset(hosts)
+    except Exception:  # noqa: BLE001
+        return frozenset()
+
+
 def graph_url_scope(session, user_id: str, project_id: str, domains, domain_groups,
                     include_root_domain: bool = False, apex_filter: bool = True):
     """A predicate over a graph URL's host: is it a target of this run?
@@ -63,13 +114,23 @@ def graph_url_scope(session, user_id: str, project_id: str, domains, domain_grou
     Drops a host under a Domain this run does not cover, and a host a literal
     batch group never listed. With apex_filter, also an apex its group
     excludes (the tools that always honoured Include Root Domain). A host under
-    no project root (an IP, a third-party host) is kept, as before. A caller
+    no project root (an IP, a third-party host) is kept, as before, unless the
+    graph knows it only as a co-hosted vhost name (_co_hosted_vhost_hosts). A caller
     not yet migrated (no domain_groups) gets only the apex rule it had.
     """
     roots = _as_roots(domains)
     apex_roots, allowed = _root_scope(roots, domain_groups, include_root_domain)
     other_roots = _other_domains(session, user_id, project_id, roots) if domain_groups is not None else []
     known = roots + other_roots
+    # Loaded lazily, and only when a host under no project root turns up: the
+    # common run has none, so the extra query never fires (and fixed-sequence
+    # test mocks are untouched).
+    co_hosted_cache: dict = {}
+
+    def _co_hosted() -> frozenset:
+        if "set" not in co_hosted_cache:
+            co_hosted_cache["set"] = _co_hosted_vhost_hosts(session, user_id, project_id)
+        return co_hosted_cache["set"]
 
     def keep(host) -> bool:
         host = (host or "").strip().lower()
@@ -77,7 +138,7 @@ def graph_url_scope(session, user_id: str, project_id: str, domains, domain_grou
             return True
         root = root_for_host(host, known)
         if root is None:
-            return True
+            return host not in _co_hosted()
         if root in other_roots:
             return False
         if apex_filter and host == root.lower() and root not in apex_roots:
@@ -488,8 +549,9 @@ def _build_http_probe_data_from_graph(domains, user_id: str, project_id: str,
             result = session.run(
                 """
                 MATCH (b:BaseURL {user_id: $uid, project_id: $pid})
-                RETURN b.url AS url, b.status_code AS status_code,
-                       b.host AS host, b.content_type AS content_type
+                """ + _PROBED_ENDPOINT + """
+                RETURN b.url AS url, coalesce(b.status_code, probe.status_code) AS status_code,
+                       b.host AS host, coalesce(b.content_type, probe.content_type) AS content_type
                 """,
                 uid=user_id, pid=project_id,
             )
@@ -674,9 +736,11 @@ def _build_vuln_scan_data_from_graph(domains, user_id: str, project_id: str,
             result = session.run(
                 """
                 MATCH (b:BaseURL {user_id: $uid, project_id: $pid})
-                RETURN b.url AS url, b.status_code AS status_code,
-                       b.host AS host, b.content_type AS content_type,
-                       b.is_cdn AS is_cdn, b.cdn AS cdn, b.asn AS asn
+                """ + _PROBED_ENDPOINT + """
+                RETURN b.url AS url, coalesce(b.status_code, probe.status_code) AS status_code,
+                       b.host AS host, coalesce(b.content_type, probe.content_type) AS content_type,
+                       coalesce(b.is_cdn, probe.is_cdn) AS is_cdn,
+                       coalesce(b.cdn, probe.cdn) AS cdn, coalesce(b.asn, probe.asn) AS asn
                 """,
                 uid=user_id, pid=project_id,
             )
@@ -727,7 +791,30 @@ def _build_vuln_scan_data_from_graph(domains, user_id: str, project_id: str,
                             if not entry.get("cdn"):
                                 entry["cdn"] = record["cdn"]
 
-            # 4) Endpoints with parameters (for DAST mode)
+            # 4) Endpoints with parameters (for DAST mode). run_vuln_scan keeps
+            #    only URLs carrying `?` and `=`. The crawlers' raw URLs are not
+            #    stored (resource_enum writes no `full_url`), so rebuild each one
+            #    from its query Parameters the way build_target_urls_from_resource_enum
+            #    does: first sample value, else "1".
+            result = session.run(
+                """
+                MATCH (b:BaseURL {user_id: $uid, project_id: $pid})
+                      -[:HAS_ENDPOINT]->(e:Endpoint)
+                      -[:HAS_PARAMETER]->(p:Parameter)
+                WHERE p.position = 'query' AND p.name IS NOT NULL AND e.path IS NOT NULL
+                WITH b, e, p ORDER BY p.name
+                RETURN b.url AS baseurl, e.path AS path,
+                       collect(DISTINCT [p.name, coalesce(head(p.sample_values), '1')]) AS params
+                """,
+                uid=user_id, pid=project_id,
+            )
+            discovered_urls = []
+            for record in result:
+                base = record["baseurl"]
+                params = [(name, str(value)) for name, value in (record["params"] or []) if name]
+                if base and params and keep(url_host(base)):
+                    discovered_urls.append(f"{base}{record['path']}?{urlencode(params)}")
+            # URLs other writers store whole (JS Recon, urlscan) still count.
             result = session.run(
                 """
                 MATCH (b:BaseURL {user_id: $uid, project_id: $pid})
@@ -737,12 +824,11 @@ def _build_vuln_scan_data_from_graph(domains, user_id: str, project_id: str,
                 """,
                 uid=user_id, pid=project_id,
             )
-            discovered_urls = []
             for record in result:
                 url = record["url"]
                 if url and keep(url_host(record["baseurl"] or url)):
                     discovered_urls.append(url)
-            recon_data["resource_enum"]["discovered_urls"] = discovered_urls
+            recon_data["resource_enum"]["discovered_urls"] = list(dict.fromkeys(discovered_urls))
 
     return recon_data
 
@@ -799,10 +885,11 @@ def _build_graphql_data_from_graph(domains, user_id: str, project_id: str,
             result = session.run(
                 """
                 MATCH (b:BaseURL {user_id: $uid, project_id: $pid})
+                """ + _PROBED_ENDPOINT + """
                 RETURN b.url AS url,
                        b.host AS host,
-                       b.status_code AS status_code,
-                       b.content_type AS content_type
+                       coalesce(b.status_code, probe.status_code) AS status_code,
+                       coalesce(b.content_type, probe.content_type) AS content_type
                 """,
                 uid=user_id, pid=project_id,
             )

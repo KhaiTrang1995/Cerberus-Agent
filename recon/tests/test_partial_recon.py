@@ -5287,7 +5287,11 @@ class TestRunNuclei(unittest.TestCase):
 
         def mock_session_run(query, **kwargs):
             result = MagicMock()
-            if 'BaseURL' in query and 'HAS_ENDPOINT' not in query and 'RETURN' in query:
+            # The BaseURL-list reads are the only ones returning `b.url AS url`;
+            # they now also OPTIONAL MATCH the probed Endpoint for status/server,
+            # so matching on that column instead of "no HAS_ENDPOINT" keeps them
+            # distinct from the endpoint/parameter/DAST reads.
+            if 'BaseURL' in query and 'b.url AS url' in query and 'HAS_PARAMETER' not in query:
                 records = []
                 for bu_data in _graph_baseurls:
                     record = MagicMock()

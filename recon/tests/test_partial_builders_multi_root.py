@@ -101,7 +101,7 @@ class _Session:
                              "ports": _ports(ip), "is_cdn": None, "cdn_name": None, "asn": None})
         elif "RETURN d.name AS name" in cypher:
             rows.extend({"name": name} for name in GRAPH_DOMAINS)
-        elif "MATCH (b:BaseURL" in cypher and "HAS_ENDPOINT" not in cypher:
+        elif "MATCH (b:BaseURL" in cypher and "AS status_code" in cypher:
             for url, host in BASEURLS:
                 rows.append({"url": url, "host": host, "status_code": 200,
                              "content_type": "text/html", "is_cdn": False, "cdn": None, "asn": None})

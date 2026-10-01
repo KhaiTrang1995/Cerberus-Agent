@@ -163,6 +163,8 @@ def run_katana(config: dict) -> None:
     KATANA_PARAMS_ONLY = settings.get('KATANA_PARAMS_ONLY', False)
     KATANA_CUSTOM_HEADERS = merge_auth_headers(settings.get('KATANA_CUSTOM_HEADERS', []), settings, sorted(target_domains))
     KATANA_EXCLUDE_PATTERNS = settings.get('KATANA_EXCLUDE_PATTERNS', [])
+    KATANA_PARALLELISM = settings.get('KATANA_PARALLELISM', 5)
+    KATANA_CONCURRENCY = settings.get('KATANA_CONCURRENCY', 10)
 
     # Pull Docker image
     print(f"[*][Partial Recon] Pulling Katana Docker image: {KATANA_DOCKER_IMAGE}")
@@ -182,6 +184,8 @@ def run_katana(config: dict) -> None:
         target_domains,
         KATANA_CUSTOM_HEADERS,
         KATANA_EXCLUDE_PATTERNS,
+        KATANA_PARALLELISM,
+        KATANA_CONCURRENCY,
     )
     print(f"[+][Partial Recon] Katana found {len(katana_urls)} URLs")
 
@@ -440,7 +444,9 @@ def run_hakrawler(config: dict) -> None:
         HAKRAWLER_INSECURE,
         target_domains,
         HAKRAWLER_CUSTOM_HEADERS,
-        [],  # no exclude patterns for Hakrawler
+        # The full pipeline filters Hakrawler with the shared crawl excludes too.
+        settings.get('KATANA_EXCLUDE_PATTERNS', []),
+        settings.get('HAKRAWLER_PARALLELISM', 4),
     )
     print(f"[+][Partial Recon] Hakrawler found {len(hakrawler_urls)} URLs")
 
@@ -1344,6 +1350,7 @@ def run_gau(config: dict) -> None:
         GAU_YEAR_RANGE,
         GAU_VERBOSE,
         URLSCAN_API_KEY,
+        settings.get('GAU_WORKERS', 10),
     )
     print(f"[+][Partial Recon] GAU discovered {len(gau_urls)} total URLs")
 
