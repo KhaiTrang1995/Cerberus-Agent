@@ -100,18 +100,51 @@ def mark_database_updated(settings: Optional[Dict] = None):
     marker_file.write_text(datetime.now().isoformat())
 
 
+def _atomic_write_bytes(dest_path: Path, data: bytes) -> None:
+    """Write via a sibling temp file + os.replace, so a failure never truncates dest.
+
+    The replaced file keeps the old one's mode and owner: these files are
+    tracked in the host checkout that recon/ is bind-mounted from, and a
+    root-owned copy left by the scan container is what redamon.sh warns blocks
+    a future `git pull`.
+    """
+    tmp = dest_path.with_name(f".{dest_path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_bytes(data)
+        try:
+            st = dest_path.stat()
+            os.chmod(tmp, st.st_mode & 0o7777)
+            os.chown(tmp, st.st_uid, st.st_gid)
+        except OSError:
+            pass  # new file, or not permitted: keep the temp file's defaults
+        os.replace(tmp, dest_path)
+    finally:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
 def download_file(url: str, dest_path: Path) -> bool:
     """Download a file from URL to destination path."""
     try:
         print(f"[*][MITRE] Downloading: {dest_path.name}...", end=" ", flush=True)
         response = requests.get(url, timeout=60)
         response.raise_for_status()
-        dest_path.write_bytes(response.content)
+        _atomic_write_bytes(dest_path, response.content)
         print("OK")
         return True
     except Exception as e:
         print(f"[!][MITRE] FAILED ({e})")
         return False
+
+
+def _is_older_than(path: Path, ttl_hours) -> bool:
+    try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime)
+    except OSError:
+        return True
+    return (datetime.now() - mtime).total_seconds() / 3600 >= ttl_hours
 
 
 def download_resource_files(db_path: Path) -> bool:
@@ -308,8 +341,7 @@ def download_cwe_metadata(db_path: Path, settings: Optional[Dict] = None) -> boo
 
         # Save parsed data
         dest_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(dest_file, 'w') as f:
-            json.dump(cwe_metadata, f)
+        _atomic_write_bytes(dest_file, json.dumps(cwe_metadata).encode())
 
         print(f"[+][MITRE] OK ({len(cwe_metadata)} CWEs)")
         return True
@@ -446,8 +478,7 @@ def download_capec_metadata(db_path: Path, settings: Optional[Dict] = None) -> b
 
         # Save parsed data
         dest_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(dest_file, 'w') as f:
-            json.dump(capec_metadata, f)
+        _atomic_write_bytes(dest_file, json.dumps(capec_metadata).encode())
 
         print(f"[+][MITRE] OK ({len(capec_metadata)} CAPECs)")
         return True
@@ -476,7 +507,7 @@ def get_needed_years(cve_ids: List[str]) -> set:
                 year = int(parts[1])
                 if 1999 <= year <= datetime.now().year:
                     years.add(year)
-        except (ValueError, IndexError):
+        except (ValueError, IndexError, AttributeError, TypeError):
             continue
     return years
 
@@ -495,10 +526,23 @@ def update_database(cve_ids: List[str] = None, force: bool = False, settings: Op
     """
     settings = settings or DEFAULT_MITRE_SETTINGS
     db_path = ensure_database_directory(settings)
+    cache_ttl = settings.get('MITRE_CACHE_TTL_HOURS', DEFAULT_MITRE_SETTINGS['MITRE_CACHE_TTL_HOURS'])
+
+    def year_file(year: int) -> Path:
+        return db_path / "database" / f"CVE-{year}.jsonl"
 
     # Check if update is needed
     if not force and is_database_fresh(settings):
-        print("[*][MITRE] Database is up to date (within TTL)")
+        # The TTL marker covers resources and metadata only. A year this run's
+        # CVEs need but the DB has never fetched would otherwise stay missing
+        # for the whole TTL, silently giving those CVEs no CWE/CAPEC.
+        missing = sorted(y for y in get_needed_years(cve_ids or []) if not year_file(y).exists())
+        if missing:
+            print(f"[*][MITRE] Database within TTL; fetching missing CVE years: {missing}")
+            for year in missing:
+                download_cve_database_year(db_path, year)
+        else:
+            print("[*][MITRE] Database is up to date (within TTL)")
         return True
 
     print("\n" + "=" * 60)
@@ -518,22 +562,27 @@ def update_database(cve_ids: List[str] = None, force: bool = False, settings: Op
     # Download official MITRE CAPEC metadata (descriptions, severity, execution flow)
     download_capec_metadata(db_path, settings)
 
-    # Download CVE database files for needed years
+    # Download CVE database files for needed years. A year file a CVE of this
+    # run needs is refreshed once it is older than the TTL: upstream appends new
+    # CVEs to the current year's file daily, and a copy fetched once (or shipped
+    # in the checkout) otherwise never learns them. Without CVE ids nothing is
+    # about to be enriched, so the recent-years backfill only fills gaps rather
+    # than re-fetching ~100 MB per TTL.
     if cve_ids:
-        years = get_needed_years(cve_ids)
-        print(f"[*][MITRE] Downloading CVE database for years: {sorted(years)}")
-        for year in sorted(years):
-            db_file = db_path / "database" / f"CVE-{year}.jsonl"
-            if not db_file.exists() or force:
-                download_cve_database_year(db_path, year)
+        years = sorted(get_needed_years(cve_ids))
+        refresh_stale = True
+        print(f"[*][MITRE] Downloading CVE database for years: {years}")
     else:
         # Download recent years by default (last 10 years)
         current_year = datetime.now().year
+        years = list(range(current_year - 10, current_year + 1))
+        refresh_stale = False
         print(f"[*][MITRE] Downloading CVE database for recent years...")
-        for year in range(current_year - 10, current_year + 1):
-            db_file = db_path / "database" / f"CVE-{year}.jsonl"
-            if not db_file.exists() or force:
-                download_cve_database_year(db_path, year)
+    for year in years:
+        db_file = year_file(year)
+        if (force or not db_file.exists()
+                or (refresh_stale and _is_older_than(db_file, cache_ttl))):
+            download_cve_database_year(db_path, year)
 
     mark_database_updated(settings)
     print("[+][MITRE] Database update complete")
