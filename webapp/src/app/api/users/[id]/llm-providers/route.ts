@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { Prisma } from '@prisma/client'
 import prisma from '@/lib/prisma'
 import { getSession, isInternalRequest } from '@/lib/session'
 import { isReasoningEffort } from '@/lib/llmReasoning'
@@ -8,6 +9,8 @@ import { JEV_MODEL, JEV_PROVIDER_NAME } from '@/lib/llmProviderKinds'
 interface RouteParams {
   params: Promise<{ id: string }>
 }
+
+class JevAlreadySaved extends Error {}
 
 function maskSecret(value: string): string {
   if (!value || value.length <= 4) return value ? '••••' : ''
@@ -111,13 +114,6 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       if (typeof body.apiKey !== 'string' || !body.apiKey.trim()) {
         return NextResponse.json({ error: 'apiKey is required for TypeSafe AI (Jev)' }, { status: 400 })
       }
-      const existingJev = await prisma.userLlmProvider.count({ where: { userId: id, providerType: 'jev' } })
-      if (existingJev > 0) {
-        return NextResponse.json(
-          { error: 'A TypeSafe AI (Jev) token is already saved. Edit it instead of adding another.' },
-          { status: 409 },
-        )
-      }
     }
 
     // For openai_compatible, baseUrl and modelIdentifier are required
@@ -142,8 +138,7 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
       }
     }
 
-    const provider = await prisma.userLlmProvider.create({
-      data: {
+    const data = {
         userId: id,
         providerType,
         name: isJev ? JEV_PROVIDER_NAME : name,
@@ -161,8 +156,32 @@ export async function POST(request: NextRequest, { params }: RouteParams) {
         awsAccessKeyId: body.awsAccessKeyId || '',
         awsSecretKey: body.awsSecretKey || '',
         awsBearerToken: body.awsBearerToken || '',
-      },
-    })
+    }
+
+    let provider
+    if (isJev) {
+      // One token per user is a rule over a COUNT, and there is no unique index to
+      // hold it (a user may have many rows of the other types). Count and create are
+      // therefore one Serializable transaction: two concurrent saves would otherwise
+      // both read 0 and both create. The loser fails with a serialization error.
+      try {
+        provider = await prisma.$transaction(async tx => {
+          const existingJev = await tx.userLlmProvider.count({ where: { userId: id, providerType: 'jev' } })
+          if (existingJev > 0) throw new JevAlreadySaved()
+          return tx.userLlmProvider.create({ data })
+        }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
+      } catch (e) {
+        if (e instanceof JevAlreadySaved || (e as { code?: string })?.code === 'P2034') {
+          return NextResponse.json(
+            { error: 'A TypeSafe AI (Jev) token is already saved. Edit it instead of adding another.' },
+            { status: 409 },
+          )
+        }
+        throw e
+      }
+    } else {
+      provider = await prisma.userLlmProvider.create({ data })
+    }
 
     return NextResponse.json(
       maskProvider(provider as unknown as Record<string, unknown>),

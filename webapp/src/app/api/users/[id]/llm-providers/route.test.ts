@@ -17,6 +17,7 @@ import { NextRequest } from 'next/server'
 const mockFindMany = vi.fn()
 const mockCreate = vi.fn()
 const mockCount = vi.fn()
+const mockTransaction = vi.fn()
 const mockUserFindUnique = vi.fn()
 const mockGetSession = vi.fn()
 const mockIsInternal = vi.fn()
@@ -28,6 +29,7 @@ vi.mock('@/lib/prisma', () => ({
       create: (...args: unknown[]) => mockCreate(...args),
       count: (...args: unknown[]) => mockCount(...args),
     },
+    $transaction: (...args: unknown[]) => mockTransaction(...args),
     user: {
       findUnique: (...args: unknown[]) => mockUserFindUnique(...args),
     },
@@ -62,6 +64,10 @@ beforeEach(() => {
   mockFindMany.mockReset().mockResolvedValue([PROVIDER])
   mockCreate.mockReset().mockResolvedValue({ ...PROVIDER })
   mockCount.mockReset().mockResolvedValue(0)
+  // The interactive transaction hands the callback a client whose provider calls are
+  // the same mocks, so the Jev POST tests below see one behaviour either way.
+  mockTransaction.mockReset().mockImplementation(async (fn: (tx: unknown) => unknown) =>
+    fn({ userLlmProvider: { count: mockCount, create: mockCreate } }))
   mockUserFindUnique.mockReset().mockResolvedValue({ id: 'victim' })
   mockGetSession.mockReset()
   mockIsInternal.mockReset()
@@ -281,5 +287,41 @@ describe('POST /api/users/[id]/llm-providers - TypeSafe Jev', () => {
     const res = await POST(postReq('victim', NEW_PROVIDER), params('victim'))
     expect(res.status).toBe(201)
     expect(mockCount).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /api/users/[id]/llm-providers - the one-token rule holds under concurrency', () => {
+  const JEV_BODY = { providerType: 'jev', name: 'x', apiKey: 'apikey_abc_def' }
+
+  test('REGRESSION (duplicate token race): the count and the create are one Serializable transaction', async () => {
+    // A count followed by a create is check-then-act: two concurrent saves both read 0
+    // and both create, and there is no unique index to stop the second.
+    mockGetSession.mockResolvedValue({ userId: 'victim', role: 'user' })
+    const res = await POST(postReq('victim', JEV_BODY), params('victim'))
+    expect(res.status).toBe(201)
+    expect(mockTransaction).toHaveBeenCalledTimes(1)
+    expect(mockTransaction.mock.calls[0][1]).toEqual({ isolationLevel: 'Serializable' })
+  })
+
+  test('REGRESSION: the loser of the race gets 409 (a serialization failure), not a 500', async () => {
+    mockGetSession.mockResolvedValue({ userId: 'victim', role: 'user' })
+    mockTransaction.mockRejectedValue(Object.assign(new Error('write conflict'), { code: 'P2034' }))
+    const res = await POST(postReq('victim', JEV_BODY), params('victim'))
+    expect(res.status).toBe(409)
+    expect((await res.json()).error).toMatch(/already saved/)
+  })
+
+  test('an unrelated database failure is still a 500, not a misleading 409', async () => {
+    mockGetSession.mockResolvedValue({ userId: 'victim', role: 'user' })
+    mockTransaction.mockRejectedValue(new Error('connection lost'))
+    const res = await POST(postReq('victim', JEV_BODY), params('victim'))
+    expect(res.status).toBe(500)
+  })
+
+  test('a chat provider pays for no transaction', async () => {
+    mockGetSession.mockResolvedValue({ userId: 'victim', role: 'user' })
+    const res = await POST(postReq('victim', NEW_PROVIDER), params('victim'))
+    expect(res.status).toBe(201)
+    expect(mockTransaction).not.toHaveBeenCalled()
   })
 })

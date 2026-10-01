@@ -35,9 +35,13 @@ export function useHasJevProvider(): JevProviderStatus {
         }
         const rows = await resp.json()
         if (cancelled) return
-        const has = Array.isArray(rows) && rows.some(
-          (r: { providerType?: string }) => r?.providerType === 'jev')
-        setStatus(has ? 'yes' : 'no')
+        // A 200 that is not a list (an error payload, a proxy page) tells us
+        // nothing about the account, so it is a failed lookup, not "no token".
+        if (!Array.isArray(rows)) {
+          setStatus('error')
+          return
+        }
+        setStatus(rows.some((r: { providerType?: string }) => r?.providerType === 'jev') ? 'yes' : 'no')
       } catch {
         if (!cancelled) setStatus('error')
       }

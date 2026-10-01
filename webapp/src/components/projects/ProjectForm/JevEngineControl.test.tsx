@@ -1,0 +1,134 @@
+/**
+ * JevEngineControl: the LLM | Jev switch under a recon AI hook.
+ *
+ * The state table below is the spec. Its two hard rules are the ones a regression
+ * would break quietly:
+ *  - a project whose owner has no token must not be able to CHOOSE Jev from the
+ *    form (the server refuses it anyway, so the button must not invite it);
+ *  - a project that is ALREADY on Jev keeps that choice when the token is gone,
+ *    with a badge saying the hook falls back. The control never resets it on its
+ *    own, and the person can still switch to the LLM.
+ *
+ *   enabled=false (AI in Pipeline off)  value kept, both buttons disabled
+ *   loading                             Jev disabled, nothing written
+ *   error                               both enabled, warning shown
+ *   no token, value false               Jev disabled, tooltip points to Settings
+ *   no token, value true                Jev stays selected, badge, LLM selectable
+ *   yes                                 both enabled
+ *
+ * Run: npx vitest run src/components/projects/ProjectForm/JevEngineControl.test.tsx
+ */
+import { describe, test, expect, vi, afterEach } from 'vitest'
+import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { JevEngineControl } from './JevEngineControl'
+import type { JevProviderStatus } from '@/hooks/useHasJevProvider'
+
+afterEach(cleanup)
+
+function mount(over: Partial<{ value: boolean; enabled: boolean; jevStatus: JevProviderStatus }> = {}) {
+  const onSelect = vi.fn()
+  render(<JevEngineControl value={false} enabled jevStatus="yes" onSelect={onSelect} {...over} />)
+  return {
+    onSelect,
+    llm: screen.getByRole('button', { name: 'LLM' }),
+    jev: screen.getByRole('button', { name: 'Jev' }),
+  }
+}
+
+const BADGE = /No Jev token: this hook uses its static fallback/
+const WARNING = /Couldn't check your Jev token/
+
+describe('with a token', () => {
+  test('both engines are selectable and the stored choice is shown', () => {
+    const { llm, jev } = mount({ value: false, jevStatus: 'yes' })
+    expect(llm).toBeEnabled()
+    expect(jev).toBeEnabled()
+    expect(llm).toHaveAttribute('aria-pressed', 'true')
+    expect(jev).toHaveAttribute('aria-pressed', 'false')
+    expect(screen.queryByText(BADGE)).not.toBeInTheDocument()
+  })
+
+  test('picking an engine reports a boolean: Jev is true, LLM is false', () => {
+    const { onSelect, llm, jev } = mount({ value: false, jevStatus: 'yes' })
+    fireEvent.click(jev)
+    expect(onSelect).toHaveBeenLastCalledWith(true)
+    fireEvent.click(llm)
+    expect(onSelect).toHaveBeenLastCalledWith(false)
+  })
+
+  test('a stored Jev choice shows Jev as selected', () => {
+    const { llm, jev } = mount({ value: true, jevStatus: 'yes' })
+    expect(jev).toHaveAttribute('aria-pressed', 'true')
+    expect(llm).toHaveAttribute('aria-pressed', 'false')
+  })
+})
+
+describe('no token', () => {
+  test('and the hook on the LLM: Jev cannot be chosen, and the tooltip says where to add a token', () => {
+    const { onSelect, jev, llm } = mount({ value: false, jevStatus: 'no' })
+    expect(jev).toBeDisabled()
+    expect(jev).toHaveAttribute('title', expect.stringContaining('Settings → LLM Providers'))
+    expect(llm).toBeEnabled()
+    fireEvent.click(jev)
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(screen.queryByText(BADGE)).not.toBeInTheDocument()
+  })
+
+  test('and the hook already on Jev: Jev stays selected, with a badge, and nothing is written', () => {
+    const { onSelect, jev } = mount({ value: true, jevStatus: 'no' })
+    expect(jev).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByText(BADGE)).toBeInTheDocument()
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  test('and the hook already on Jev: the person can still switch to the LLM', () => {
+    const { onSelect, llm } = mount({ value: true, jevStatus: 'no' })
+    expect(llm).toBeEnabled()
+    fireEvent.click(llm)
+    expect(onSelect).toHaveBeenCalledWith(false)
+  })
+})
+
+describe('while the token lookup is unresolved', () => {
+  test('loading: Jev cannot be chosen yet, the stored value is shown, and nothing is written', () => {
+    const { onSelect, jev, llm } = mount({ value: true, jevStatus: 'loading' })
+    expect(jev).toBeDisabled()
+    expect(jev).toHaveAttribute('aria-pressed', 'true')
+    expect(llm).toBeEnabled()
+    fireEvent.click(jev)
+    expect(onSelect).not.toHaveBeenCalled()
+    expect(screen.queryByText(BADGE)).not.toBeInTheDocument()
+  })
+
+  test('error: both stay enabled (the server decides), with a warning, and no "no token" badge', () => {
+    const { llm, jev } = mount({ value: false, jevStatus: 'error' })
+    expect(llm).toBeEnabled()
+    expect(jev).toBeEnabled()
+    expect(screen.getByText(WARNING)).toBeInTheDocument()
+    expect(screen.queryByText(BADGE)).not.toBeInTheDocument()
+  })
+
+  test('error on a hook already on Jev: no badge claiming the token is missing', () => {
+    mount({ value: true, jevStatus: 'error' })
+    expect(screen.queryByText(BADGE)).not.toBeInTheDocument()
+    expect(screen.getByText(WARNING)).toBeInTheDocument()
+  })
+})
+
+describe('AI in Pipeline off', () => {
+  test.each<JevProviderStatus>(['yes', 'no', 'loading', 'error'])(
+    'both buttons are disabled and the value is kept (%s)', status => {
+      const { onSelect, llm, jev } = mount({ value: true, enabled: false, jevStatus: status })
+      expect(llm).toBeDisabled()
+      expect(jev).toBeDisabled()
+      expect(jev).toHaveAttribute('aria-pressed', 'true')
+      fireEvent.click(llm)
+      fireEvent.click(jev)
+      expect(onSelect).not.toHaveBeenCalled()
+    })
+
+  test('the tooltip names the master switch', () => {
+    const { jev } = mount({ value: false, enabled: false, jevStatus: 'yes' })
+    expect(jev).toHaveAttribute('title', expect.stringContaining('AI in Pipeline'))
+  })
+})

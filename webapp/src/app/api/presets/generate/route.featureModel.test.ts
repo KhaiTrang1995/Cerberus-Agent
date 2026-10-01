@@ -77,6 +77,21 @@ describe('a model it cannot use opens the picker', () => {
     expect(await res.json()).toMatchObject({ code: 'model_unavailable', model: 'custom/gone' })
   })
 
+  test('REGRESSION: a saved model naming a Jev token row is model_unavailable and the token is never sent', async () => {
+    // The picker never lists a Jev row, but a feature model is a free string and a row's id
+    // is a valid `custom/<id>`. The row here carries a base URL so that only the chat-provider
+    // filter, not the empty-URL branch, can stop the token being posted to it.
+    const JEV = { id: 'jev-row', providerType: 'jev', apiKey: 'apikey_secret_jev_token_value',
+                  modelIdentifier: 'jev-1.13.0', baseUrl: 'http://tokens.example/v1', timeout: 30,
+                  maxTokens: 4096, temperature: 0 }
+    mockProviders.mockResolvedValue([ANTHROPIC, JEV])
+    saved('custom/jev-row')
+    const res = await generate({ prompt: 'stealthy' })
+    expect(res.status).toBe(503)
+    expect(await res.json()).toMatchObject({ code: 'model_unavailable', model: 'custom/jev-row' })
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   test('a missing built-in provider is model_unavailable', async () => {
     saved('gpt-5')
     const res = await generate({ prompt: 'stealthy' })

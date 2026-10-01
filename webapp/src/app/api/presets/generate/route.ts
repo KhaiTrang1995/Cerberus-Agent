@@ -4,6 +4,7 @@ import { requireEffectiveUser } from '@/lib/access'
 import { reconPresetSchema, extractJson, RECON_PARAMETER_CATALOG } from '@/lib/recon-preset-schema'
 import { assertSafeLlmBaseUrl, BaseUrlValidationError } from '@/lib/llm-url-guard'
 import { readFeatureModel, featureModelErrorResponse } from '@/lib/featureModels'
+import { isChatProvider } from '@/lib/llmProviderKinds'
 
 // ---------------------------------------------------------------------------
 // POST /api/presets/generate
@@ -248,7 +249,10 @@ export async function POST(request: NextRequest) {
       })
     }
 
-    const providers = await prisma.userLlmProvider.findMany({ where: { userId } })
+    // Chat providers only: a non-chat row (the Jev token) is never a model to call, and
+    // `custom/<id>` accepts any row id, so without this the token would be posted to
+    // whatever base URL such a row held.
+    const providers = (await prisma.userLlmProvider.findMany({ where: { userId } })).filter(isChatProvider)
 
     let rawResponse: string
 
