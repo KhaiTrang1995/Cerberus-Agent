@@ -45,13 +45,14 @@ FACTORS and re-runs these same rules; it never produces a score.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Optional
 
 #: Bump on ANY change to a table, a threshold or a rule below. Stored with each
 #: run so two runs are only comparable when this matches.
-SCORE_MODEL_VERSION = "v3.2.0"
+SCORE_MODEL_VERSION = "v3.3.0"
 
 
 # ===========================================================================
@@ -362,6 +363,36 @@ SECURITY_CHECK_CLASSES = {
     "no_rate_limiting": FindingClass("rate_limit", 0.2, 0.3, caps_impact=True),
     "cors_misconfiguration": FindingClass("misconfig", 0.4, 0.5, caps_impact=True),
     "open_redirect": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    # A service that should never face the internet, reached directly. Not
+    # impact-capped: the check grades each one itself (a Kubernetes API that
+    # answers anonymously is critical, one that asks for a login is high), so
+    # its severity is a per-finding judgement. Calibrated against GVM's
+    # "Redis Server No Password", which lands at T3 ~39.
+    "redis_no_auth": FindingClass("unauthenticated_access", 0.5, 0.75),
+    "kubernetes_api_exposed": FindingClass("exposure", 0.5, 0.75),
+    "database_exposed": FindingClass("exposure", 0.5, 0.75),
+    "smtp_open_relay": FindingClass("spoofing", 0.5, 0.75),
+    "zone_transfer": FindingClass("info_disclosure", 0.5, 0.75),
+    # Real, but the attacker needs a position on the network path first.
+    "login_no_https": FindingClass("cleartext_credentials", 0.3, 0.5, caps_impact=True),
+    "basic_auth_no_tls": FindingClass("cleartext_credentials", 0.3, 0.5, caps_impact=True),
+    # Low risk on their own: the generic misconfig numbers.
+    "admin_port_exposed": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    "cache_purge_exposed": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    "session_no_secure": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    "session_no_httponly": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    "csp_unsafe_inline": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    "insecure_form_action": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    "dnssec_missing": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    "tls_expired": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    "tls_expiring_soon": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    "tls_self_signed": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    "tls_hostname_mismatch": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    "tls_weak_version": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    "tls_weak_cipher": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    "tls_wildcard_overbroad": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    "tls_weak_version_supported": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
+    "tls_weak_cipher_supported": FindingClass("misconfig", 0.3, 0.3, caps_impact=True),
 }
 
 #: Secret class by detector / secret_type. The `identifier` row is the fix for
@@ -371,7 +402,25 @@ SECRET_CLASSES = {
     "credential": FindingClass("credential", 0.6, 0.9, caps_impact=True),
     "secret": FindingClass("generic_secret", 0.4, 0.6, caps_impact=True),
     "identifier": FindingClass("identifier", 0.2, 0.1, caps_impact=True),
+    "public": FindingClass("public_client_id", 0.2, 0.1, caps_impact=True),
+    # A public client key a validator could spend on a paid API (an AIza key
+    # with no API restriction): billing abuse, not account takeover.
+    "public_unrestricted": FindingClass("unrestricted_api_key", 0.4, 0.45, caps_impact=True),
 }
+
+#: Keys that are PUBLIC BY DESIGN: they ship to every browser that loads the
+#: page, and the service limits what they can do. Exact producer names (the
+#: GitHub hunt's SECRET_PATTERNS and js_recon's _RAW_PATTERNS share them), never
+#: substrings: "gcp" alone is also a service-account key and "stripe" alone
+#: also a secret key, and both must stay credentials.
+PUBLIC_CLIENT_KEY_TYPES = frozenset({
+    "gcp api key",              # AIza..., a Google browser (Maps / Firebase) key
+    "gcpkey",                   # jsluice's name for the same AIza key
+    "stripe publishable key",   # pk_live_
+    "google recaptcha key",     # 6L..., the site key
+    "sentry dsn",
+    "mapbox token",             # the pattern only matches public pk. tokens
+})
 
 #: Substrings matched against the lowercased detector / secret_type, most
 #: specific first. A detector with no match falls to `generic_secret`.
@@ -423,8 +472,20 @@ FINGERPRINT_TAGS = frozenset({"tech", "detect", "detection", "panel", "favicon"}
 SENSITIVE_PORTS = frozenset({3306, 5432, 6379, 9200, 27017, 1433, 5984, 11211})
 
 
+def _names_a_public_client_key(detector: Any, secret_type: Any) -> bool:
+    return bool({_lower(detector), _lower(secret_type)} & PUBLIC_CLIENT_KEY_TYPES)
+
+
+def _is_public_client_key(finding: dict) -> bool:
+    return _names_a_public_client_key(finding.get("detector_name"),
+                                      finding.get("secret_type"))
+
+
 def classify_secret(detector: Any, secret_type: Any = None) -> FindingClass:
-    """credential / generic secret / identifier, from the detector name."""
+    """credential / generic secret / identifier / public client key, from the
+    detector name."""
+    if _names_a_public_client_key(detector, secret_type):
+        return SECRET_CLASSES["public"]
     haystack = f"{_lower(detector)} {_lower(secret_type)}".strip()
     for class_key, needles in SECRET_CLASS_PATTERNS:
         if any(needle in haystack for needle in needles):
@@ -517,6 +578,29 @@ CONFIDENCE_BY_SOURCE = {
 
 #: What an unknown source gets, plus a log line. Never silently right.
 CONFIDENCE_UNKNOWN_SOURCE = 0.75
+
+#: security_check types that INFER the problem rather than observe it, so they
+#: get a detector's C instead of the 1.0 of a fact. Every other check (a header
+#: that is absent, an AXFR that answered, a PONG with no AUTH, a relay that
+#: accepted the recipient) saw the condition itself and keeps 1.0.
+SECURITY_CHECK_CONFIDENCE = {
+    "admin_port_exposed": (0.75, "an open port; the service is assumed from its number"),
+    "database_exposed": (0.75, "an open port; the database is assumed from its number"),
+    "cache_purge_exposed": (0.75, "PURGE was accepted while a bogus method was refused"),
+    "kubernetes_api_exposed": (0.6, "a keyword in the /api response, not a verified API"),
+    "ip_api_exposed": (0.6, "an API inferred from a status code or a content type"),
+    "no_rate_limiting": (0.6, "ten logins went unthrottled; a limit may start later"),
+}
+
+#: waf_bypass by the `detection_method` the producer recorded. A node with none
+#: was written before the writer stored it, and keeps the 1.0 it was scored
+#: with until a rescan says how the bypass was found.
+WAF_BYPASS_CONFIDENCE = {
+    "payload_differential": (1.0, "the edge blocked a probe that the origin served"),
+    "static_headers": (0.75, "the edge's Server header names a WAF and the origin's does not"),
+    "ai_classifier": (0.6, "an AI classifier saw a WAF on the edge but not on the origin"),
+    "jev_classifier": (0.6, "a Jev classifier saw a WAF on the edge but not on the origin"),
+}
 
 #: How many labels it takes to move a detector's C halfway from its class prior
 #: to what an operator's clicks say. Ten is deliberately slow: a detector is
@@ -676,12 +760,45 @@ def finding_state(finding: dict, facts: ProjectFacts) -> tuple[str, str]:
     if validation == "unvalidated" and finding.get("validated_at"):
         # Checked and dead, as opposed to never checked at all.
         return STATE_INACTIVE, "the credential was tested and does not work"
+    if _validator_rejected_it(finding):
+        return STATE_INACTIVE, "a validator tested the credential and the service rejected it"
 
     host = finding.get("triage_host") or finding.get("host")
     if host and host in facts.gone_hosts:
         return STATE_GONE, "the host has no live endpoint and no open port"
 
     return STATE_OPEN, ""
+
+
+def _validator_rejected_it(finding: dict) -> bool:
+    """A validator ran and the service rejected the credential itself.
+
+    Only js_recon writes a "tested and dead" status, 'invalid', and it writes
+    the same word when the call never got an answer (a timeout, an open circuit
+    breaker, no key found in the match) and for ANY non-2xx answer.
+    `validation_info.error` tells the first apart; of the answers, only a 401
+    says the credential is not accepted. A 403 is as often a live key without
+    the scope (or the SSO grant) the probe needed, and a 404 a moved endpoint,
+    so those stay open: hiding a live credential is the failure to avoid.
+    'unvalidated' is never enough: js_recon means "no validator" by it.
+    """
+    if _lower(finding.get("validation_status")) != "invalid":
+        return False
+    info = finding.get("validation_info")
+    if isinstance(info, str):
+        try:
+            info = json.loads(info) if info.strip() else None
+        except ValueError:
+            return False
+    if not isinstance(info, dict):
+        return False
+    error = _lower(info.get("error"))
+    if error == "format_invalid":
+        return True
+    if error:
+        return False
+    status = re.search(r"\bstatus=(\d{3})\b", str(info.get("info") or ""))
+    return bool(status) and status.group(1) == "401"
 
 
 # ===========================================================================
@@ -801,7 +918,11 @@ def _rule_confidence(finding: dict, facts: ProjectFacts) -> Factor:
         return Factor(1.0, "proven: an exploit or a validated credential")
 
     if source == "security_check":
-        return Factor(1.0, "a deterministic check, not a detection")
+        return _security_check_confidence(finding)
+
+    if _lower(finding.get("validation_status")) == "validated" and \
+            _is_public_client_key(finding):
+        return Factor(0.95, "a validator called an API with the key and it worked")
 
     # ---- 0.95: the tool interacted with the finding and kept the proof ----
     if source == "nuclei":
@@ -903,6 +1024,22 @@ def _rule_confidence(finding: dict, facts: ProjectFacts) -> Factor:
     )
 
 
+def _security_check_confidence(finding: dict) -> Factor:
+    check = _lower(finding.get("type") or finding.get("name"))
+    if check == "waf_bypass":
+        method = _lower(finding.get("detection_method"))
+        if method:
+            value, why = WAF_BYPASS_CONFIDENCE.get(
+                method, (CONFIDENCE_UNKNOWN_SOURCE,
+                         f"unknown detection method {method}: using the default"))
+            return Factor(value, why)
+    elif check in SECURITY_CHECK_CONFIDENCE:
+        value, why = SECURITY_CHECK_CONFIDENCE[check]
+        return Factor(value, why)
+    return Factor(CONFIDENCE_BY_SOURCE["security_check"],
+                  "a deterministic check, not a detection")
+
+
 def is_proven(finding: dict, facts: ProjectFacts) -> bool:
     """Did something actually demonstrate this finding, rather than infer it?"""
     finding_id = str(finding.get("id") or "")
@@ -912,7 +1049,10 @@ def is_proven(finding: dict, facts: ProjectFacts) -> bool:
         return True
     if as_int(finding.get("confirmed_exploits")) > 0:
         return True
-    if _lower(finding.get("validation_status")) == "validated":
+    # A public client key is meant to work, so a validator getting an answer
+    # with one proves its normal state, not an exploit.
+    if _lower(finding.get("validation_status")) == "validated" and \
+            not _is_public_client_key(finding):
         return True
     if _lower(finding.get("verdict")) == "malicious":
         return True
@@ -1308,14 +1448,12 @@ def _class_for(finding: dict) -> FindingClass:
                  "MultiscannerFinding") or source in (
             "github_hunt", "github", "git", "trufflehog", "filesystem",
             "github_experimental"):
-        return classify_secret(finding.get("detector_name"),
-                               finding.get("secret_type"))
+        return _secret_class(finding)
     if label == "JsReconFinding" or source in ("js_recon", "jsluice"):
         finding_type = _lower(finding.get("finding_type"))
         if finding_type in JS_RECON_CLASSES:
             return JS_RECON_CLASSES[finding_type]
-        return classify_secret(finding.get("detector_name"),
-                               finding.get("secret_type"))
+        return _secret_class(finding)
     if source in ("osv", "retirejs", "guarddog") or label == "MalPackageFinding":
         # A dependency vulnerability with no vector and no intelligence.
         return FindingClass("dependency", 0.3, IMPACT_UNKNOWN)
@@ -1330,6 +1468,14 @@ def _class_for(finding: dict) -> FindingClass:
         return FindingClass("misconfig", 0.3, 0.3, caps_impact=True)
 
     return CLASS_DEFAULT
+
+
+def _secret_class(finding: dict) -> FindingClass:
+    klass = classify_secret(finding.get("detector_name"), finding.get("secret_type"))
+    if klass is SECRET_CLASSES["public"] and \
+            _lower(finding.get("validation_status")) == "validated":
+        return SECRET_CLASSES["public_unrestricted"]
+    return klass
 
 
 def _signals(finding, facts, intel, c, l, i, r, cvss, klass) -> list:

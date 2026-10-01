@@ -156,11 +156,13 @@ RETURN coalesce(p.purl, p.name) AS package,
     {
         "name": "sensitive_hosts",
         "description": "logins, admin vhosts, database ports, MCP and GraphQL",
+        # FFuf files a login path under 'auth'; the other classifiers write
+        # 'authentication'.
         "query": """
 CALL () {
     MATCH (b:BaseURL {user_id: $userId, project_id: $projectId})-[:HAS_ENDPOINT]->(e:Endpoint)
     WHERE e.is_form = true
-       OR toLower(coalesce(e.category, '')) = 'authentication'
+       OR toLower(coalesce(e.category, '')) IN ['authentication', 'auth']
        OR (e.ai_mcp_auth_required = false AND coalesce(e.ai_mcp_tool_count, 0) > 0)
     RETURN b.url AS host, true AS login
   UNION
@@ -191,7 +193,7 @@ RETURN collect(DISTINCT coalesce(n.base_url, bu.url, n.location)) AS hosts
         "description": "an injectable parameter on an authentication endpoint",
         "query": """
 MATCH (b:BaseURL {user_id: $userId, project_id: $projectId})-[:HAS_ENDPOINT]->(e:Endpoint)
-WHERE toLower(coalesce(e.category, '')) = 'authentication' OR e.is_form = true
+WHERE (toLower(coalesce(e.category, '')) IN ['authentication', 'auth'] OR e.is_form = true)
   AND EXISTS {
     MATCH (e)-[:HAS_PARAMETER]->(p:Parameter) WHERE p.is_injectable = true
   }
@@ -303,6 +305,7 @@ RETURN v.id AS id, 'Vulnerability' AS label,
        v.triage_status AS triage_status, v.triage_source AS triage_source,
        v.triage_evidence_hash AS triage_evidence_hash,
        v.validation_status AS validation_status, v.validated_at AS validated_at,
+       v.detection_method AS detection_method,
        toString(v.updated_at) AS seen_updated_at,
        // Host resolution, in the order of section 3.2.6.
        // A pattern comprehension takes ONE pattern, so each candidate is its
@@ -368,6 +371,7 @@ RETURN s.id AS id, 'Secret' AS label, coalesce(s.source, 'js_recon') AS source,
        coalesce(s.severity, 'medium') AS severity,
        s.secret_type AS secret_type, s.key_type AS detector_name,
        s.validation_status AS validation_status, s.validated_at AS validated_at,
+       s.validation_info AS validation_info,
        s.stale_since AS stale_since, s.confidence AS confidence,
        s.triage_status AS triage_status, s.triage_source AS triage_source,
        s.triage_evidence_hash AS triage_evidence_hash,

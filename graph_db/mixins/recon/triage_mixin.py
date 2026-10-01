@@ -307,9 +307,21 @@ _PERSON_DECIDED = ("(coalesce(n.triage_source, '') = 'human' "
 #: here would lift every finding on a compromised host to T1 "proven".
 _PROOF_TYPES = ("['exploit_success', 'access_gained', 'privilege_escalation', "
                 "'credential_found', 'vulnerability_confirmed']")
+#: score_model.PUBLIC_CLIENT_KEY_TYPES. graph_db cannot import the agent's
+#: model, so a test pins the two lists equal.
+_PUBLIC_CLIENT_KEY_TYPES = sorted({
+    "gcp api key", "gcpkey", "stripe publishable key", "google recaptcha key",
+    "sentry dsn", "mapbox token",
+})
+
+#: A validated public client key proves only that it works as designed, so like
+#: score_model.is_proven it is no proof. The finding's name lives in a different
+#: property per label: secret_type, key_type (js_recon) or detector_name.
 _LIVE_PROOF = f"""(n:ExploitGvm
           OR coalesce(toInteger(n.confirmed_exploits), 0) > 0
-          OR toLower(coalesce(n.validation_status, '')) = 'validated'
+          OR (toLower(coalesce(n.validation_status, '')) = 'validated'
+              AND NONE(name IN [n.secret_type, n.key_type, n.detector_name]
+                       WHERE toLower(coalesce(name, '')) IN {_PUBLIC_CLIENT_KEY_TYPES}))
           OR toLower(coalesce(n.verdict, '')) = 'malicious'
           OR toUpper(coalesce(n.finding_id, n.id, '')) STARTS WITH 'MAL-'
           OR EXISTS {{ MATCH (cf:ChainFinding)-[:CONFIRMS]->(n)
