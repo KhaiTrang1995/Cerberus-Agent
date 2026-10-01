@@ -7,6 +7,8 @@ import type { Project } from '@prisma/client'
 import styles from '../ProjectForm.module.css'
 import { NodeInfoTooltip } from '../NodeInfoTooltip'
 import { AiToggleLabel } from '../AiToggleLabel'
+import { JevEngineControl } from '../JevEngineControl'
+import { useHasJevProvider } from '@/hooks/useHasJevProvider'
 import { RegistryFields } from '../RegistryFields'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
@@ -49,6 +51,7 @@ const BADDNS_MODULE_DESCRIPTIONS: Record<string, string> = {
 }
 
 export function TakeoverSection({ data, updateField, onRun }: TakeoverSectionProps) {
+  const jevStatus = useHasJevProvider()
   const [isOpen, setIsOpen] = useState(true)
 
   const toggleSeverity = (severity: string) => {
@@ -169,6 +172,17 @@ export function TakeoverSection({ data, updateField, onRun }: TakeoverSectionPro
                     onChange={(checked) => updateField('takeoverAiClassifier', checked)}
                   />
                 </div>
+                {data.takeoverAiClassifier && (
+                  <div className={styles.toggleRow} style={{ alignItems: 'center', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}>
+                    <span className={styles.fieldLabel}>Engine</span>
+                    <JevEngineControl
+                      value={data.takeoverAiUseJev}
+                      enabled={data.aiInPipeline && data.takeoverAiClassifier}
+                      jevStatus={jevStatus}
+                      onSelect={(useJev) => updateField('takeoverAiUseJev', useJev)}
+                    />
+                  </div>
+                )}
               </div>
 
               {data.baddnsEnabled && (

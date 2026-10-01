@@ -7,6 +7,8 @@ import type { Project } from '@prisma/client'
 import styles from '../ProjectForm.module.css'
 import { NodeInfoTooltip } from '../NodeInfoTooltip'
 import { AiToggleLabel } from '../AiToggleLabel'
+import { JevEngineControl } from '../JevEngineControl'
+import { useHasJevProvider } from '@/hooks/useHasJevProvider'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -17,6 +19,7 @@ interface SecurityChecksSectionProps {
 }
 
 export function SecurityChecksSection({ data, updateField, onRun }: SecurityChecksSectionProps) {
+  const jevStatus = useHasJevProvider()
   const [isOpen, setIsOpen] = useState(true)
 
   return (
@@ -135,6 +138,17 @@ export function SecurityChecksSection({ data, updateField, onRun }: SecurityChec
                     onChange={(checked) => updateField('wafAiClassifier', checked)}
                   />
                 </div>
+                {data.wafAiClassifier && (
+                  <div className={styles.toggleRow} style={{ alignItems: 'center', gap: 'var(--space-2)', marginTop: 'var(--space-2)' }}>
+                    <span className={styles.fieldLabel}>Engine</span>
+                    <JevEngineControl
+                      value={data.wafAiUseJev}
+                      enabled={data.aiInPipeline && data.wafAiClassifier}
+                      jevStatus={jevStatus}
+                      onSelect={(useJev) => updateField('wafAiUseJev', useJev)}
+                    />
+                  </div>
+                )}
               </div>
 
               <div className={styles.subSection}>

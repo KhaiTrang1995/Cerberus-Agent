@@ -202,6 +202,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'NUCLEI_INTERACTSH': True,
     'NUCLEI_DOCKER_IMAGE': 'projectdiscovery/nuclei:latest',
     'NUCLEI_AI_TAGS': False,
+    'NUCLEI_TAGS_AI_USE_JEV': False,
     # Cascade-gated by AI_IN_PIPELINE. When on, is_false_positive() falls
     # back to the agent's /llm/nuclei-fp-filter endpoint when the keyword
     # WAF block list misses but the response still looks like a block.
@@ -236,6 +237,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # to disambiguate genuine "service unclaimed" pages from WAF block
     # pages that match the same static fingerprint.
     'TAKEOVER_AI_CLASSIFIER': False,
+    'TAKEOVER_AI_USE_JEV': False,
     # BadDNS (AGPL-3.0, isolated sidecar — disabled by default, opt-in)
     'BADDNS_ENABLED': False,
     'BADDNS_DOCKER_IMAGE': 'redamon-baddns:latest',
@@ -554,6 +556,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'FFUF_SMART_FUZZ_MAX_BASE_PATHS': 20,
     'FFUF_PARALLELISM': 20,
     'FFUF_AI_EXTENSIONS': False,
+    'FFUF_AI_USE_JEV': False,
 
     # Arjun Parameter Discovery
     'ARJUN_ENABLED': True,
@@ -616,6 +619,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     # check_waf_bypass() fall back to the agent's /llm/waf-classify endpoint
     # if the static Server/header token check returns no match.
     'WAF_AI_CLASSIFIER': False,
+    'WAF_AI_USE_JEV': False,
     'SECURITY_CHECK_TLS_EXPIRING_SOON': True,
     'SECURITY_CHECK_TLS_EXPIRY_DAYS': 30,
     # TLS-hygiene checks derived from certificate data (tlsx/httpx), per-check so
@@ -1383,6 +1387,7 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['NUCLEI_INTERACTSH'] = project.get('nucleiInteractsh', DEFAULT_SETTINGS['NUCLEI_INTERACTSH'])
     settings['NUCLEI_DOCKER_IMAGE'] = project.get('nucleiDockerImage', DEFAULT_SETTINGS['NUCLEI_DOCKER_IMAGE'])
     settings['NUCLEI_AI_TAGS'] = project.get('nucleiAiTags', DEFAULT_SETTINGS['NUCLEI_AI_TAGS'])
+    settings['NUCLEI_TAGS_AI_USE_JEV'] = project.get('nucleiTagsAiUseJev', DEFAULT_SETTINGS['NUCLEI_TAGS_AI_USE_JEV'])
     settings['NUCLEI_AI_RESPONSE_FILTER'] = project.get('nucleiAiResponseFilter', DEFAULT_SETTINGS['NUCLEI_AI_RESPONSE_FILTER'])
 
     # Subdomain Takeover Scanner
@@ -1403,6 +1408,7 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['TAKEOVER_RATE_LIMIT'] = project.get('takeoverRateLimit', DEFAULT_SETTINGS['TAKEOVER_RATE_LIMIT'])
     settings['TAKEOVER_MANUAL_REVIEW_AUTO_PUBLISH'] = project.get('takeoverManualReviewAutoPublish', DEFAULT_SETTINGS['TAKEOVER_MANUAL_REVIEW_AUTO_PUBLISH'])
     settings['TAKEOVER_AI_CLASSIFIER'] = project.get('takeoverAiClassifier', DEFAULT_SETTINGS['TAKEOVER_AI_CLASSIFIER'])
+    settings['TAKEOVER_AI_USE_JEV'] = project.get('takeoverAiUseJev', DEFAULT_SETTINGS['TAKEOVER_AI_USE_JEV'])
     settings['BADDNS_ENABLED'] = project.get('baddnsEnabled', DEFAULT_SETTINGS['BADDNS_ENABLED'])
     settings['BADDNS_DOCKER_IMAGE'] = project.get('baddnsDockerImage', DEFAULT_SETTINGS['BADDNS_DOCKER_IMAGE'])
     settings['BADDNS_MODULES'] = project.get('baddnsModules', DEFAULT_SETTINGS['BADDNS_MODULES'])
@@ -1597,6 +1603,7 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['FFUF_SMART_FUZZ_MAX_BASE_PATHS'] = project.get('ffufSmartFuzzMaxBasePaths', DEFAULT_SETTINGS['FFUF_SMART_FUZZ_MAX_BASE_PATHS'])
     settings['FFUF_PARALLELISM'] = project.get('ffufParallelism', DEFAULT_SETTINGS['FFUF_PARALLELISM'])
     settings['FFUF_AI_EXTENSIONS'] = project.get('ffufAiExtensions', DEFAULT_SETTINGS['FFUF_AI_EXTENSIONS'])
+    settings['FFUF_AI_USE_JEV'] = project.get('ffufAiUseJev', DEFAULT_SETTINGS['FFUF_AI_USE_JEV'])
 
     # AI in Pipeline (master switch + model)
     settings['AI_IN_PIPELINE'] = project.get('aiInPipeline', DEFAULT_SETTINGS['AI_IN_PIPELINE'])
@@ -1687,6 +1694,7 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['SECURITY_CHECK_IP_API_EXPOSED'] = project.get('securityCheckIpApiExposed', DEFAULT_SETTINGS['SECURITY_CHECK_IP_API_EXPOSED'])
     settings['SECURITY_CHECK_WAF_BYPASS'] = project.get('securityCheckWafBypass', DEFAULT_SETTINGS['SECURITY_CHECK_WAF_BYPASS'])
     settings['WAF_AI_CLASSIFIER'] = project.get('wafAiClassifier', DEFAULT_SETTINGS['WAF_AI_CLASSIFIER'])
+    settings['WAF_AI_USE_JEV'] = project.get('wafAiUseJev', DEFAULT_SETTINGS['WAF_AI_USE_JEV'])
     settings['SECURITY_CHECK_TLS_EXPIRING_SOON'] = project.get('securityCheckTlsExpiringSoon', DEFAULT_SETTINGS['SECURITY_CHECK_TLS_EXPIRING_SOON'])
     settings['SECURITY_CHECK_TLS_EXPIRY_DAYS'] = project.get('securityCheckTlsExpiryDays', DEFAULT_SETTINGS['SECURITY_CHECK_TLS_EXPIRY_DAYS'])
     settings['SECURITY_CHECK_TLS_EXPIRED'] = project.get('securityCheckTlsExpired', DEFAULT_SETTINGS['SECURITY_CHECK_TLS_EXPIRED'])

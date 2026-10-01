@@ -2488,6 +2488,23 @@
    "type": "boolean",
    "unit": "none"
   },
+  "ffufAiUseJev": {
+   "default": false,
+   "form_section": "FfufSection",
+   "group": "llm",
+   "has_default": true,
+   "mcp": "settable",
+   "meaning": "Engine for the FFuf extension picker: false uses the LLM in aiPipelineModel, true uses TypeSafe AI Jev (model jev-1.13.0). Takes effect only when aiInPipeline is true, and aiInPipeline does not reset it. Needs a Jev token on the project owner's account; without one the hook uses its static fallback. Jev picks only from a fixed 40-extension catalog.",
+   "optional": false,
+   "phase": "resource_enum",
+   "prisma_type": "Boolean",
+   "roe_capped": false,
+   "runtime_key": "FFUF_AI_USE_JEV",
+   "tool": "ffuf",
+   "traffic": "active",
+   "type": "boolean",
+   "unit": "none"
+  },
   "ffufAutoCalibrate": {
    "default": true,
    "form_section": "FfufSection",
@@ -8510,6 +8527,23 @@
    "unit": "none",
    "validator": "free_text"
   },
+  "nucleiTagsAiUseJev": {
+   "default": false,
+   "form_section": "NucleiSection",
+   "group": "llm",
+   "has_default": true,
+   "mcp": "settable",
+   "meaning": "Engine for the Nuclei tag selector: false uses the LLM in aiPipelineModel, true uses TypeSafe AI Jev (model jev-1.13.0). Takes effect only when aiInPipeline is true, and aiInPipeline does not reset it. Needs a Jev token on the project owner's account; without one the hook uses its static fallback.",
+   "optional": false,
+   "phase": "vuln_scan",
+   "prisma_type": "Boolean",
+   "roe_capped": false,
+   "runtime_key": "NUCLEI_TAGS_AI_USE_JEV",
+   "tool": "nuclei",
+   "traffic": "active",
+   "type": "boolean",
+   "unit": "none"
+  },
   "nucleiTakeoverRunTimeout": {
    "bounds": {
     "min": 1,
@@ -11963,6 +11997,23 @@
    "type": "boolean",
    "unit": "none"
   },
+  "takeoverAiUseJev": {
+   "default": false,
+   "form_section": "TakeoverSection",
+   "group": "llm",
+   "has_default": true,
+   "mcp": "settable",
+   "meaning": "Engine for the takeover disambiguator: false uses the LLM in aiPipelineModel, true uses TypeSafe AI Jev (model jev-1.13.0). Takes effect only when aiInPipeline is true, and aiInPipeline does not reset it. Needs a Jev token on the project owner's account; without one the hook uses its static fallback.",
+   "optional": false,
+   "phase": "vuln_scan",
+   "prisma_type": "Boolean",
+   "roe_capped": false,
+   "runtime_key": "TAKEOVER_AI_USE_JEV",
+   "tool": "takeover",
+   "traffic": "active",
+   "type": "boolean",
+   "unit": "none"
+  },
   "takeoverCertValidationEnabled": {
    "default": true,
    "form_section": "TakeoverSection",
@@ -13305,6 +13356,23 @@
    "prisma_type": "Boolean",
    "roe_capped": false,
    "runtime_key": "WAF_AI_CLASSIFIER",
+   "tool": "waf",
+   "traffic": "none",
+   "type": "boolean",
+   "unit": "none"
+  },
+  "wafAiUseJev": {
+   "default": false,
+   "form_section": "SecurityChecksSection",
+   "group": "llm",
+   "has_default": true,
+   "mcp": "settable",
+   "meaning": "Engine for the WAF classifier: false uses the LLM in aiPipelineModel, true uses TypeSafe AI Jev (model jev-1.13.0). Takes effect only when aiInPipeline is true, and aiInPipeline does not reset it. Needs a Jev token on the project owner's account; without one the hook uses its static fallback.",
+   "optional": false,
+   "phase": "http_probe",
+   "prisma_type": "Boolean",
+   "roe_capped": false,
+   "runtime_key": "WAF_AI_USE_JEV",
    "tool": "waf",
    "traffic": "none",
    "type": "boolean",

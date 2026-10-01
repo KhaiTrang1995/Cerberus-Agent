@@ -671,6 +671,7 @@ model Project {
   nucleiInteractsh            Boolean  @default(true) @map("nuclei_interactsh")
   nucleiDockerImage           String   @default("projectdiscovery/nuclei:latest") @map("nuclei_docker_image")
   nucleiAiTags                Boolean  @default(false) @map("nuclei_ai_tags")
+  nucleiTagsAiUseJev          Boolean  @default(false) @map("nuclei_tags_ai_use_jev")
   nucleiAiResponseFilter      Boolean  @default(false) @map("nuclei_ai_response_filter")
 
   // ========== SUBDOMAIN TAKEOVER (Subjack + Nuclei takeover templates) ==========
@@ -687,6 +688,7 @@ model Project {
   nucleiTakeoversEnabled           Boolean  @default(true)  @map("nuclei_takeovers_enabled")
   nucleiTakeoverRunTimeout         Int      @default(1800)  @map("nuclei_takeover_run_timeout")
   takeoverAiClassifier             Boolean  @default(false) @map("takeover_ai_classifier")
+  takeoverAiUseJev                 Boolean  @default(false) @map("takeover_ai_use_jev")
   takeoverSeverity                 String[] @default(["critical", "high", "medium"]) @map("takeover_severity")
   takeoverConfidenceThreshold      Int      @default(60)    @map("takeover_confidence_threshold")
   takeoverRateLimit                Int      @default(50)    @map("takeover_rate_limit")
@@ -940,6 +942,7 @@ model Project {
   ffufSmartFuzzMaxBasePaths   Int      @default(20) @map("ffuf_smart_fuzz_max_base_paths")
   ffufParallelism             Int      @default(20) @map("ffuf_parallelism")
   ffufAiExtensions            Boolean  @default(false) @map("ffuf_ai_extensions")
+  ffufAiUseJev                Boolean  @default(false) @map("ffuf_ai_use_jev")
 
   // ========== ARJUN PARAMETER DISCOVERY ==========
   arjunEnabled                Boolean  @default(true) @map("arjun_enabled")
@@ -1026,6 +1029,7 @@ model Project {
   securityCheckIpApiExposed         Boolean @default(true) @map("security_check_ip_api_exposed")
   securityCheckWafBypass            Boolean @default(true) @map("security_check_waf_bypass")
   wafAiClassifier                   Boolean @default(false) @map("waf_ai_classifier")
+  wafAiUseJev                       Boolean @default(false) @map("waf_ai_use_jev")
   securityCheckTlsExpiringSoon      Boolean @default(true) @map("security_check_tls_expiring_soon")
   securityCheckTlsExpiryDays        Int     @default(30) @map("security_check_tls_expiry_days")
   securityCheckTlsExpired           Boolean @default(true) @map("security_check_tls_expired")

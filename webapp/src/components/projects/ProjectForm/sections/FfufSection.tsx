@@ -8,6 +8,8 @@ import styles from '../ProjectForm.module.css'
 import { NodeInfoTooltip } from '../NodeInfoTooltip'
 import { FileImportButton } from '../FileImportButton'
 import { AiToggleLabel } from '../AiToggleLabel'
+import { JevEngineControl } from '../JevEngineControl'
+import { useHasJevProvider } from '@/hooks/useHasJevProvider'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -34,6 +36,7 @@ interface FfufSectionProps {
 }
 
 export function FfufSection({ data, updateField, projectId, mode, onRun }: FfufSectionProps) {
+  const jevStatus = useHasJevProvider()
   const [isOpen, setIsOpen] = useState(true)
   const [customWordlists, setCustomWordlists] = useState<CustomWordlist[]>([])
   const [isUploading, setIsUploading] = useState(false)
@@ -421,6 +424,17 @@ export function FfufSection({ data, updateField, projectId, mode, onRun }: FfufS
                       onChange={(checked) => updateField('ffufAiExtensions', checked)}
                     />
                   </div>
+                  {data.ffufAiExtensions && (
+                    <div className={styles.toggleRow} style={{ marginBottom: 'var(--space-2)', alignItems: 'center', gap: 'var(--space-2)' }}>
+                      <span className={styles.fieldLabel}>Engine</span>
+                      <JevEngineControl
+                        value={data.ffufAiUseJev}
+                        enabled={data.aiInPipeline && data.ffufAiExtensions}
+                        jevStatus={jevStatus}
+                        onSelect={(useJev) => updateField('ffufAiUseJev', useJev)}
+                      />
+                    </div>
+                  )}
                   <div className={styles.fileImportWrap}>
                     <input
                       type="text"

@@ -3,6 +3,8 @@
 import { useState, useMemo, useEffect } from 'react'
 import { ChevronDown, Target, ShieldAlert, AlertTriangle, Info, Globe, Network, Layers, Check, Lock, Plus, Minus, Gauge } from 'lucide-react'
 import { AiToggleLabel } from '../AiToggleLabel'
+import { JevEngineControl } from '../JevEngineControl'
+import { useHasJevProvider } from '@/hooks/useHasJevProvider'
 import { Toggle, WikiInfoButton } from '@/components/ui'
 import type { Project } from '@prisma/client'
 import { isHardBlockedDomain } from '@/lib/hard-guardrail'
@@ -67,6 +69,7 @@ function parseHostList(text: string): string[] {
 type TargetMode = 'domain' | 'ip' | 'batch'
 
 export function TargetSection({ data, updateField, mode = 'create' }: TargetSectionProps) {
+  const jevStatus = useHasJevProvider()
   const isLocked = mode === 'edit'
   const [isOpen, setIsOpen] = useState(true)
   const { userId } = useProject()
@@ -733,7 +736,8 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                         <span className={styles.fieldHint}>
                           Model used by every AI hook in recon. Independent of the
                           agent&apos;s own model selection. Pick a cheaper model here
-                          if cost matters more than peak quality.
+                          if cost matters more than peak quality. Applies to hooks on
+                          the LLM engine.
                         </span>
                       </div>
                     </div>
@@ -750,21 +754,27 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                     {(() => {
                       const aiPipelineHooks: Array<{
                         field: 'ffufAiExtensions' | 'nucleiAiTags' | 'wafAiClassifier' | 'nucleiAiResponseFilter' | 'takeoverAiClassifier'
+                        /** The LLM | Jev engine switch. Absent where Jev must not decide: the
+                            Nuclei false-positive filter deletes findings from target-controlled bytes. */
+                        engineField?: 'ffufAiUseJev' | 'nucleiTagsAiUseJev' | 'wafAiUseJev' | 'takeoverAiUseJev'
                         label: string
                         description: string
                       }> = [
                         {
                           field: 'ffufAiExtensions',
+                          engineField: 'ffufAiUseJev',
                           label: 'FFuf: Use AI for Extensions',
                           description: 'For each fuzz target, FFuf first sends a single HEAD request and asks the configured model to suggest the most likely file extensions based on the response headers (Server, X-Powered-By, X-AspNet-Version). The static FFuf extensions list in the FFuf module is ignored when this is on. Same toggle as in the FFuf module: flipping it here flips it there. A per-fingerprint cache means N hosts behind the same stack collapse to one LLM call.',
                         },
                         {
                           field: 'nucleiAiTags',
+                          engineField: 'nucleiTagsAiUseJev',
                           label: 'Nuclei: Use AI for Tag Selection',
                           description: 'Once per scan, Nuclei aggregates the detected tech stack from http_probe (Wappalyzer + Server headers) and asks the configured model to prune its include-tags list to ones matching the stack. Drops irrelevant tags like wordpress on Node sites, adds tech-specific ones like apache or wp-plugin when detected. The static Include Tags list in the Nuclei module is ignored when this is on. Same toggle as in the Nuclei module: flipping it here flips it there. Candidate tag pool is built from the live nuclei-templates volume (count >= 50, ~125 broad-category tags).',
                         },
                         {
                           field: 'wafAiClassifier',
+                          engineField: 'wafAiUseJev',
                           label: 'Security Checks: Use AI for WAF Classification',
                           description: 'Augments the static WAF/CDN header-token check used by the Direct IP and WAF Bypass checks. When the static list misses (modern WAFs strip or rebrand their headers), the response gets a second pass through the configured model, which scores WAF presence 0-100 from headers, body fingerprints, cookies, and latency. Same toggle as in the Security Checks module: flipping it here flips it there. A per-response fingerprint cache collapses identical responses to one LLM call.',
                         },
@@ -775,6 +785,7 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                         },
                         {
                           field: 'takeoverAiClassifier',
+                          engineField: 'takeoverAiUseJev',
                           label: 'Takeover: Use AI to Disambiguate WAF "No-Host" Pages',
                           description: "Subjack/Nuclei takeover fingerprints can collide with WAF block pages that say \"not found\" for a hostname the WAF doesn't recognize. When AI is on, each takeover candidate is probed; if the response carries no third-party vendor token (Heroku-Request-Id, x-amz-bucket-region, etc.), the LLM classifies the body as a real unclaimed-service page or a WAF block. AI-flagged collisions get a -40 score penalty so they land in manual_review instead of being shipped as criticals. Same toggle as in the Subdomain Takeover module: flipping it here flips it there.",
                         },
@@ -782,15 +793,28 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                       return (
                         <div className={styles.nestedList}>
                           {aiPipelineHooks.map((hook) => (
-                            <div key={hook.field} className={styles.toggleRow}>
-                              <AiToggleLabel
-                                label={hook.label}
-                                tooltip={hook.description}
-                              />
-                              <Toggle
-                                checked={data[hook.field]}
-                                onChange={(checked) => updateField(hook.field, checked)}
-                              />
+                            <div key={hook.field}>
+                              <div className={styles.toggleRow}>
+                                <AiToggleLabel
+                                  label={hook.label}
+                                  tooltip={hook.description}
+                                />
+                                <Toggle
+                                  checked={data[hook.field]}
+                                  onChange={(checked) => updateField(hook.field, checked)}
+                                />
+                              </div>
+                              {hook.engineField && data[hook.field] && (
+                                <div className={styles.toggleRow} style={{ alignItems: 'center', gap: 'var(--space-2)' }}>
+                                  <span className={styles.fieldLabel}>Engine</span>
+                                  <JevEngineControl
+                                    value={data[hook.engineField]}
+                                    enabled={data.aiInPipeline && data[hook.field]}
+                                    jevStatus={jevStatus}
+                                    onSelect={(useJev) => updateField(hook.engineField!, useJev)}
+                                  />
+                                </div>
+                              )}
                             </div>
                           ))}
                         </div>

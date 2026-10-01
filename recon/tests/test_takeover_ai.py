@@ -396,6 +396,29 @@ def test_fetch_project_settings_mapping_present():
     print("PASS: test_fetch_project_settings_mapping_present")
 
 
+def test_takeover_ai_use_jev_mapping_present():
+    """The Jev-engine flag is read from the project, and defaults to False."""
+    src = Path(ps.__file__).read_text()
+    assert "settings['TAKEOVER_AI_USE_JEV'] = project.get('takeoverAiUseJev'" in src
+    assert ps.DEFAULT_SETTINGS['TAKEOVER_AI_USE_JEV'] is False
+    print("PASS: test_takeover_ai_use_jev_mapping_present")
+
+
+def test_takeover_ai_use_jev_is_not_cascaded_by_the_master_switch():
+    """aiInPipeline forces the per-hook AI flag, but never the engine flag."""
+    settings = ps.DEFAULT_SETTINGS.copy()
+    settings['AI_IN_PIPELINE'] = True
+    settings['TAKEOVER_AI_USE_JEV'] = True
+    settings = ps.apply_ai_pipeline_overrides(settings)
+    assert settings['TAKEOVER_AI_USE_JEV'] is True
+    settings2 = ps.DEFAULT_SETTINGS.copy()
+    settings2['AI_IN_PIPELINE'] = False
+    settings2['TAKEOVER_AI_USE_JEV'] = True
+    settings2 = ps.apply_ai_pipeline_overrides(settings2)
+    assert settings2['TAKEOVER_AI_USE_JEV'] is True
+    print("PASS: test_takeover_ai_use_jev_is_not_cascaded_by_the_master_switch")
+
+
 if __name__ == '__main__':
     # Vendor short-circuit
     test_vendor_token_heroku_header()
@@ -435,4 +458,6 @@ if __name__ == '__main__':
     test_cascade_off_forces_takeover_ai_off()
     test_cascade_on_forces_takeover_ai_on()
     test_fetch_project_settings_mapping_present()
+    test_takeover_ai_use_jev_mapping_present()
+    test_takeover_ai_use_jev_is_not_cascaded_by_the_master_switch()
     print("\nAll tests passed")

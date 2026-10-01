@@ -406,6 +406,14 @@ def test_fetch_project_settings_has_waf_ai_classifier_mapping():
     print("PASS: test_fetch_project_settings_has_waf_ai_classifier_mapping")
 
 
+def test_fetch_project_settings_has_waf_ai_use_jev_mapping():
+    """The Jev-engine flag for WAF is read from the project and defaults False."""
+    src = Path(ps.__file__).read_text()
+    assert "settings['WAF_AI_USE_JEV'] = project.get('wafAiUseJev'" in src
+    assert ps.DEFAULT_SETTINGS['WAF_AI_USE_JEV'] is False
+    print("PASS: test_fetch_project_settings_has_waf_ai_use_jev_mapping")
+
+
 # ============================================================================
 # Smoke test: end-to-end through run_security_checks
 # ============================================================================
@@ -471,6 +479,7 @@ if __name__ == '__main__':
     test_default_settings_has_waf_ai_classifier()
     # Project payload mapping
     test_fetch_project_settings_has_waf_ai_classifier_mapping()
+    test_fetch_project_settings_has_waf_ai_use_jev_mapping()
     # Smoke
     test_run_security_checks_initializes_ai_ctx()
     test_run_security_checks_disables_ai_ctx_when_off()

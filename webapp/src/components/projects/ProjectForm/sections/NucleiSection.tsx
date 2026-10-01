@@ -9,6 +9,8 @@ import { NodeInfoTooltip } from '../NodeInfoTooltip'
 import { TimeEstimate } from '../TimeEstimate'
 import { FileImportButton } from '../FileImportButton'
 import { AiToggleLabel } from '../AiToggleLabel'
+import { JevEngineControl } from '../JevEngineControl'
+import { useHasJevProvider } from '@/hooks/useHasJevProvider'
 import { RegistryFields } from '../RegistryFields'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
@@ -31,6 +33,7 @@ interface CustomTemplate {
 const SEVERITY_OPTIONS = ['critical', 'high', 'medium', 'low', 'info']
 
 export function NucleiSection({ data, updateField, onRun }: NucleiSectionProps) {
+  const jevStatus = useHasJevProvider()
   const [isOpen, setIsOpen] = useState(true)
   const [customTemplates, setCustomTemplates] = useState<CustomTemplate[]>([])
   const [isUploading, setIsUploading] = useState(false)
@@ -348,6 +351,17 @@ export function NucleiSection({ data, updateField, onRun }: NucleiSectionProps) 
                 onChange={(checked) => updateField('nucleiAiTags', checked)}
               />
             </div>
+            {data.nucleiAiTags && (
+              <div className={styles.toggleRow} style={{ alignItems: 'center', gap: 'var(--space-2)', marginBottom: 'var(--space-2)' }}>
+                <span className={styles.fieldLabel}>Engine</span>
+                <JevEngineControl
+                  value={data.nucleiTagsAiUseJev}
+                  enabled={data.aiInPipeline && data.nucleiAiTags}
+                  jevStatus={jevStatus}
+                  onSelect={(useJev) => updateField('nucleiTagsAiUseJev', useJev)}
+                />
+              </div>
+            )}
             <div className={styles.toggleRow} style={{ alignItems: 'center', gap: 'var(--space-4)', marginBottom: 'var(--space-2)' }}>
               <AiToggleLabel
                 label="Use AI to Filter False-Positive Block Pages"

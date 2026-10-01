@@ -245,7 +245,10 @@ describe('computePresetApplication is the form\'s preset load', () => {
     expect(app.changed).toContain('katanaDepth')
     expect(app.resetToDefault).toContain('katanaDepth')
     expect(app.resetToDefault).not.toContain('naabuEnabled')
-    expect(app.keptAsIs).toEqual(['agentOpenaiModel', 'aiPipelineModel'])
+    expect(app.keptAsIs).toEqual([
+      'agentOpenaiModel', 'aiPipelineModel',
+      'ffufAiUseJev', 'nucleiTagsAiUseJev', 'takeoverAiUseJev', 'wafAiUseJev',
+    ])
     expect(app.data.agentOpenaiModel).toBe('mine')
     expect(app.unchangedCount).toBe(PRESET_FIELD_KEYS.length - app.changed.length)
   })

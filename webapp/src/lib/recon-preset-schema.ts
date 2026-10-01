@@ -323,6 +323,7 @@ export const reconPresetSchema = z.object({
   ffufSmartFuzzMaxBasePaths: int,
   ffufParallelism: int,
   ffufAiExtensions: bool,
+  ffufAiUseJev: bool,
 
   // -- Parameter Discovery: Arjun --
   arjunEnabled: bool,
@@ -393,6 +394,7 @@ export const reconPresetSchema = z.object({
   nucleiScanAllIps: bool,
   nucleiInteractsh: bool,
   nucleiAiTags: bool,
+  nucleiTagsAiUseJev: bool,
   nucleiAiResponseFilter: bool,
 
   // -- Subdomain Takeover --
@@ -414,6 +416,7 @@ export const reconPresetSchema = z.object({
   takeoverManualReviewAutoPublish: bool,
   takeoverCertValidationEnabled: bool,
   takeoverAiClassifier: bool,
+  takeoverAiUseJev: bool,
   baddnsEnabled: bool,
   baddnsDockerImage: str,
   baddnsModules: strArr,
@@ -493,6 +496,7 @@ export const reconPresetSchema = z.object({
   securityCheckIpApiExposed: bool,
   securityCheckWafBypass: bool,
   wafAiClassifier: bool,
+  wafAiUseJev: bool,
   securityCheckTlsExpiringSoon: bool,
   securityCheckTlsExpiryDays: int,
   securityCheckTlsExpired: bool,
@@ -869,6 +873,7 @@ export const RECON_PARAMETER_CATALOG = `
 - ffufSmartFuzzMaxBasePaths: integer - Max crawler-discovered base paths smart fuzz runs the whole wordlist under, per target (1-50). Each one multiplies the request count
 - ffufParallelism: integer - Targets fuzzed in parallel
 - ffufAiExtensions: boolean - When true, FFuf file extensions are picked per-target by AI from response headers (requires aiInPipeline=true). The static ffufExtensions list is ignored.
+- ffufAiUseJev: boolean - Engine for the FFuf extension picker: false uses the LLM in aiPipelineModel, true uses TypeSafe AI Jev (jev-1.13.0). Only when aiInPipeline=true; needs a Jev token on the owner's account, else the hook uses its static fallback. Jev picks only from a fixed 40-extension catalog.
 
 ## Parameter Discovery - Arjun
 - arjunEnabled: boolean - Run Arjun parameter discovery
@@ -940,6 +945,7 @@ export const RECON_PARAMETER_CATALOG = `
 - nucleiScanAllIps: boolean
 - nucleiInteractsh: boolean - Out-of-band interaction detection
 - nucleiAiTags: boolean - Use AI to prune the Nuclei tag list based on detected tech stack (requires aiInPipeline=true). Replaces the static nucleiTags list with a tech-aware subset chosen by the LLM at scan time. Default false.
+- nucleiTagsAiUseJev: boolean - Engine for the Nuclei tag selector: false uses the LLM in aiPipelineModel, true uses TypeSafe AI Jev (jev-1.13.0). Only when aiInPipeline=true; needs a Jev token on the owner's account, else the hook uses its static fallback.
 - nucleiAiResponseFilter: boolean - Use AI to classify Nuclei response bodies as WAF/rate-limit block pages when the static keyword list misses (requires aiInPipeline=true). Augments is_false_positive(); kicks in only on suspicious status codes (403/406/418/429/503) so cost stays bounded. Default false.
 
 ## Subdomain Takeover (Subjack + Nuclei takeover templates)
@@ -961,6 +967,7 @@ export const RECON_PARAMETER_CATALOG = `
 - takeoverManualReviewAutoPublish: boolean - Publish manual_review findings into the main Vulnerability stream (default false)
 - takeoverCertValidationEnabled: boolean - Use certificate evidence (issuer/SAN/name-match) to score takeovers, incl. hosts with no CNAME. Reads httpx 443 certs (tlsx off) or more (tlsx on). Default true.
 - takeoverAiClassifier: boolean - Use AI to disambiguate takeover findings from WAF "no host" block pages that match the same static fingerprint (requires aiInPipeline=true). For each finding the scanner probes the host, short-circuits on third-party vendor tokens, and otherwise asks the LLM to classify the body. AI-flagged collisions get score -40 (lands in manual_review). Default false.
+- takeoverAiUseJev: boolean - Engine for the takeover disambiguator: false uses the LLM in aiPipelineModel, true uses TypeSafe AI Jev (jev-1.13.0). Only when aiInPipeline=true; needs a Jev token on the owner's account, else the hook uses its static fallback.
 - baddnsEnabled: boolean - Run the BadDNS sidecar (AGPL-3.0, isolated Docker container). Requires "docker compose --profile tools build baddns-scanner". Default false.
 - baddnsDockerImage: string - BadDNS image name. Default "redamon-baddns:latest" (built locally from baddns_scan/Dockerfile)
 - baddnsModules: string[] - Subset of BadDNS modules to run. Valid: cname, ns, mx, txt, spf, dmarc, wildcard, nsec, references, zonetransfer. (MTA-STS exists in baddns 2.1.0 but is not CLI-addressable due to an upstream validator regex bug -- omit.) Default: ["cname","ns","mx","txt","spf"]
@@ -1039,6 +1046,7 @@ export const RECON_PARAMETER_CATALOG = `
 - securityCheckIpApiExposed: boolean
 - securityCheckWafBypass: boolean
 - wafAiClassifier: boolean - Use AI to classify WAF/CDN presence from response headers/body/latency when the static check misses (requires aiInPipeline=true). Augments _has_cdn_markers and check_waf_bypass; AI-detected bypasses are tagged detection_method=ai_classifier. Default false.
+- wafAiUseJev: boolean - Engine for the WAF classifier: false uses the LLM in aiPipelineModel, true uses TypeSafe AI Jev (jev-1.13.0). Only when aiInPipeline=true; needs a Jev token on the owner's account, else the hook uses its static fallback.
 - securityCheckTlsExpiringSoon: boolean
 - securityCheckTlsExpiryDays: integer - Days threshold
 - securityCheckTlsExpired: boolean - Flag already-expired certificates (high). Derived from cert data, zero network cost. Default true.

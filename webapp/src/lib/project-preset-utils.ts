@@ -80,11 +80,16 @@ export const PRESET_FIELD_KEYS: readonly string[] = fieldKeys().filter(k => !PRE
 /**
  * Kept as they are when a preset does not name them, instead of being reset.
  *
- * The backend default for both is a hardcoded model the user may have no
- * provider for, which is why the create form makes them pick these two
- * explicitly. Built-in and AI-generated presets never name them.
+ * The first two are models the user may have no provider for, which is why the
+ * create form makes them pick explicitly. The four *AiUseJev engine flags are
+ * tied to whether the owner has a Jev token, a fact no preset can know; resetting
+ * them to false on every preset apply would silently drop a project off the Jev
+ * engine. Built-in and AI-generated presets never name any of these.
  */
-export const KEPT_WHEN_ABSENT: ReadonlySet<string> = new Set(['agentOpenaiModel', 'aiPipelineModel'])
+export const KEPT_WHEN_ABSENT: ReadonlySet<string> = new Set([
+  'agentOpenaiModel', 'aiPipelineModel',
+  'ffufAiUseJev', 'nucleiTagsAiUseJev', 'wafAiUseJev', 'takeoverAiUseJev',
+])
 
 type Lookup = { found: true; value: unknown } | { found: false }
 

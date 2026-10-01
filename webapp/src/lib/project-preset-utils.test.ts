@@ -324,6 +324,10 @@ describe('applyPresetSettings', () => {
     cypherfixGithubToken: 'ghp_receiving',
     agentOpenaiModel: 'my-configured-model',
     aiPipelineModel: 'my-pipeline-model',
+    ffufAiUseJev: true,
+    nucleiTagsAiUseJev: true,
+    wafAiUseJev: true,
+    takeoverAiUseJev: true,
     naabuEnabled: false,
     katanaDepth: 9,
     sqliLevel: 5,
@@ -393,6 +397,16 @@ describe('applyPresetSettings', () => {
       { agentOpenaiModel: 'claude-opus-4-6', aiPipelineModel: 'claude-opus-4-6' })
     expect(next.agentOpenaiModel).toBe('my-configured-model')
     expect(next.aiPipelineModel).toBe('my-pipeline-model')
+  })
+
+  test('keeps the four Jev-engine flags when a preset does not name them', () => {
+    // Whether a hook can use Jev depends on the owner's token, which no preset
+    // knows; resetting these to false would drop the project off the Jev engine.
+    const next = applyPresetSettings(current, {}, { naabuEnabled: true })
+    expect(next.ffufAiUseJev).toBe(true)
+    expect(next.nucleiTagsAiUseJev).toBe(true)
+    expect(next.wafAiUseJev).toBe(true)
+    expect(next.takeoverAiUseJev).toBe(true)
   })
 
   test('applies the LLM models when the preset names them', () => {

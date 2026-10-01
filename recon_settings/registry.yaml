@@ -2303,6 +2303,21 @@ fields:
       When true, FFuf file extensions are picked per-target by AI from response
       headers (requires aiInPipeline=true). The static ffufExtensions list is
       ignored.
+  ffufAiUseJev:
+    tool: ffuf
+    runtime_key: "FFUF_AI_USE_JEV"
+    unit: none
+    phase: resource_enum
+    traffic: active
+    roe_capped: false
+    mcp: settable
+    group: llm
+    meaning: >-
+      Engine for the FFuf extension picker: false uses the LLM in aiPipelineModel,
+      true uses TypeSafe AI Jev (model jev-1.13.0). Takes effect only when
+      aiInPipeline is true, and aiInPipeline does not reset it. Needs a Jev token
+      on the project owner's account; without one the hook uses its static
+      fallback. Jev picks only from a fixed 40-extension catalog.
   ffufAutoCalibrate:
     tool: ffuf
     runtime_key: "FFUF_AUTO_CALIBRATE"
@@ -5818,6 +5833,21 @@ fields:
       Use AI to prune the Nuclei tag list based on detected tech stack (requires
       aiInPipeline=true). Replaces the static nucleiTags list with a tech-aware
       subset chosen by the LLM at scan time. Default false.
+  nucleiTagsAiUseJev:
+    tool: nuclei
+    runtime_key: "NUCLEI_TAGS_AI_USE_JEV"
+    unit: none
+    phase: vuln_scan
+    traffic: active
+    roe_capped: false
+    mcp: settable
+    group: llm
+    meaning: >-
+      Engine for the Nuclei tag selector: false uses the LLM in aiPipelineModel,
+      true uses TypeSafe AI Jev (model jev-1.13.0). Takes effect only when
+      aiInPipeline is true, and aiInPipeline does not reset it. Needs a Jev token
+      on the project owner's account; without one the hook uses its static
+      fallback.
   nucleiAutoUpdateTemplates:
     tool: nuclei
     runtime_key: "NUCLEI_AUTO_UPDATE_TEMPLATES"
@@ -8566,6 +8596,21 @@ fields:
       finding the scanner probes the host, short-circuits on third-party vendor
       tokens, and otherwise asks the LLM to classify the body. AI-flagged
       collisions get score -40 (lands in manual_review). Default false.
+  takeoverAiUseJev:
+    tool: takeover
+    runtime_key: "TAKEOVER_AI_USE_JEV"
+    unit: none
+    phase: vuln_scan
+    traffic: active
+    roe_capped: false
+    mcp: settable
+    group: llm
+    meaning: >-
+      Engine for the takeover disambiguator: false uses the LLM in aiPipelineModel,
+      true uses TypeSafe AI Jev (model jev-1.13.0). Takes effect only when
+      aiInPipeline is true, and aiInPipeline does not reset it. Needs a Jev token
+      on the project owner's account; without one the hook uses its static
+      fallback.
   takeoverCertValidationEnabled:
     tool: takeover
     runtime_key: "TAKEOVER_CERT_VALIDATION_ENABLED"
@@ -9458,6 +9503,21 @@ fields:
       the static check misses (requires aiInPipeline=true). Augments
       _has_cdn_markers and check_waf_bypass; AI-detected bypasses are tagged
       detection_method=ai_classifier. Default false.
+    form_section: "SecurityChecksSection"
+  wafAiUseJev:
+    tool: waf
+    runtime_key: "WAF_AI_USE_JEV"
+    unit: none
+    phase: http_probe
+    traffic: none
+    roe_capped: false
+    mcp: settable
+    group: llm
+    meaning: >-
+      Engine for the WAF classifier: false uses the LLM in aiPipelineModel, true
+      uses TypeSafe AI Jev (model jev-1.13.0). Takes effect only when aiInPipeline
+      is true, and aiInPipeline does not reset it. Needs a Jev token on the
+      project owner's account; without one the hook uses its static fallback.
     form_section: "SecurityChecksSection"
   wappalyzerAutoUpdate:
     tool: wappalyzer
