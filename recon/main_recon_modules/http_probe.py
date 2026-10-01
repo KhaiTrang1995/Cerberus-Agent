@@ -799,6 +799,33 @@ def httpx_budget(url_count: int, threads: int, timeout: int, retries: int) -> in
     return waves * per_url + 60
 
 
+def _stop_httpx_at_budget(process, container: str, budget: int, url_count: int) -> None:
+    """Stop an httpx run that outlived its budget and note the cut. Never raises.
+
+    The URLs it never reached were not re-checked, so the http_probe source is
+    left out of the finding prune for this run.
+    """
+    try:
+        process.kill()
+    except Exception:  # noqa: BLE001
+        pass
+    # process.kill() reaps the docker CLI, not the daemon-owned container;
+    # kill it by name so the probe actually stops.
+    try:
+        subprocess.run(["docker", "kill", container],
+                       capture_output=True, text=True, timeout=15, check=False)
+    except Exception as _kill_err:  # noqa: BLE001
+        print(f"[!][httpx] failed to kill container: {type(_kill_err).__name__}")
+    print(f"[!][httpx] Probe hit its {budget}s budget over {url_count} URL(s) "
+          f"- stopping it; downstream phases run on what it found")
+    try:
+        from recon.helpers import circuit_breaker
+        circuit_breaker.note_degraded("http_probe", sources=["http_probe"],
+                                      reason="httpx runtime budget reached")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def build_httpx_command(targets_file: str, output_file: str, settings: dict,
                         probe_hosts: List[str] = None, container_name: str = None) -> List[str]:
     """
@@ -1894,10 +1921,23 @@ def run_http_probe(recon_data: dict, output_file: Path = None, settings: dict = 
 
         safety_timeout = httpx_budget(len(urls), HTTPX_THREADS, HTTPX_TIMEOUT,
                                       settings.get('HTTPX_RETRIES', 2))
-        _, stderr = process.communicate(timeout=safety_timeout)
+        timed_out = False
+        try:
+            _, stderr = process.communicate(timeout=safety_timeout)
+        except subprocess.TimeoutExpired:
+            # httpx streams one JSON line per URL into the bind-mounted output,
+            # so what it probed before the budget ran out is parsed below like
+            # a finished run; the parser skips a line cut off mid-write.
+            timed_out = True
+            stderr = ""
+            _stop_httpx_at_budget(process, httpx_container, safety_timeout, len(urls))
 
         end_time = datetime.now()
         duration = (end_time - start_time).total_seconds()
+
+        if timed_out and not httpx_output.exists():
+            print("[!][httpx] Nothing was written before the budget ran out")
+            return recon_data
 
         if process.returncode != 0 and not httpx_output.exists():
             print(f"[!][httpx] Probe failed: {stderr[:200] if stderr else 'Unknown error'}")
@@ -1953,6 +1993,7 @@ def run_http_probe(recon_data: dict, output_file: Path = None, settings: dict = 
                 "response_included": HTTPX_INCLUDE_RESPONSE,
                 "proxy_used": False,
                 "total_urls_probed": len(urls),
+                "stopped_at_budget": timed_out,
                 "root_domain_filter": root_domain,
                 "filtered_mode": filtered_mode,
                 "allowed_hosts_filter": allowed_hosts  # Specific hosts allowed (None = all in scope)
@@ -2016,24 +2057,6 @@ def run_http_probe(recon_data: dict, output_file: Path = None, settings: dict = 
 
         return recon_data
 
-    except subprocess.TimeoutExpired:
-        process.kill()
-        # process.kill() reaps the docker CLI, not the daemon-owned container;
-        # kill it by name so the probe actually stops.
-        try:
-            subprocess.run(["docker", "kill", httpx_container],
-                           capture_output=True, text=True, timeout=15, check=False)
-        except Exception as _kill_err:  # noqa: BLE001
-            print(f"[!][httpx] failed to kill container: {type(_kill_err).__name__}")
-        print(f"[!][httpx] Probe hit its {safety_timeout}s budget over {len(urls)} URL(s) "
-              f"- stopping it; downstream phases run on what it found")
-        try:
-            from recon.helpers import circuit_breaker
-            circuit_breaker.note_degraded("http_probe", sources=["http_probe"],
-                                          reason="httpx runtime budget reached")
-        except Exception:  # noqa: BLE001
-            pass
-        return recon_data
     except Exception as e:
         print(f"[!][httpx] Error during probe: {e}")
         return recon_data
