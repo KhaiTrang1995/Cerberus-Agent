@@ -53,13 +53,21 @@ def _outcome_after(resp=None, exc=None):
     return record
 
 
-@pytest.mark.parametrize("error_type", [
-    "jev_not_configured", "jev_auth", "jev_no_credit", "jev_forbidden",
-])
+@pytest.mark.parametrize("error_type", ["jev_not_configured", "jev_auth", "jev_no_credit"])
 def test_jev_account_errors_are_fatal(error_type):
     record = _outcome_after(JEV_503(error_type))
     assert record.call_args.args[0] is cb.Outcome.FATAL
     assert record.call_args.args[1] == error_type
+
+
+def test_a_wrong_owner_403_is_fatal_and_named_for_what_it_is():
+    """The agent answers jev_forbidden with 403 (not 503). It must be read by its
+    error_type, or the breaker message says "403 key rejected" for a project that
+    simply is not this user's."""
+    resp = _resp(403, {"error_type": "jev_forbidden", "error": "The project does not belong to this user"})
+    record = _outcome_after(resp)
+    assert record.call_args.args[0] is cb.Outcome.FATAL
+    assert record.call_args.args[1] == "jev_forbidden"
 
 
 def test_jev_rate_limit_carries_retry_after():
@@ -180,14 +188,35 @@ def test_ffuf_validates_jev_extensions_with_the_existing_regex():
     assert out == [".bak", ".old", ".php"]
 
 
-def test_waf_jev_result_is_accepted_and_keeps_its_source_in_the_agents_shape():
-    body = {"waf_detected": True, "waf_type": "cloudflare", "confidence": 90,
-            "reasoning": "", "source": "jev_classifier"}
+def test_waf_jev_result_is_stamped_as_jev_provenance():
+    body = {"waf_detected": True, "waf_type": "cloudflare", "confidence": 90, "reasoning": ""}
     with mock.patch.object(waf_classifier.requests, "post", return_value=_resp(200, body)) as post:
         out = waf_classifier.classify_waf(_waf_resp(), model="m", engine="jev")
     assert post.call_args.args[0].endswith("/jev/waf-classify")
     assert out["waf_detected"] is True and out["waf_type"] == "cloudflare"
     assert out["confidence"] == 90
+    assert out["source"] == "jev_classifier"
+
+
+def test_waf_llm_result_keeps_the_llm_provenance():
+    body = {"waf_detected": True, "waf_type": "cloudflare", "confidence": 90, "reasoning": "x"}
+    with mock.patch.object(waf_classifier.requests, "post", return_value=_resp(200, body)):
+        out = waf_classifier.classify_waf(_waf_resp(), model="m", engine="llm")
+    assert out["source"] == "ai_classifier"
+
+
+@pytest.mark.parametrize("engine,expected", [("jev", "jev_classifier"), ("llm", "ai_classifier")])
+def test_provenance_comes_from_the_engine_asked_for_never_from_the_response_body(engine, expected):
+    """A body claiming any source cannot change what detection_method says."""
+    waf = {"waf_detected": True, "waf_type": "cloudflare", "confidence": 90,
+           "reasoning": "", "source": "something_else"}
+    with mock.patch.object(waf_classifier.requests, "post", return_value=_resp(200, waf)):
+        assert waf_classifier.classify_waf(_waf_resp(), model="m", engine=engine)["source"] == expected
+    tk = {"is_waf_block": True, "confidence": 90, "reason": "", "source": "something_else"}
+    with mock.patch.object(takeover_classifier.requests, "post", return_value=_resp(200, tk)):
+        out = takeover_classifier.classify_takeover_response(
+            "h.example", "github", "body", 404, {}, model="m", engine=engine)
+    assert out["source"] == expected
 
 
 def test_waf_falls_back_when_jev_fails(capsys):
@@ -214,3 +243,90 @@ def test_no_hook_ever_sends_the_user_token_or_model_secret():
     payload = post.call_args.kwargs["json"]
     assert payload["user_id"] == "u1" and payload["project_id"] == "p1"
     assert not any("key" in k.lower() or "token" in k.lower() for k in payload)
+
+
+# ---------------------------------------------------------------------------
+# The engine reaches the call sites and the findings carry it
+# ---------------------------------------------------------------------------
+
+from recon.helpers import security_checks as sc  # noqa: E402
+
+
+def _http_resp(status=200, headers=None, body=b"", url="https://target.com/"):
+    r = mock.MagicMock(status_code=status, headers=headers or {}, url=url)
+    r.content = body
+    r.text = body.decode("utf-8", "replace")
+    return r
+
+
+@pytest.fixture
+def ai_ctx_reset():
+    yield
+    sc._set_ai_ctx(False, "", "", "")
+
+
+def test_set_ai_ctx_carries_the_engine_into_classify_waf(ai_ctx_reset):
+    sc._set_ai_ctx(True, "m", "u", "p", "jev")
+    with mock.patch("recon.helpers.ai_planner.waf_classifier.classify_waf",
+                    return_value={"source": "jev_classifier", "waf_detected": False}) as classify:
+        sc._classify_waf_ai(_http_resp(403, {"Server": "nginx"}))
+    assert classify.call_args.kwargs["engine"] == "jev"
+
+
+def test_engine_defaults_to_llm_in_the_ai_context(ai_ctx_reset):
+    sc._set_ai_ctx(True, "m", "u", "p")
+    with mock.patch("recon.helpers.ai_planner.waf_classifier.classify_waf",
+                    return_value={"source": "ai_classifier", "waf_detected": False}) as classify:
+        sc._classify_waf_ai(_http_resp(403, {"Server": "nginx"}))
+    assert classify.call_args.kwargs["engine"] == "llm"
+
+
+@pytest.mark.parametrize("source,expected", [("jev_classifier", "jev_classifier"), ("ai_classifier", "ai_classifier")])
+def test_a_waf_bypass_finding_records_which_engine_found_the_waf(source, expected, ai_ctx_reset):
+    sc._set_ai_ctx(True, "m", "u", "p", "jev" if source == "jev_classifier" else "llm")
+    sub = _http_resp(403, {"Server": "nginx"}, b"<html>Attention Required</html>")
+    ip = _http_resp(200, {"Server": "nginx"}, b"<html>origin</html>")
+
+    def fake_classify(response, response_time_ms=0):
+        if response is sub:
+            return {"waf_detected": True, "waf_type": "cloudflare", "confidence": 92,
+                    "reasoning": "", "source": source}
+        return {"waf_detected": False, "waf_type": None, "confidence": 80,
+                "reasoning": "", "source": source}
+
+    with mock.patch("recon.helpers.security_checks.requests.get", side_effect=[sub, ip]), \
+            mock.patch.object(sc, "_waf_payload_differential", return_value=None), \
+            mock.patch.object(sc, "_classify_waf_ai", side_effect=fake_classify):
+        result = sc.check_waf_bypass("api.target.com", "1.2.3.4")
+    assert result is not None
+    assert result["detection_method"] == expected
+
+
+@pytest.mark.parametrize("engine", ["jev", "llm"])
+def test_a_takeover_finding_records_the_engine_that_flagged_the_collision(engine):
+    from recon.main_recon_modules import subdomain_takeover as st
+    finding = {"hostname": "x.example.com", "takeover_provider": "heroku"}
+    verdict = {"is_waf_block": True, "confidence": 90, "reason": "r",
+               "source": "jev_classifier" if engine == "jev" else "ai_classifier"}
+    with mock.patch.object(st, "_probe_for_ai_disambiguation", return_value=(403, {}, "blocked")), \
+            mock.patch("recon.helpers.ai_planner.takeover_classifier.has_third_party_vendor_token",
+                       return_value=False), \
+            mock.patch("recon.helpers.ai_planner.takeover_classifier.classify_takeover_response",
+                       return_value=verdict) as classify:
+        st._apply_ai_waf_disambiguation([finding], "m", "u", "p", engine=engine)
+    assert classify.call_args.kwargs["engine"] == engine
+    assert finding["ai_waf_likely"] is True
+    assert finding["ai_engine"] == engine
+
+
+def test_a_takeover_below_the_threshold_is_not_annotated_at_all():
+    from recon.main_recon_modules import subdomain_takeover as st
+    finding = {"hostname": "x.example.com", "takeover_provider": "heroku"}
+    verdict = {"is_waf_block": True, "confidence": 50, "reason": "", "source": "jev_classifier"}
+    with mock.patch.object(st, "_probe_for_ai_disambiguation", return_value=(403, {}, "blocked")), \
+            mock.patch("recon.helpers.ai_planner.takeover_classifier.has_third_party_vendor_token",
+                       return_value=False), \
+            mock.patch("recon.helpers.ai_planner.takeover_classifier.classify_takeover_response",
+                       return_value=verdict):
+        st._apply_ai_waf_disambiguation([finding], "m", "u", "p", engine="jev")
+    assert "ai_waf_likely" not in finding and "ai_engine" not in finding

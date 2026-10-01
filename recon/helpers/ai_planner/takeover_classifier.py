@@ -97,7 +97,7 @@ def _fingerprint(response_text: str, status_code: int) -> str:
     return f"status={status_code}|size={size_bucket}|head={head}"
 
 
-def _validate_classification(raw) -> Optional[Dict]:
+def _validate_classification(raw, engine: str = 'llm') -> Optional[Dict]:
     """Sanitize the agent response. Returns None on schema mismatch."""
     if not isinstance(raw, dict):
         return None
@@ -123,7 +123,10 @@ def _validate_classification(raw) -> Optional[Dict]:
         "is_waf_block": is_waf_block,
         "reason": reason,
         "confidence": confidence,
-        "source": "ai_classifier",
+        # Stamped from the engine the CALLER asked for, never from the response
+        # body: provenance (detection_method, ai_engine) must not be forgeable
+        # by whatever the agent or an injected answer says.
+        "source": "jev_classifier" if engine == 'jev' else "ai_classifier",
     }
 
 
@@ -226,7 +229,7 @@ def classify_takeover_response(
         print(f"[!][{_TAG}] Agent returned non-JSON response: {e}. Using safe fallback.")
         return dict(SAFE_FALLBACK)
 
-    validated = _validate_classification(data)
+    validated = _validate_classification(data, engine)
     if validated is None:
         print(f"[!][{_TAG}] Agent response failed schema validation: "
               f"{str(data)[:200]}. Using safe fallback.")

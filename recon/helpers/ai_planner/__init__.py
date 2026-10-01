@@ -81,7 +81,9 @@ def agent_jev_gate():
                                          epoch=self._epoch)
                     return
                 error_type = None
-                if getattr(resp, "status_code", None) == 503:
+                # 503 for a Jev-side failure; 403 for jev_forbidden (a project that is
+                # not this user's). Both carry the agent's fixed error_type body.
+                if getattr(resp, "status_code", None) in (403, 503):
                     try:
                         error_type = (resp.json() or {}).get("error_type")
                     except Exception:  # noqa: BLE001

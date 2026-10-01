@@ -988,7 +988,7 @@ def _apply_ai_waf_disambiguation(
                 finding["ai_waf_likely"] = True
                 finding["ai_confidence"] = int(result["confidence"])
                 finding["ai_reasoning"] = result.get("reason") or ""
-                finding["ai_engine"] = "jev" if result.get("source") == "jev_classifier" else "llm"
+                finding["ai_engine"] = "jev" if engine == "jev" else "llm"
         except Exception as e:
             print(f"[!][Takeover-AI] disambiguation failed for {finding.get('hostname','?')}: {e}")
             continue
