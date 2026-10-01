@@ -230,18 +230,32 @@ def _valid_answers(req):
     return httpx.Response(200, json={"model": "jev-1.13.0", "answers": answers, "usage": {}})
 
 
+def _bare_key(req) -> str:
+    """The key exactly as sent, without the "Bearer " scheme. The agent's log redaction filter
+    also scrubs `Bearer <token>`, so echoing the scheme would let the filter, not the code, pass."""
+    return req.headers["authorization"].split(" ", 1)[1]
+
+
 def _echo_401(req):
     return httpx.Response(401, json={"detail": {"error_type": "authentication_error",
-                                                 "message": f"rejected {req.headers['authorization']}"}})
+                                                 "message": f"rejected {_bare_key(req)}"}})
 
 
 def _echo_500_html(req):
-    return httpx.Response(500, text=f"<html>upstream error for {req.headers['authorization']}</html>")
+    return httpx.Response(500, text=f"<html>upstream error for {_bare_key(req)}</html>")
 
 
 def _echo_exception(req):
-    raise httpx.ConnectError(f"cannot reach host with {req.headers['authorization']}")
+    raise httpx.ConnectError(f"cannot reach host with {_bare_key(req)}")
 
+
+#: Two keys. The first has the shape of a real TypeSafe key, so the agent's RedactingFilter would
+#: scrub it from a log line: that is defence in depth, and it is not what this test is for. The
+#: second has no shape any redaction pattern knows, so only the code's own discipline (never log
+#: a body, a header or an exception message) can keep it out. A leak that the filter happens to
+#: hide today would surface the day TypeSafe changes its key format.
+RAW_KEY = "zzq-Plain_Looking_Key_0123456789"
+LEAK_KEYS = [("known_shape", CANARY), ("shape_the_filter_cannot_know", RAW_KEY)]
 
 LEAK_SCENARIOS = [
     ("success", _valid_answers, 200),
@@ -251,16 +265,17 @@ LEAK_SCENARIOS = [
 ]
 
 
+@pytest.mark.parametrize("key_name,key", LEAK_KEYS, ids=[k[0] for k in LEAK_KEYS])
 @pytest.mark.parametrize("name,handler,status", LEAK_SCENARIOS, ids=[s[0] for s in LEAK_SCENARIOS])
 @pytest.mark.parametrize("path,body", list(PATHS.items()))
-def test_the_token_is_never_logged_or_returned(client, caplog, path, body, name, handler, status):
+def test_the_token_is_never_logged_or_returned(client, caplog, path, body, name, handler, status, key_name, key):
     caplog.set_level(logging.DEBUG)
-    with _owner_ok(), _providers([JEV_ROW]), _mock_typesafe(handler):
+    with _owner_ok(), _providers([dict(JEV_ROW, apiKey=key)]), _mock_typesafe(handler):
         resp = _post(client, path, body)
     assert resp.status_code == status, resp.text
-    assert CANARY not in resp.text
-    assert CANARY not in caplog.text
-    assert not any(CANARY in r.getMessage() or CANARY in str(r.args) or CANARY in str(r.exc_info)
+    assert key not in resp.text
+    assert key not in caplog.text
+    assert not any(key in r.getMessage() or key in str(r.args) or key in str(r.exc_info)
                    for r in caplog.records)
     # Not vacuous: the endpoint did log this call, so a leak here would have shown.
     assert any(r.getMessage().startswith("jev ") for r in caplog.records), caplog.text
