@@ -72,6 +72,39 @@ def _primitive_list(value) -> list:
     return [str(v) for v in (value or []) if v is not None and not isinstance(v, (dict, list))]
 
 
+def _entry_cert_key(entry: dict) -> str:
+    return build_cert_key(
+        fingerprint_sha256=entry.get("fingerprint_sha256"),
+        subject_cn=entry.get("subject_cn") or "",
+        issuer=entry.get("issuer_dn") or entry.get("issuer_cn"),
+        not_before=entry.get("not_before"), not_after=entry.get("not_after"),
+    )
+
+
+def _mismatched_by_cert(by_target: dict) -> dict:
+    """{cert_key: True if ANY observation of that cert in this write mismatched}.
+
+    `mismatched` is a verdict about the host a cert was served for, and one
+    cert is often observed on several targets (IPs, or SNIs on one IP). Writing
+    each observation's verdict left the shared Certificate node with whichever
+    target tlsx printed last, an order its concurrency decides. OR-ing them is
+    deterministic and agrees with the per-host verdict tls_hostname_mismatch
+    reports: the node is flagged when any of its observations mismatched.
+    """
+    out = {}
+    for entry in by_target.values():
+        if not isinstance(entry, dict):
+            continue
+        if not (entry.get("fingerprint_sha256") or entry.get("subject_cn")):
+            continue
+        try:
+            key = _entry_cert_key(entry)
+        except Exception:
+            continue
+        out[key] = out.get(key, False) or bool(entry.get("mismatched"))
+    return out
+
+
 class TlsxMixin:
     def update_graph_from_tlsx(self, recon_data: dict, user_id: str, project_id: str) -> dict:
         stats = {
@@ -98,6 +131,8 @@ class TlsxMixin:
             # mode's synthetic root is no parent of a real SAN name, so an IP-mode
             # scan links none, exactly as it always has.
             return root_for_host(name, roots) is not None
+
+        mismatched_by_cert = _mismatched_by_cert(by_target)
 
         with self.driver.session() as session:
             for key, entry in by_target.items():
@@ -156,11 +191,7 @@ class TlsxMixin:
                     issuer_dn = entry.get("issuer_dn")
                     issuer_cn = entry.get("issuer_cn")
                     fingerprint = entry.get("fingerprint_sha256")
-                    cert_key = build_cert_key(
-                        fingerprint_sha256=fingerprint, subject_cn=subject_cn,
-                        issuer=issuer_dn or issuer_cn,
-                        not_before=entry.get("not_before"), not_after=entry.get("not_after"),
-                    )
+                    cert_key = _entry_cert_key(entry)
                     cert_props = {
                         "subject_cn": subject_cn or None,
                         "subject_dn": entry.get("subject_dn"),
@@ -176,7 +207,8 @@ class TlsxMixin:
                         "not_after": entry.get("not_after"),
                         "expired": bool(entry.get("expired")),
                         "self_signed": bool(entry.get("self_signed")),
-                        "mismatched": bool(entry.get("mismatched")),
+                        "mismatched": mismatched_by_cert.get(
+                            cert_key, bool(entry.get("mismatched"))),
                         "revoked": bool(entry.get("revoked")),
                         "untrusted": bool(entry.get("untrusted")),
                         "wildcard": bool(entry.get("wildcard")),

@@ -95,6 +95,28 @@ def _host_matches_cert(host: str, names: list) -> bool:
     return False
 
 
+def _hostnames_by_ip(combined_result: dict) -> dict:
+    """{ip: {hostname, ...}}: every real name port_scan resolved to each IP."""
+    by_ip = ((combined_result.get("port_scan") or {}).get("by_ip")) or {}
+    out = {}
+    for ip, info in by_ip.items():
+        if not ip or not isinstance(info, dict):
+            continue
+        names = {h.strip().lower().rstrip(".") for h in (info.get("hostnames") or [])
+                 if isinstance(h, str) and h.strip()}
+        names = {h for h in names if not _is_mock_hostname(h, ip)}
+        if names:
+            out[ip] = names
+    return out
+
+
+def _cert_names_a_sibling(submitted: str, cert_names: list, siblings) -> bool:
+    """True when the cert names another hostname that resolves to the same IP."""
+    submitted = (submitted or "").strip().lower().rstrip(".")
+    return any(name and name != submitted and _host_matches_cert(name, cert_names)
+               for name in (siblings or ()))
+
+
 def build_tlsx_command(targets_file: str, targets_dir: str, settings: dict) -> list:
     """Build the ``docker run`` argv for tlsx.
 
@@ -214,8 +236,12 @@ def _build_tlsx_targets(combined_result: dict, settings: dict):
     return lines, meta
 
 
-def _parse_tlsx_output(stdout: str, meta: dict) -> dict:
-    """Parse tlsx JSONL into by_target keyed on the scanned ip:port."""
+def _parse_tlsx_output(stdout: str, meta: dict, ip_hostnames: dict | None = None) -> dict:
+    """Parse tlsx JSONL into by_target keyed on the scanned ip:port.
+
+    ``ip_hostnames`` ({ip: {hostname}}, from ``_hostnames_by_ip``) lets the
+    mismatch verdict see the other names that share the scanned IP.
+    """
     by_target = {}
     now = datetime.now(timezone.utc)
     for raw in (stdout or "").splitlines():
@@ -264,6 +290,16 @@ def _parse_tlsx_output(stdout: str, meta: dict) -> dict:
             names = ([subject_cn] if subject_cn else []) + raw_san
             derived = not _host_matches_cert(submitted, names) if probe_status else False
             mismatched = bool(row.get("mismatched")) or derived
+            # The SNI is the alphabetically first of the IP's names
+            # (TLSX_MAX_HOSTNAMES_PER_IP defaults to 1), an arbitrary pick. A
+            # mail/LDAP service on a shared IP serves one cert for the name
+            # clients actually use; when that cert names another of the IP's
+            # hostnames the service is correctly configured for one of its
+            # names, a mismatch nobody would hit. A cert naming none of them is
+            # still reported.
+            if derived and _cert_names_a_sibling(
+                    submitted, names, (ip_hostnames or {}).get(scanned_ip)):
+                mismatched = False
         else:
             # H5: tlsx compares the cert against whatever it dialled, so on a
             # bare IP it reports mismatched=true for EVERY correctly configured
@@ -442,7 +478,8 @@ def run_tlsx_enrichment(combined_result: dict, settings: dict) -> dict:
             _print("!", f"tlsx runner missing: {e}")
         duration = (datetime.now(timezone.utc) - started).total_seconds()
 
-        by_target = _parse_tlsx_output(stdout, meta)
+        by_target = _parse_tlsx_output(stdout, meta,
+                                       ip_hostnames=_hostnames_by_ip(combined_result))
         _enrich_port_details(combined_result, by_target)
         _attribute_cdn(combined_result, by_target)
 
