@@ -79,3 +79,14 @@ export const PROVIDER_TYPES = [
 ] as const
 
 export type ProviderType = typeof PROVIDER_TYPES[number]['id']
+
+/**
+ * Provider types whose key is not for a chat model (TypeSafe Jev). Every place
+ * that treats "any provider row" as a chat LLM must skip them, or the token is
+ * forwarded to the agent's model discovery and counted as a configured LLM.
+ * Twin of NON_CHAT_PROVIDER_TYPES in agentic/llm_builder.py.
+ */
+export const NON_CHAT_PROVIDER_TYPES: ReadonlySet<string> = new Set(['jev'])
+
+export const isChatProvider = (p: { providerType: string }): boolean =>
+  !NON_CHAT_PROVIDER_TYPES.has(p.providerType)

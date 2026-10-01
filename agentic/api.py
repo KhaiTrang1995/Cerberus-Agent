@@ -1283,26 +1283,17 @@ class TradecraftVerifyRequest(BaseModel):
     model: Optional[str] = None
 
 
-_CUSTOM_PROVIDER_TYPES = ("openai_compatible", "bedrock_custom", "ollama_local")
-
-
 def _pick_custom_provider(user_providers: list, model_name: str) -> Optional[dict]:
     """Return the custom-provider record that should serve this request, if any.
 
     Resolution order:
       1. If `model_name` is `custom/<id>`, look up that exact provider id.
       2. Otherwise, the first provider whose providerType is custom.
-    Returns None when no custom provider is configured.
+    Returns None when no custom provider is configured. Non-chat rows (Jev)
+    are never returned.
     """
-    if model_name and model_name.startswith("custom/"):
-        wanted_id = model_name[len("custom/"):]
-        for p in user_providers or []:
-            if p.get("id") == wanted_id:
-                return p
-    for p in user_providers or []:
-        if p.get("providerType") in _CUSTOM_PROVIDER_TYPES:
-            return p
-    return None
+    from llm_builder import custom_provider_or_fallback
+    return custom_provider_or_fallback(user_providers, model_name)
 
 
 def _build_llm_for_user(user_id: Optional[str]):
@@ -2714,14 +2705,8 @@ async def _build_cypher_manager(user_id: str, project_id: str):
     llm = None
     try:
         if model_name.startswith("custom/"):
-            config_id = model_name[len("custom/"):]
-            matched = None
-            for prov in user_providers:
-                if prov.get("id") == config_id:
-                    matched = prov
-                    break
-            if not matched and user_providers:
-                matched = user_providers[0]
+            from llm_builder import custom_provider_or_fallback
+            matched = custom_provider_or_fallback(user_providers, model_name)
             if not matched:
                 raise _CypherSetupError(
                     400, "Custom LLM provider not found. Configure an AI model in settings."

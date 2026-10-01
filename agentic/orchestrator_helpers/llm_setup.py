@@ -9,6 +9,7 @@ from langchain_core.language_models import BaseChatModel
 from project_settings import load_project_settings
 from agent_context import set_llm_context
 from orchestrator_helpers.llm_url_guard import validate_llm_base_url
+from llm_builder import NON_CHAT_PROVIDER_TYPES
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,12 @@ def setup_llm(
                 "Configure the provider in Global Settings."
             )
         ptype = custom_llm_config.get("providerType", "openai_compatible")
+        if ptype in NON_CHAT_PROVIDER_TYPES:
+            # The default branch below would send this key to api.openai.com.
+            raise ValueError(
+                f"Provider type '{ptype}' is not a chat model provider and "
+                f"cannot serve model '{model_name}'."
+            )
 
         if ptype == "anthropic":
             anth_model = custom_llm_config.get("modelIdentifier", api_model)

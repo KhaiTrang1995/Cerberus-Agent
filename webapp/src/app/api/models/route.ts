@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { internalKeyHeaders } from '@/lib/agentAuth'
 import prisma from '@/lib/prisma'
 import { requireEffectiveUser } from '@/lib/access'
+import { isChatProvider } from '@/lib/llmProviderPresets'
 
 const AGENT_API_URL = process.env.AGENT_API_URL || 'http://localhost:8090'
 
@@ -18,7 +19,9 @@ export async function POST(request: NextRequest) {
     // used to enumerate another user's configured providers.
     let providers: unknown[] = []
     if (userId) {
-      providers = await prisma.userLlmProvider.findMany({ where: { userId: eff.userId } })
+      const rows = await prisma.userLlmProvider.findMany({ where: { userId: eff.userId } })
+      // A non-chat key (Jev) lists no models, so it never leaves the webapp here.
+      providers = rows.filter(isChatProvider)
     }
 
     const res = await fetch(`${AGENT_API_URL}/models`, {

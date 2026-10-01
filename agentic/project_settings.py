@@ -684,18 +684,15 @@ def fetch_agent_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
         # If selected model is custom/, extract its specific config
         model_id = settings.get('OPENAI_MODEL', '')
         if model_id.startswith('custom/'):
+            from llm_builder import custom_provider_or_fallback
+
             config_id = model_id[len('custom/'):]
             providers = settings.get('USER_LLM_PROVIDERS', [])
-            matched = None
-            for p in providers:
-                if p.get('id') == config_id:
-                    matched = p
-                    break
+            # A stale id (provider deleted and recreated) falls back to the
+            # user's first custom-capable provider so the agent isn't stuck.
+            matched = custom_provider_or_fallback(providers, model_id)
 
-            if not matched and providers:
-                # Provider ID is stale (deleted & recreated). Fall back to the
-                # user's first compatible provider so the agent isn't stuck.
-                matched = providers[0]
+            if matched and matched.get('id') != config_id:
                 logger.warning(
                     f"Custom LLM config {config_id} not found; "
                     f"falling back to provider {matched['id']} ({matched.get('name')})"

@@ -30,6 +30,16 @@ MODEL_UNAVAILABLE_MESSAGE = "Your model {model} could not be used"
 _BUILTIN_PROVIDERS = ("openai", "anthropic", "openrouter", "bedrock", "deepseek",
                       "gemini", "glm", "kimi", "qwen", "xai", "mistral")
 
+#: Provider rows whose key is for something other than a chat model (TypeSafe
+#: Jev). Every path that builds a chat LLM from "a provider row" must skip
+#: them: `setup_llm`'s custom branch would build ChatOpenAI with no base URL
+#: and send the token to api.openai.com. Twin of the webapp's
+#: NON_CHAT_PROVIDER_TYPES in llmProviderPresets.ts.
+NON_CHAT_PROVIDER_TYPES = frozenset({"jev"})
+
+#: The provider types that can serve a `custom/<id>` model.
+CUSTOM_PROVIDER_TYPES = ("openai_compatible", "bedrock_custom", "ollama_local")
+
 #: Provider answers that mean "this model, with these keys, cannot be used" -
 #: a bad or revoked key, no access, or a model id the provider does not have.
 #: Anything else (rate limit, a 5xx, a dropped connection) is transient and
@@ -84,13 +94,37 @@ def fetch_user_providers(user_id: str) -> list:
     return providers
 
 
+def chat_providers(rows: list) -> list:
+    """The provider rows that hold a chat-model key (non-chat types dropped)."""
+    return [row for row in rows or []
+            if isinstance(row, dict)
+            and row.get("providerType") not in NON_CHAT_PROVIDER_TYPES]
+
+
 def exact_custom_provider(providers: list, model: str):
     """The provider a `custom/<id>` model names, or None. Never another one."""
     if not model or not model.startswith("custom/"):
         return None
     wanted = model[len("custom/"):]
-    for provider in providers or []:
-        if isinstance(provider, dict) and provider.get("id") == wanted:
+    for provider in chat_providers(providers):
+        if provider.get("id") == wanted:
+            return provider
+    return None
+
+
+def custom_provider_or_fallback(providers: list, model: str):
+    """The provider for a `custom/<id>` model, else the first custom-capable one.
+
+    For the agent session and text-to-cypher, which keep working when a
+    provider was deleted and recreated under a new id. The fallback only ever
+    lands on a custom-capable type: any other row (a built-in key, a Jev token)
+    would be sent to whatever endpoint `setup_llm`'s custom branch builds.
+    """
+    exact = exact_custom_provider(providers, model)
+    if exact is not None:
+        return exact
+    for provider in chat_providers(providers):
+        if provider.get("providerType") in CUSTOM_PROVIDER_TYPES:
             return provider
     return None
 

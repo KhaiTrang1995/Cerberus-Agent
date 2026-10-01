@@ -165,6 +165,38 @@ describe('POST /api/models', () => {
 })
 
 // ---------------------------------------------------------------------------
+// A non-chat key (TypeSafe Jev) lists no models and must not travel at all.
+// ---------------------------------------------------------------------------
+
+describe('non-chat provider rows', () => {
+  const JEV_KEY = 'ts-JEV-CANARY-must-not-reach-the-agent-models-endpoint'
+
+  test('a Jev row is dropped; chat rows are still forwarded', async () => {
+    const chatRow = { id: 'p1', providerType: 'anthropic', apiKey: 'sk-ant' }
+    mockFindMany.mockResolvedValueOnce([
+      { id: 'p-jev', providerType: 'jev', apiKey: JEV_KEY },
+      chatRow,
+    ])
+    installFetchStub({})
+
+    await route.POST(makeRequest({ userId: 'u1' }) as never)
+
+    const body = capturedFetch!.init.body as string
+    expect(body).not.toContain(JEV_KEY)
+    expect(JSON.parse(body).providers).toEqual([chatRow])
+  })
+
+  test('a Jev-only user sends null providers, like a user with none', async () => {
+    mockFindMany.mockResolvedValueOnce([{ id: 'p-jev', providerType: 'jev', apiKey: JEV_KEY }])
+    installFetchStub({})
+
+    await route.POST(makeRequest({ userId: 'u1' }) as never)
+
+    expect(JSON.parse(capturedFetch!.init.body as string)).toEqual({ providers: null })
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Critical regression: apiKey is in BODY, never in URL.
 // ---------------------------------------------------------------------------
 
