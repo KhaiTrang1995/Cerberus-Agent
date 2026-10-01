@@ -56,9 +56,12 @@ _FINDING_LABEL_PREDICATE = " OR ".join(f"n:`{label}`" for label in FINDING_LABEL
 #: security checks use `url`/`matched_at`/`hostname`; js_recon and jsluice
 #: `source_url`/`base_url`; graphql and cache poisoning `endpoint`; nmap_nse
 #: `ip_address`. ai_surface_recon stores none, so its skips are source-level.
+#: GVM's Vulnerability and ExploitGvm use `target_ip`/`target_hostname`, which
+#: no other finding label carries, so they change no other source's prune.
 _KEEP_HOST_FIELDS = (
     "host", "hostname", "ip", "ip_address", "matched_ip",
     "url", "matched_at", "base_url", "source_url", "endpoint", "probe_url",
+    "target_ip", "target_hostname",
 )
 
 #: What a hostname in `keep_hosts` must look like before it is regex-escaped:

@@ -934,6 +934,15 @@ class GVMScanner:
             print(f"    [+] Deleted task {task_id}")
         except Exception as e:
             print(f"    [!] Failed to delete task {task_id}: {e}")
+
+    def stop_task(self, task_id: str):
+        """Ask gvmd to stop a running task. Never raises: it runs on the way out
+        of an interrupt, which an error here must not replace."""
+        try:
+            self.gmp.stop_task(task_id)
+            print(f"    [+] Stopped task {task_id}")
+        except Exception as e:
+            print(f"    [!] Failed to stop task {task_id}: {e}")
     
     def scan_targets(
         self,
@@ -997,7 +1006,15 @@ class GVMScanner:
                     "error": "No report generated",
                     "vulnerabilities": []
                 }
-                
+
+        except KeyboardInterrupt:
+            # Ending this process does not end the OpenVAS scan it started:
+            # left running, gvmd keeps scanning the target for hours with
+            # nobody left to read the report.
+            if task_id:
+                self.stop_task(task_id)
+            raise
+
         except Exception as e:
             print(f"    [!] Scan failed: {e}")
             return {

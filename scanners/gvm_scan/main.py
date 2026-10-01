@@ -16,6 +16,7 @@ Usage:
 """
 
 import os
+import signal
 import sys
 import json
 import time
@@ -59,6 +60,78 @@ MAX_CONSECUTIVE_TARGET_FAILURES = 3
 
 class ScanAborted(RuntimeError):
     """The stack, not the target, is broken - continuing cannot help."""
+
+
+#: Set by the SIGTERM handler. A stopped run re-checked only some targets, so
+#: it neither clears nor prunes.
+_STOP_REQUESTED = False
+#: While targets are being scanned a stop ends the scan (KeyboardInterrupt).
+#: Once the graph write is under way it is only noted, so the write is not
+#: cut in half.
+_STOP_INTERRUPTS_SCAN = True
+
+
+def _on_sigterm(signum, frame):
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = True
+    if _STOP_INTERRUPTS_SCAN:
+        raise KeyboardInterrupt()
+    print("\n[!] Stop requested: finishing the graph write first, nothing will be pruned")
+
+
+def _install_sigterm_handler():
+    """Turn the orchestrator's stop into an orderly end of the scan.
+
+    The scan runs as PID 1 with no init, and the kernel ignores any signal PID 1
+    has no handler for: every stop sat out the grace period and was SIGKILLed,
+    so the graph write never ran and the gvmd task kept scanning. A
+    KeyboardInterrupt, as in the GitHub hunt, because it is a BaseException and
+    passes the per-target `except Exception` in scan_targets.
+    """
+    try:
+        signal.signal(signal.SIGTERM, _on_sigterm)
+    except ValueError:
+        pass  # not the main thread
+
+
+def _unscanned_targets(results: dict) -> list:
+    """The targets this run attempted but got no report for.
+
+    Their findings were not re-checked, so the prune keeps them (keep_hosts).
+    """
+    hosts = []
+    for scan in results.get("scans") or []:
+        if scan.get("status") == "error" or scan.get("error"):
+            targets = scan.get("targets") or [scan.get("target_ip") or scan.get("target_hostname")]
+            hosts.extend(t for t in targets if t)
+    return sorted(set(hosts))
+
+
+def _clear_previous_gvm_data(project_id: str):
+    """Remove the previous run's GVM assets before a complete run's write.
+
+    Deliberately after the scan, never before it: the clear deletes every
+    untouched ExploitGvm and the GVM-only Technology, Certificate and Traceroute
+    nodes, and a run that clears first and then aborts, cannot reach gvmd or is
+    stopped has destroyed them for targets it never scanned.
+    """
+    if not (project_id and USER_ID):
+        return
+    print("[*] Clearing previous GVM graph data...")
+    try:
+        from graph_db import Neo4jClient
+        with Neo4jClient() as graph_client:
+            if graph_client.verify_connection():
+                clear_stats = graph_client.clear_gvm_data(USER_ID, project_id)
+                total = (clear_stats["vulnerabilities_deleted"] +
+                         clear_stats["technologies_deleted"] +
+                         clear_stats["cves_deleted"])
+                print(f"    [+] Cleared: {total} GVM nodes removed, "
+                      f"{clear_stats['technologies_cleaned']} shared technologies cleaned")
+            else:
+                print("    [!] Could not connect to Neo4j - skipping clear")
+    except Exception as e:
+        print(f"    [!] Failed to clear GVM data (continuing): {e}")
 
 
 def check_failure_streak(result: dict, streak: int, target: str) -> int:
@@ -151,6 +224,8 @@ def run_vulnerability_scan(
     Returns:
         Complete vulnerability scan results
     """
+    global _GVM_RUN_STARTED_AT, _STOP_INTERRUPTS_SCAN
+
     # Read scan settings from project settings (fetched from webapp API)
     scan_config = get_setting('SCAN_CONFIG', 'Full and fast')
     scan_targets = get_setting('SCAN_TARGETS', 'both')
@@ -211,28 +286,16 @@ def run_vulnerability_scan(
             }
         }
 
-    # Clear previous GVM graph data for this project
+    # The previous run's GVM data is cleared just before the write, and only by
+    # a run that scanned every target (_clear_previous_gvm_data).
     if project_id and USER_ID:
-        print("[*] Clearing previous GVM graph data...")
         try:
-            from graph_db import Neo4jClient
             from graph_db.mixins.base_mixin import run_timestamp
             # X7: taken BEFORE the ingest, so everything this scan writes has a
             # later `updated_at` and survives the prune at the end.
-            global _GVM_RUN_STARTED_AT
             _GVM_RUN_STARTED_AT = run_timestamp()
-            with Neo4jClient() as graph_client:
-                if graph_client.verify_connection():
-                    clear_stats = graph_client.clear_gvm_data(USER_ID, project_id)
-                    total = (clear_stats["vulnerabilities_deleted"] +
-                             clear_stats["technologies_deleted"] +
-                             clear_stats["cves_deleted"])
-                    print(f"    [+] Cleared: {total} GVM nodes removed, "
-                          f"{clear_stats['technologies_cleaned']} shared technologies cleaned")
-                else:
-                    print("    [!] Could not connect to Neo4j - skipping clear")
         except Exception as e:
-            print(f"    [!] Failed to clear GVM data (continuing): {e}")
+            print(f"    [!] Could not stamp the run start (nothing will be pruned): {e}")
 
     # Extract targets from recon
     ips, hostnames = extract_targets_from_recon(recon_data)
@@ -374,7 +437,16 @@ def run_vulnerability_scan(
         results["aborted"] = str(e)
         save_vuln_results(results, project_id)
 
+    except KeyboardInterrupt:
+        # A stop (SIGTERM) or Ctrl-C: keep the targets already scanned and fall
+        # through to the graph write, as an abort does.
+        _STOP_INTERRUPTS_SCAN = False
+        print("\n[!] Scan stopped: keeping the targets already scanned")
+        results["interrupted"] = "Stopped before every target was scanned"
+        save_vuln_results(results, project_id)
+
     finally:
+        _STOP_INTERRUPTS_SCAN = False
         scanner.disconnect()
     
     # Print summary
@@ -392,21 +464,37 @@ def run_vulnerability_scan(
     print(f"[+] Output: {output_file}")
     print(f"{'=' * 70}")
 
+    # Only a run that scanned every target may clear the previous run's data,
+    # and only one that was neither aborted nor stopped may prune. A target
+    # that failed was not re-checked, so the prune keeps its findings.
+    unscanned = _unscanned_targets(results)
+    partial = bool(results.get("aborted") or results.get("interrupted") or _STOP_REQUESTED)
+    if not partial and not unscanned:
+        _clear_previous_gvm_data(project_id)
+    else:
+        print("[*] Not every target was scanned: previous GVM data is kept, "
+              "this run's results are added to it")
+
     # Update Neo4j graph with GVM results
     graph_stats = update_graph_from_gvm_results(results)
     if "error" not in graph_stats:
         results["graph_update"] = graph_stats
-        _prune_gvm_findings(graph_stats, project_id)
+        # Re-read: a stop arriving during the write is noted, not raised.
+        if partial or _STOP_REQUESTED:
+            print("[*] Prune skipped: the run did not reach every target")
+        else:
+            _prune_gvm_findings(graph_stats, project_id, keep_hosts=unscanned)
 
     return results
 
 
-#: When this GVM run started, for the prune. Set by the clear, and absent when
-#: the clear never ran, which is what stops a failed run pruning anything.
+#: When this GVM run started, for the prune. Set once recon shows live targets,
+#: before any is scanned, and absent when the run stopped short of that, which
+#: is what stops a failed run pruning anything.
 _GVM_RUN_STARTED_AT = None
 
 
-def _prune_gvm_findings(graph_stats, project_id):
+def _prune_gvm_findings(graph_stats, project_id, keep_hosts=()):
     """Remove the GVM findings this scan stopped reporting (X7).
 
     Only after an ingest that actually wrote something: a GVM run that produced
@@ -414,7 +502,8 @@ def _prune_gvm_findings(graph_stats, project_id):
     became clean, and pruning on it would empty the project's GVM findings.
 
     Findings an operator muted or judged are kept and stamped stale rather than
-    deleted, so their decision survives.
+    deleted, so their decision survives. Findings on `keep_hosts` (targets that
+    failed this run) are left exactly as they are.
     """
     if not _GVM_RUN_STARTED_AT or not project_id or not USER_ID:
         return
@@ -425,7 +514,8 @@ def _prune_gvm_findings(graph_stats, project_id):
         with Neo4jClient() as graph_client:
             if graph_client.verify_connection():
                 graph_client.prune_unseen_findings(
-                    USER_ID, project_id, ["gvm"], _GVM_RUN_STARTED_AT)
+                    USER_ID, project_id, ["gvm"], _GVM_RUN_STARTED_AT,
+                    keep_hosts=list(keep_hosts))
     except Exception as e:
         # Housekeeping must never fail a completed scan.
         print(f"    [!] Could not prune stale GVM findings: {e}")
@@ -437,6 +527,8 @@ def main():
     if not PROJECT_ID:
         print("[!] ERROR: PROJECT_ID environment variable not set")
         return 1
+
+    _install_sigterm_handler()
 
     # Load per-project settings from webapp API (or use defaults)
     load_project_settings(PROJECT_ID)
@@ -453,6 +545,10 @@ def main():
         if "error" in results:
             print(f"\n[!] Scan failed: {results['error']}")
             return 1
+
+        if results.get("interrupted"):
+            print("\n[!] Scan interrupted: partial results written, nothing pruned")
+            return 130
         
     except KeyboardInterrupt:
         print("\n[!] Scan interrupted by user")

@@ -2953,12 +2953,20 @@ class ContainerManager:
         state.status = GvmStatus.STOPPING
 
         if state.container_id:
-            try:
-                container = self.client.containers.get(state.container_id)
+            def _stop(cid: str) -> None:
+                container = self.client.containers.get(cid)
                 if container.status == "paused":
                     container.unpause()
                 container.stop(timeout=timeout)
+                # BEFORE removing it, as stop_github_hunt does: if the scan was
+                # SIGKILLed before its own graph write, the JSON it saved after
+                # each target is the only copy of what it found.
+                self._ingest_gvm_after_stop(state, container)
                 container.remove()
+            try:
+                # Off the event loop: the stop waits out the grace period and the
+                # backstop may write a whole run.
+                await asyncio.to_thread(_stop, state.container_id)
                 state.status = GvmStatus.IDLE
                 state.completed_at = datetime.now(timezone.utc)
                 logger.info(f"Stopped GVM container for project {project_id}")
@@ -2972,6 +2980,69 @@ class ContainerManager:
             del self.gvm_states[project_id]
 
         return state
+
+    GVM_OUTPUT_DIR = Path("/app/gvm_scan/output")
+
+    def _ingest_gvm_after_stop(self, state: GvmState, container) -> None:
+        """Write a stopped GVM run's saved results to the graph. Upsert only.
+
+        A BACKSTOP. The scan writes its partial results itself when stopped (its
+        SIGTERM handler), but a large write can outlast the grace period and be
+        SIGKILLed. Nothing is cleared and nothing is pruned: a stopped run did
+        not re-check every target, so it cannot say what is gone.
+
+        Skipped when the file predates this run (a run stopped before its first
+        target finished has saved nothing, and the file is the previous run's)
+        and when the scan's own write landed, which stamps the run's
+        scan_timestamp on the Domain as its last step.
+
+        Never raises: the stop must succeed whatever happens here.
+        """
+        try:
+            if not state.started_at:
+                return
+            out_path = self.GVM_OUTPUT_DIR / f"gvm_{state.project_id}.json"
+            if (not out_path.exists()
+                    or out_path.stat().st_mtime < state.started_at.timestamp()):
+                return
+            env = ((container.attrs or {}).get("Config") or {}).get("Env") or []
+            user_id = next((e.split("=", 1)[1] for e in env
+                            if isinstance(e, str) and e.startswith("USER_ID=")), "")
+            if not user_id:
+                # An empty tenant key writes nodes no scoped read can see.
+                logger.error(f"[gvm] refusing to ingest {state.project_id}: "
+                             "the container carries no USER_ID")
+                return
+            data = json.loads(out_path.read_text())
+            if not isinstance(data, dict) or not data.get("scans"):
+                return
+
+            from graph_db import Neo4jClient
+            # Same caveat as the TruffleHog ingest: NEO4J_URI here is the value
+            # forwarded to HOST-network scan containers and reaches nothing.
+            neo4j_uri = (os.environ.get("ORCHESTRATOR_NEO4J_URI", "").strip()
+                         or "bolt://neo4j:7687")
+            with Neo4jClient(uri=neo4j_uri) as client:
+                if not client.verify_connection():
+                    logger.warning("[gvm] Neo4j unreachable; stopped run not ingested")
+                    return
+                stamp = (data.get("metadata") or {}).get("scan_timestamp")
+                with client.driver.session() as session:
+                    row = session.run(
+                        """
+                        MATCH (d:Domain {user_id: $uid, project_id: $pid})
+                        RETURN collect(d.gvm_scan_timestamp) AS stamps
+                        """,
+                        uid=user_id, pid=state.project_id).single()
+                if stamp and row and stamp in (row["stamps"] or []):
+                    logger.info(f"[gvm] {state.project_id} stopped run already in "
+                                "the graph (the scan wrote it)")
+                    return
+                stats = client.update_graph_from_gvm_scan(data, user_id, state.project_id)
+            logger.info(f"[gvm] backstop ingest of stopped run {state.project_id} "
+                        f"({len(data['scans'])} targets): {stats}")
+        except Exception as e:
+            logger.warning(f"[gvm] backstop ingest failed for {state.project_id}: {e}")
 
     def _parse_gvm_log_line(self, line: str, current_phase: Optional[str], current_phase_num: Optional[int], timestamp: Optional[datetime] = None) -> GvmLogEvent:
         """Parse a GVM log line and detect phase changes"""
@@ -5223,6 +5294,8 @@ exit $RC
 
         # Ingest whatever the run wrote before it was stopped: a partial result
         # is still a result, and the incremental save means the file is valid.
+        # Its status is still "in_progress", so the graph write only upserts it
+        # and never clears or prunes the source's earlier findings.
         await asyncio.to_thread(self._ingest_trufflehog, state)
 
         self._drop_trufflehog_run(project_id, source, state)
