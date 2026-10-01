@@ -1168,6 +1168,133 @@ async def llm_takeover_classify(body: TakeoverClassifyRequest):
     }
 
 
+# =============================================================================
+# /jev/* — the same request bodies and response shapes as the matching /llm/*
+# endpoints, answered by TypeSafe Jev instead of a chat LLM. Recon reuses its
+# existing validators and fallbacks unchanged. The token is loaded here from the
+# project owner's account and never leaves the agent.
+# =============================================================================
+
+def _jev_failure(err) -> JSONResponse:
+    """A Jev-side failure as a 503 with a fixed body. Never exception text."""
+    body = {"error_type": err.error_type, "error": err.message}
+    if err.retry_after is not None:
+        body["retry_after"] = err.retry_after
+    return JSONResponse(content=body, status_code=503)
+
+
+async def _jev_preamble(user_id: str, project_id: str) -> str:
+    """Validate the caller, bind the project to its owner, and return the token.
+
+    Raises an `HTTPException`/`JevError`-shaped failure by returning a
+    JSONResponse-bearing exception is avoided: instead this returns the key, or
+    raises `_JevPreambleError` carrying the response to send.
+    """
+    import jev_client
+    from llm_builder import fetch_user_providers, ProvidersUnreachable
+
+    if not (user_id or "").strip() or not (project_id or "").strip():
+        raise _JevPreambleError(JSONResponse(
+            content={"error_type": "jev_bad_request", "error": "user_id and project_id are required"},
+            status_code=422))
+
+    # Owner binding, fail closed: the project must belong to this user.
+    try:
+        await jev_client.verify_owner(project_id, user_id)
+    except jev_client.JevError as e:
+        status = 403 if e.error_type == "jev_forbidden" else 503
+        raise _JevPreambleError(JSONResponse(
+            content={"error_type": e.error_type, "error": e.message}, status_code=status))
+
+    try:
+        providers = await asyncio.to_thread(fetch_user_providers, user_id)
+    except ProvidersUnreachable:
+        raise _JevPreambleError(_jev_failure(jev_client.JevError("jev_unavailable")))
+    key = jev_client.pick_jev_key(providers)
+    if not key:
+        raise _JevPreambleError(_jev_failure(jev_client.JevError("jev_not_configured")))
+    return key
+
+
+class _JevPreambleError(Exception):
+    def __init__(self, response: JSONResponse):
+        self.response = response
+
+
+def _log_jev(endpoint: str, user_id: str, project_id: str, n_questions: int,
+             model: str, latency_ms: int, outcome: str) -> None:
+    logger.info(
+        "jev %s: user=%s project=%s questions=%d model=%s latency=%dms %s",
+        endpoint, user_id, project_id, n_questions, model, latency_ms, outcome,
+    )
+
+
+async def _run_jev(endpoint: str, user_id: str, project_id: str, n_questions: int, coro):
+    """Shared wrapper: owner/token preamble, timing, fixed-error mapping, log."""
+    import time as _time
+    import jev_hooks
+
+    try:
+        key = await _jev_preamble(user_id, project_id)
+    except _JevPreambleError as e:
+        _log_jev(endpoint, user_id, project_id, n_questions, jev_hooks.JEV_MODEL, 0,
+                 f"rejected status={e.response.status_code}")
+        return e.response
+
+    started = _time.monotonic()
+    try:
+        result = await coro(key)
+    except jev_hooks.JevError as e:
+        _log_jev(endpoint, user_id, project_id, n_questions, jev_hooks.JEV_MODEL,
+                 int((_time.monotonic() - started) * 1000), f"error_type={e.error_type}")
+        return _jev_failure(e)
+    _log_jev(endpoint, user_id, project_id, n_questions, jev_hooks.JEV_MODEL,
+             int((_time.monotonic() - started) * 1000), "ok")
+    return result
+
+
+@app.post("/jev/ffuf-extensions", tags=["LLM"], dependencies=[Depends(require_internal_auth)])
+async def jev_ffuf_extensions(body: FfufExtensionsRequest):
+    import jev_hooks
+    return await _run_jev(
+        "ffuf-extensions", body.user_id or "", body.project_id or "",
+        len(jev_hooks.FFUF_JEV_CATALOG),
+        lambda key: jev_hooks.ffuf_extensions(key, body.url, body.headers or {}, body.max_extensions),
+    )
+
+
+@app.post("/jev/nuclei-tags", tags=["LLM"], dependencies=[Depends(require_internal_auth)])
+async def jev_nuclei_tags(body: NucleiTagsRequest):
+    import jev_hooks
+    return await _run_jev(
+        "nuclei-tags", body.user_id or "", body.project_id or "",
+        len(body.candidates or []),
+        lambda key: jev_hooks.nuclei_tags(key, body.technologies, body.servers,
+                                          body.candidates, body.max_tags),
+    )
+
+
+@app.post("/jev/waf-classify", tags=["LLM"], dependencies=[Depends(require_internal_auth)])
+async def jev_waf_classify(body: WafClassifyRequest):
+    import jev_hooks
+    return await _run_jev(
+        "waf-classify", body.user_id or "", body.project_id or "", 2,
+        lambda key: jev_hooks.waf_classify(key, body.url, body.status_code, body.headers or {},
+                                           body.body_sample, body.response_time_ms),
+    )
+
+
+@app.post("/jev/takeover-classify", tags=["LLM"], dependencies=[Depends(require_internal_auth)])
+async def jev_takeover_classify(body: TakeoverClassifyRequest):
+    import jev_hooks
+    return await _run_jev(
+        "takeover-classify", body.user_id or "", body.project_id or "", 1,
+        lambda key: jev_hooks.takeover_classify(key, body.hostname, body.expected_provider,
+                                                body.status_code, body.headers or {},
+                                                body.response_sample),
+    )
+
+
 @app.post("/emergency-stop-all", tags=["System"], dependencies=[Depends(require_internal_auth_only)])
 async def emergency_stop_all():
     """Emergency stop: cancel every running agent task immediately."""
