@@ -17,6 +17,33 @@ from recon.partial_recon_modules.helpers import (
     run_per_root,
     scope_roots,
 )
+from recon.helpers.roe_scope import _filter_roe_excluded
+
+
+def _drop_roe_excluded_discoveries(result: dict, settings: dict) -> list:
+    """Remove RoE-excluded names from a discover_subdomains result, in place.
+
+    Mirrors merge_group_hosts in the full pipeline. The graph writer MERGEs
+    every name in result["subdomains"], and partial Naabu/httpx/Nuclei later
+    read their targets back from the graph, so a name left here is actively
+    scanned. Returns the kept subdomain list.
+    """
+    discovered = result.get("subdomains", [])
+    kept = _filter_roe_excluded(discovered, settings, label="discovered subdomain")
+    if len(kept) == len(discovered):
+        return discovered
+    dropped = set(discovered) - set(kept)
+    result["subdomains"] = kept
+    result["subdomain_count"] = len(kept)
+    dns_subs = (result.get("dns") or {}).get("subdomains")
+    if isinstance(dns_subs, dict):
+        for name in dropped:
+            dns_subs.pop(name, None)
+    status_map = result.get("subdomain_status_map")
+    if isinstance(status_map, dict):
+        for name in dropped:
+            status_map.pop(name, None)
+    return kept
 
 
 def _enumerable_roots(roots: list, config: dict, settings: dict) -> list:
@@ -94,6 +121,10 @@ def run_subdomain_discovery(config: dict) -> dict:
             valid_user_subs.append(sub)
         elif sub:
             print(f"[!][Partial Recon] Skipping invalid user input: {sub} (under no project root)")
+    # The full pipeline drops the operator's explicit hosts the same way before
+    # any phase runs: an excluded host is never resolved, written or probed.
+    valid_user_subs = _filter_roe_excluded(valid_user_subs, settings,
+                                           label="user-provided subdomain")
 
     def _one_root(domain: str) -> str:
         print(f"[*][Partial Recon] Running subdomain discovery for {domain}...")
@@ -108,6 +139,7 @@ def run_subdomain_discovery(config: dict) -> dict:
 
         discovered_subs = result.get("subdomains", [])
         print(f"[+][Partial Recon] {domain}: discovery found {len(discovered_subs)} subdomains")
+        discovered_subs = _drop_roe_excluded_discoveries(result, settings)
 
         my_user_subs = [s for s in valid_user_subs if root_for_host(s, roots) == domain]
         new_user_subs = [s for s in my_user_subs if s not in discovered_subs]
