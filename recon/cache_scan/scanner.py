@@ -14,6 +14,7 @@ Engine flow per the design doc:
 """
 
 import copy
+import ipaddress
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
@@ -66,11 +67,61 @@ def _host_excluded(host: str, excluded: set[str]) -> bool:
     return False
 
 
+def _url_host(url: str) -> str:
+    try:
+        return (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def _is_ip_literal(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        return False
+
+
+def _cap_urls(urls: list[str], cap: int) -> list[str]:
+    """At most `cap` URLs, spread round-robin across hosts.
+
+    build_target_urls returns a plain sorted list, where http:// sorts before
+    https:// and digits before letters, so a head slice spent the whole budget
+    on the first few hosts (often bare IPs, often plain http) and silently
+    dropped the rest. Hostnames go before bare IPs and https before http; the
+    kept URLs stay in their input order.
+    """
+    if len(urls) <= cap:
+        return urls
+    by_host: dict[str, list[str]] = {}
+    for u in urls:
+        by_host.setdefault(_url_host(u), []).append(u)
+    hosts = sorted(by_host, key=lambda h: (_is_ip_literal(h), h))
+    queues = [sorted(by_host[h], key=lambda u: (not u.lower().startswith("https://"), u))
+              for h in hosts]
+    chosen: set[str] = set()
+    depth = 0
+    while len(chosen) < cap:
+        took = False
+        for queue in queues:
+            if depth < len(queue):
+                chosen.add(queue[depth])
+                took = True
+                if len(chosen) >= cap:
+                    break
+        if not took:
+            break
+        depth += 1
+    print(f"[*][CachePoison] Target cap {cap}: scanning {len(chosen)} of {len(urls)} URL(s) "
+          f"across {len(hosts)} host(s); dropped {len(urls) - len(chosen)}")
+    return [u for u in urls if u in chosen]
+
+
 def _collect_target_urls(combined_result: dict, settings: dict) -> list[str]:
     """Reuse the shared Nuclei target-builder, then apply RoE host filtering."""
     from recon.helpers.target_helpers import extract_targets_from_recon, build_target_urls
 
-    hostnames, ips, _ = extract_targets_from_recon(combined_result)
+    ips, hostnames, _ = extract_targets_from_recon(combined_result)
     urls = build_target_urls(hostnames, ips, combined_result, scan_all_ips=False)
 
     excluded = _roe_excluded_hosts(combined_result, settings)
@@ -80,7 +131,7 @@ def _collect_target_urls(combined_result: dict, settings: dict) -> list[str]:
         if removed:
             print(f"[*][CachePoison] RoE excluded {removed} target URL(s)")
         urls = kept
-    return urls[:_MAX_URLS]
+    return _cap_urls(urls, _MAX_URLS)
 
 
 def run_cache_scan(combined_result: dict, settings: dict) -> dict:
