@@ -111,6 +111,12 @@ class VhostSniMixin:
                         "is_reverse_proxy": bool(ip_info.get("is_reverse_proxy")),
                         "is_permissive_frontend": bool(ip_info.get("is_permissive_frontend")),
                         "vhost_sni_suppressed_by_control": int(ip_info.get("suppressed_by_control") or 0),
+                        # Always written, 0 and [] included: `SET i += $props`
+                        # keeps the old value of a key that is left out.
+                        "vhost_sni_suppressed_as_noise": int(ip_info.get("suppressed_as_noise") or 0),
+                        "vhost_sni_suppressed_sample": [
+                            str(h) for h in (ip_info.get("suppressed_as_noise_sample") or [])
+                        ],
                         "vhost_sni_tested_at": datetime.now(timezone.utc).isoformat(),
                     }
                     ip_props = {k: v for k, v in ip_props.items() if v is not None}

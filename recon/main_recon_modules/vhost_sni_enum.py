@@ -68,6 +68,11 @@ INTERNAL_KEYWORDS = {
 
 DEFAULT_WORDLIST_CONTAINER_PATH = "/app/recon/wordlists/vhost-common.txt"
 
+# How many suppressed "host:port" names an IP node keeps. A permissive frontend
+# answers every one of up to VHOST_SNI_MAX_CANDIDATES_PER_IP names per port, so
+# the full list would not fit sensibly on one property.
+SUPPRESSED_SAMPLE_MAX = 20
+
 
 # =============================================================================
 # Entry points
@@ -324,6 +329,7 @@ def _probe_single_ip(
     anomalies: list[dict] = []
     is_permissive_frontend = False
     suppressed_by_control_total = 0
+    suppressed_as_noise: list[str] = []
     dead_ports: list[str] = []
 
     for port_info in ports:
@@ -460,6 +466,7 @@ def _probe_single_ip(
         kept, port_is_noisy = _detect_noisy_frontend(port_anomalies, len(candidates))
         if port_is_noisy:
             is_permissive_frontend = True
+            suppressed_as_noise.extend(f"{a['hostname']}:{port}" for a in port_anomalies)
             print(
                 f"[!][VhostSni] IP {ip}:{port} ({scheme}) appears to be a "
                 f"permissive frontend ({len(port_anomalies)}/{len(candidates)} "
@@ -488,6 +495,10 @@ def _probe_single_ip(
         "is_reverse_proxy": is_reverse_proxy,
         "is_permissive_frontend": is_permissive_frontend,
         "suppressed_by_control": suppressed_by_control_total,
+        # A permissive frontend's anomalies are discarded as noise, not written
+        # as findings; the count and a bounded sample keep that discard visible.
+        "suppressed_as_noise": len(suppressed_as_noise),
+        "suppressed_as_noise_sample": sorted(suppressed_as_noise)[:SUPPRESSED_SAMPLE_MAX],
         "hosts_hidden_vhosts": len(anomalies) > 0,
         **({"unreachable_ports": dead_ports} if dead_ports else {}),
     }
