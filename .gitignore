@@ -287,3 +287,8 @@ testing/guinea_pigs/supply_chain_target/.dryrun/
 
 # Local API keys for manual testing (credentials, never commit)
 /keys_for_test.md
+
+# jhaddix all.txt (~26 MB) that run_amass installs from the recon image on first
+# use, plus its in-flight temp name if a copy is interrupted
+recon/wordlists/jhaddix-all.txt
+recon/wordlists/.jhaddix-all.txt.*.tmp

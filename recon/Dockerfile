@@ -168,9 +168,12 @@ RUN mkdir -p /usr/share/seclists/Discovery/Web-Content && \
 
 # Download jhaddix all.txt wordlist for Amass brute-force subdomain enumeration
 # T17: pinned to an immutable gist revision (was the mutable /raw/ HEAD).
-RUN mkdir -p /app/recon/wordlists && \
+# Not under /app/recon: every recon container bind-mounts the host's recon/ over
+# it. run_amass copies this file into the host's recon/wordlists/ on first use,
+# because the Amass sibling container mounts the list by host path.
+RUN mkdir -p /opt/redamon/wordlists && \
     retry curl -sL "https://gist.githubusercontent.com/jhaddix/86a06c5dc309d08580a018c66354a056/raw/96f4e51d96b2203f19f6381c8c545b278eaa0837/all.txt" \
-        -o /app/recon/wordlists/jhaddix-all.txt
+        -o /opt/redamon/wordlists/jhaddix-all.txt
 
 # Copy the application code
 # Copy recon module (includes recon/params.py)

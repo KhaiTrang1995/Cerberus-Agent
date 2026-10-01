@@ -134,7 +134,7 @@ def test_successful_filtering():
 
     def fake_puredns(cmd, **kwargs):
         """Simulate puredns writing output file (wildcard removed)."""
-        output_file = data_dir / "puredns_output_example.com.txt"
+        output_file = data_dir / Path(cmd[cmd.index("--write") + 1]).name
         output_file.write_text("a.example.com\nb.example.com\n")
         return mock.MagicMock(returncode=0, stderr="")
 
@@ -415,7 +415,7 @@ def test_input_file_content():
 
     def capture_run(cmd, **kwargs):
         nonlocal written_content
-        input_path = Path("/tmp/redamon/puredns_input_example.com.txt")
+        input_path = Path("/tmp/redamon") / Path(cmd[cmd.index("resolve") + 1]).name
         if input_path.exists():
             written_content = input_path.read_text()
         return mock.MagicMock(returncode=0, stderr="")

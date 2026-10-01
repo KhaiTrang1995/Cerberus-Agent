@@ -498,16 +498,20 @@ class TestRunHttpProbeIntegration(unittest.TestCase):
 
         captured = {}
 
+        def fake_build(targets_file, *a, **k):
+            captured["targets_file"] = targets_file
+            return ["true"]
+
         def fake_popen(cmd, *a, **k):
             # targets file is written before Popen is invoked — read it now
-            tfile = Path("/tmp/redamon/.httpx_temp/targets.txt")
+            tfile = Path(captured["targets_file"])
             captured["lines"] = tfile.read_text().splitlines() if tfile.exists() else []
             raise RuntimeError("stop-after-capture")  # caught by run_http_probe
 
         with patch.object(hp, "is_docker_installed", return_value=True), \
              patch.object(hp, "is_docker_running", return_value=True), \
              patch.object(hp, "pull_httpx_docker_image", return_value=True), \
-             patch.object(hp, "build_httpx_command", return_value=["true"]), \
+             patch.object(hp, "build_httpx_command", side_effect=fake_build), \
              patch.object(hp.subprocess, "Popen", side_effect=fake_popen):
             hp.run_http_probe(recon, output_file=None, settings=settings)
 
@@ -527,15 +531,19 @@ class TestRunHttpProbeIntegration(unittest.TestCase):
 
         captured = {}
 
+        def fake_build(targets_file, *a, **k):
+            captured["targets_file"] = targets_file
+            return ["true"]
+
         def fake_popen(cmd, *a, **k):
-            tfile = Path("/tmp/redamon/.httpx_temp/targets.txt")
+            tfile = Path(captured["targets_file"])
             captured["lines"] = tfile.read_text().splitlines() if tfile.exists() else []
             raise RuntimeError("stop-after-capture")
 
         with patch.object(hp, "is_docker_installed", return_value=True), \
              patch.object(hp, "is_docker_running", return_value=True), \
              patch.object(hp, "pull_httpx_docker_image", return_value=True), \
-             patch.object(hp, "build_httpx_command", return_value=["true"]), \
+             patch.object(hp, "build_httpx_command", side_effect=fake_build), \
              patch.object(hp.subprocess, "Popen", side_effect=fake_popen):
             hp.run_http_probe(recon, output_file=None, settings=settings)
 

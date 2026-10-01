@@ -387,7 +387,9 @@ def run_jsluice_analysis(
     js_urls = js_urls[:max_files]
     print(f"\n[*][jsluice] Analyzing {len(js_urls)} JavaScript files...")
 
-    work_dir = Path(f"/tmp/redamon/jsluice_{os.getpid()}")
+    # Not the pid: it repeats across the scan containers that share /tmp/redamon,
+    # and this dir is rmtree'd when the run ends.
+    work_dir = Path(f"/tmp/redamon/jsluice_{uuid.uuid4().hex[:12]}")
     work_dir.mkdir(parents=True, exist_ok=True)
 
     result = {"urls": [], "secrets": [], "external_domains": []}

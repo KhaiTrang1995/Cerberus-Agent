@@ -18,6 +18,7 @@ import json
 import time
 import shutil
 import threading
+import uuid
 import dns.resolver
 import dns.reversename
 from pathlib import Path
@@ -495,6 +496,61 @@ def run_subfinder(domain: str, settings: dict = None) -> set:
     return subdomains
 
 
+def _atomic_install(dst: Path, write) -> None:
+    """Have `write(tmp)` build the file under a temp name in dst's directory, then
+    os.replace() it over dst, so a concurrent scan reading dst sees the old file
+    or the new one, never half of one. 0644 because the sibling tool containers
+    that mount it do not necessarily run as root."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(f".{dst.name}.{uuid.uuid4().hex[:12]}.tmp")
+    try:
+        write(tmp)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, dst)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+# Same pinned gist revision as recon/Dockerfile, so a fetched copy matches a baked one.
+JHADDIX_WORDLIST_URL = (
+    "https://gist.githubusercontent.com/jhaddix/86a06c5dc309d08580a018c66354a056"
+    "/raw/96f4e51d96b2203f19f6381c8c545b278eaa0837/all.txt"
+)
+# Baked outside /app/recon: the host's recon/ is bind-mounted over /app/recon.
+JHADDIX_BAKED_PATH = '/opt/redamon/wordlists/jhaddix-all.txt'
+# /app/recon/wordlists IS the host's recon/wordlists, and the Amass sibling
+# container mounts the list by host path, so this is where it must exist.
+JHADDIX_WORDLIST_PATH = '/app/recon/wordlists/jhaddix-all.txt'
+
+
+def _download_jhaddix_wordlist(dst: Path) -> None:
+    with requests.get(JHADDIX_WORDLIST_URL, stream=True, timeout=(15, 120)) as resp:
+        resp.raise_for_status()
+        with open(dst, 'wb') as fh:
+            for chunk in resp.iter_content(chunk_size=1 << 20):
+                fh.write(chunk)
+    if dst.stat().st_size == 0:
+        raise ValueError("empty download")
+
+
+def _ensure_jhaddix_wordlist() -> bool:
+    """Put jhaddix all.txt in recon/wordlists/ if it is not there yet. Never raises."""
+    installed = Path(JHADDIX_WORDLIST_PATH)
+    if installed.is_file():
+        return True
+    try:
+        if os.path.isfile(JHADDIX_BAKED_PATH):
+            print("[*][Amass] Copying the image's jhaddix all.txt into recon/wordlists/ (first use)")
+            _atomic_install(installed, lambda tmp: shutil.copy2(JHADDIX_BAKED_PATH, tmp))
+        else:
+            print("[*][Amass] jhaddix all.txt is not in this image - downloading it (first use)")
+            _atomic_install(installed, _download_jhaddix_wordlist)
+        return True
+    except Exception as e:  # noqa: BLE001 - Amass still runs with its built-in list
+        print(f"[!][Amass] Could not provide jhaddix all.txt: {type(e).__name__}: {e}")
+        return False
+
+
 def run_amass(domain: str, settings: dict = None) -> set:
     """Run OWASP Amass subdomain enumeration via Docker."""
     if settings is None:
@@ -516,12 +572,10 @@ def run_amass(domain: str, settings: dict = None) -> set:
     mode = "+".join(mode_parts)
     print(f"[*][Amass] Running enumeration ({mode})...")
 
-    # Amass v4 needs a writable config dir
-    amass_temp = Path("/tmp/redamon/.amass_temp")
+    # Amass v4 needs a writable config dir. One per run: concurrent scans share
+    # /tmp/redamon, and the dir is deleted when the run ends.
+    amass_temp = Path(f"/tmp/redamon/.amass_temp_{uuid.uuid4().hex[:12]}")
     amass_temp.mkdir(parents=True, exist_ok=True)
-
-    # The wordlist is inside this container at /app/recon/wordlists/
-    container_wordlist = '/app/recon/wordlists/jhaddix-all.txt'
 
     # For the Amass sibling container, we need the HOST path.
     # HOST_RECON_OUTPUT_PATH = <host_project>/recon/output
@@ -533,9 +587,6 @@ def run_amass(domain: str, settings: dict = None) -> set:
         wordlist_host_path = os.path.join(host_recon_dir, 'wordlists', 'jhaddix-all.txt')
     else:
         wordlist_host_path = ''
-
-    # Check the file exists INSIDE this container (not host path check)
-    wordlist_available = os.path.isfile(container_wordlist)
 
     brute_wordlists = settings.get('AMASS_BRUTE_WORDLISTS', ['default'])
 
@@ -551,7 +602,8 @@ def run_amass(domain: str, settings: dict = None) -> set:
         command.append('-active')
     if brute:
         command.append('-brute')
-        if 'jhaddix-all' in brute_wordlists and wordlist_available and wordlist_host_path:
+        jhaddix_selected = 'jhaddix-all' in brute_wordlists
+        if jhaddix_selected and wordlist_host_path and _ensure_jhaddix_wordlist():
             # Insert volume mount BEFORE the docker image name in the command
             img_idx = command.index(docker_image)
             command.insert(img_idx, f'{wordlist_host_path}:/wordlist/jhaddix-all.txt:ro')
@@ -559,6 +611,11 @@ def run_amass(domain: str, settings: dict = None) -> set:
             command += ['-w', '/wordlist/jhaddix-all.txt']
             print(f"[*][Amass] Using jhaddix all.txt wordlist (~2.18M entries) for brute force")
         else:
+            if jhaddix_selected:
+                reason = ("the file is unavailable" if wordlist_host_path
+                          else "HOST_RECON_OUTPUT_PATH is unset, so it cannot be mounted")
+                print(f"[!][Amass] WARNING: jhaddix all.txt was selected but {reason}; "
+                      f"falling back to the built-in wordlist")
             print(f"[*][Amass] Using Amass built-in wordlist (~8K entries) for brute force")
 
     if _source_skipped("amass", "Amass"):
@@ -844,6 +901,21 @@ def resolve_all_dns(domain: str, subdomains: list, max_workers: int = 20, record
     return result
 
 
+def _refresh_shared_resolvers(src: Path, shared: Path) -> None:
+    """Keep the copy puredns reads from /tmp/redamon in step with the list the
+    entrypoint refreshes weekly. Replaced atomically and never deleted, because
+    other scans may be reading it. Never raises."""
+    try:
+        if not src.is_file():
+            return
+        if shared.is_file() and src.stat().st_mtime <= shared.stat().st_mtime:
+            return
+        # copy2 carries src's mtime over, which is what marks the copy current.
+        _atomic_install(shared, lambda tmp: shutil.copy2(src, tmp))
+    except OSError as e:
+        print(f"[!][Puredns] Could not refresh the shared resolver list: {e}")
+
+
 def run_puredns_resolve(subdomains: list, domain: str, settings: dict = None) -> list:
     """
     Filter subdomains using puredns resolve to remove wildcards and DNS-poisoned entries.
@@ -879,15 +951,16 @@ def run_puredns_resolve(subdomains: list, domain: str, settings: dict = None) ->
     # Prepare temp files in /tmp/redamon (same path inside and outside container)
     data_dir = Path("/tmp/redamon")
     data_dir.mkdir(parents=True, exist_ok=True)
-    input_file = data_dir / f"puredns_input_{domain}.txt"
-    output_file = data_dir / f"puredns_output_{domain}.txt"
+    # Per-run names: two scans of the same domain would otherwise share, and then
+    # delete, one input/output pair.
+    run_id = uuid.uuid4().hex[:12]
+    input_file = data_dir / f"puredns_input_{domain}_{run_id}.txt"
+    output_file = data_dir / f"puredns_output_{domain}_{run_id}.txt"
     resolver_src = Path("/app/recon/data/resolvers.txt")
     resolver_shared = data_dir / "resolvers.txt"
 
-    # Copy resolvers to shared volume (if not already there)
-    if resolver_src.exists() and not resolver_shared.exists():
-        shutil.copy2(resolver_src, resolver_shared)
-    elif not resolver_src.exists() and not resolver_shared.exists():
+    _refresh_shared_resolvers(resolver_src, resolver_shared)
+    if not resolver_shared.exists():
         print(f"[!][Puredns] No resolver list found — skipping")
         return subdomains
 

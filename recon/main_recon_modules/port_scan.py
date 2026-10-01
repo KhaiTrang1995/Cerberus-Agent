@@ -16,6 +16,7 @@ import json
 import subprocess
 import shutil
 import os
+import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Set, Tuple
@@ -568,8 +569,9 @@ def run_port_scan(recon_data: dict, output_file: Path = None, settings: dict = N
     print(f"[*][Naabu] Total targets to scan: {len(all_targets)}")
 
     # Create temp directory for scan files
-    # Use /tmp/redamon to avoid spaces in paths (snap Docker issue)
-    scan_temp_dir = Path("/tmp/redamon/.naabu_temp")
+    # Use /tmp/redamon to avoid spaces in paths (snap Docker issue). One dir per
+    # run: concurrent scans share /tmp/redamon, and the cleanup below empties it.
+    scan_temp_dir = Path(f"/tmp/redamon/.naabu_temp_{uuid.uuid4().hex[:12]}")
     scan_temp_dir.mkdir(parents=True, exist_ok=True)
 
     try:
