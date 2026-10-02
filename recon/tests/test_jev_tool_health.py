@@ -82,6 +82,19 @@ def test_the_verdict_table(kw, verdict):
     assert th.classify_empty(**kw) == verdict
 
 
+def test_hakrawlers_no_urls_were_found_notice_is_a_genuine_empty_result():
+    """REGRESSION (found running the real binary): Hakrawler exits 0 and prints this
+    notice on stderr whenever a crawl finds nothing, so every empty seed read as
+    undecided: a coverage gap on every run, and jsluice kept out of the prune."""
+    notice = ("No URLs were found. This usually happens when a domain is specified "
+              "(https://example.com), but it redirects to a subdomain (https://www.example.com). "
+              "The subdomain is not included in the scope, so the no URLs are printed. In order "
+              "to overcome this, either specify the final URL in the redirect chain or use the "
+              "-subs option to include subdomains.")
+    assert th.classify_empty(seeds=1, return_code=0, stderr=notice) == th.GENUINE
+    assert th.classify_empty(seeds=1, return_code=0, stderr=notice + "\npanic: runtime error") == th.FAILURE
+
+
 def test_only_failures_and_undecided_results_are_queued():
     for verdict in (th.GENUINE, th.NO_INPUT, th.FAILURE, th.UNDECIDED):
         th.report_empty("gau", verdict, return_code=0, seeds=1, elapsed_s=1.234, stderr="x")
@@ -117,17 +130,20 @@ def test_report_never_raises_on_odd_input():
     assert th.drain() == []
 
 
-def test_gaps_are_one_entry_per_tool_and_never_a_source_cut(capsys):
+def test_gaps_reach_the_coverage_report_and_never_cut_a_source(capsys):
+    """Through the real accumulator: the gap entries land in the run's coverage record
+    (the Domain node's recon_coverage_gaps), one per tool, and no finding source is
+    taken out of the prune, because these tools' own output is assets only."""
     results = [th.EmptyResult("gau", th.FAILURE, None, 1, 1.0),
                th.EmptyResult("gau", th.UNDECIDED, 0, 1, 1.0, "odd"),
                th.EmptyResult("ffuf", th.FAILURE, 1, 1, 1.0)]
-    with mock.patch.object(cb, "note_degraded") as note:
-        counts = th.note_gaps(results)
-    assert counts == {"ffuf": 1, "gau": 2}
-    (args, kwargs), = [(c.args, c.kwargs) for c in note.call_args_list]
-    assert args == ("resource_enum",)
-    assert "sources" not in kwargs and "hosts" not in kwargs
-    assert [(e["source"], e["skipped"]) for e in kwargs["entries"]] == [("ffuf", 1), ("gau", 2)]
+    assert th.note_gaps(results) == {"ffuf": 1, "gau": 2}
+    report = cb.coverage_report()
+    gaps = {g["source"]: g for g in report.gaps}
+    assert gaps["gau"]["skipped"] == 2 and gaps["ffuf"]["skipped"] == 1
+    assert "not confirmed genuine" in gaps["gau"]["reason"]
+    assert report.degraded_sources == frozenset()
+    assert report.skipped_hosts == ()
     assert "[!][ToolHealth] gau: 2 empty result(s) look like a failure" in capsys.readouterr().out
 
 
@@ -385,6 +401,28 @@ def test_header_values_and_credentials_never_leave_recon():
     for secret in ("abc.def.ghi", "s3cr3t-value", "tag.sig.xyz", "MyApiKey123", "zap-secret-9", "merged-auth-777"):
         assert secret not in out, secret
     assert "https://a.example.test" in out                       # target text stays (it is wrapped later)
+
+
+def test_partial_recon_redacts_the_authenticated_session_header_from_the_profile():
+    """REGRESSION: the session lives in AUTH_PROFILE, not in a *_HEADERS list, and the
+    partial-recon drain passes no merged headers, so a custom session header's value
+    in a tool's stderr went to TypeSafe as is."""
+    settings = {"AUTH_PROFILE": {
+        "authType": "header", "authHeaderName": "X-Session-Token", "authValue": "sess-9f2a7c11",
+        "extraHeaders": {"X-Tenant": "tenant-secret-77"}}}
+    stderr = ("crawl failed for https://a.example.test with X-Session-Token: sess-9f2a7c11 "
+              "and X-Tenant=tenant-secret-77")
+    out = jev_th.redact(stderr, settings)
+    assert "sess-9f2a7c11" not in out and "tenant-secret-77" not in out
+    assert "https://a.example.test" in out
+
+
+def test_a_basic_auth_profile_is_redacted_raw_and_encoded():
+    import base64
+    settings = {"AUTH_PROFILE": {"authType": "basic", "authValue": "alice:s3cretpass"}}
+    encoded = base64.b64encode(b"alice:s3cretpass").decode()
+    out = jev_th.redact(f"echo alice:s3cretpass and {encoded}", settings)
+    assert "s3cretpass" not in out and encoded not in out
 
 
 def test_the_redaction_is_applied_to_what_is_sent():

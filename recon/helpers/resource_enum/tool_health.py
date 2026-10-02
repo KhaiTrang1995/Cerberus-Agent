@@ -44,12 +44,14 @@ DOCKER_EXIT_CODES = frozenset({125, 126, 127})
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 #: Lines a tool prints on a healthy run: projectdiscovery and ParamSpider info
-#: lines, logrus and zerolog info/debug (text and JSON), and GAU's warning that it
-#: runs without a config file.
+#: lines, logrus and zerolog info/debug (text and JSON), GAU's warning that it
+#: runs without a config file, and the notice Hakrawler prints whenever a crawl
+#: finds nothing (seen running the real binary on a page with no links).
 _ROUTINE_RE = re.compile(
     r"^\s*(\[(INF|INFO|DBG|DEBUG)\]|(\d{1,2}:\d{2}(:\d{2})?\s*(AM|PM)?\s+)?(INF|DBG)\b|"
     r".*\blevel=(info|debug)\b|.*\"level\"\s*:\s*\"(info|debug)\"|"
-    r".*error reading config: .*not found, using default config)", re.I)
+    r".*error reading config: .*not found, using default config|"
+    r"No URLs were found\. This usually happens when)", re.I)
 _FAILURE_RE = re.compile(
     r"(error|fail(ed|ure|s)?\b|timed? ?out|timeout|refused|unreachable|no such host|"
     r"denied|panic|fatal|killed|too many requests|rate.?limit|\b429\b|\b50[234]\b|"

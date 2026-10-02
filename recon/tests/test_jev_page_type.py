@@ -87,6 +87,17 @@ def test_the_prefilter_places_only_the_easy_pages(over, label):
     assert pt.prefilter(_entry(**over)) == label
 
 
+def test_a_tiny_json_api_response_is_not_a_placeholder():
+    """REGRESSION (found comparing Jev with the pre-filter on a guinea-pig lab): the
+    tiny-body rule labelled /api/status ({"status":"ok"}) a placeholder, so acting on
+    it would have marked live API endpoints as empty holding pages."""
+    api = _entry(body='{"status":"ok"}', content_type="application/json", word_count=1,
+                 content_length=15, title="")
+    assert pt.prefilter(api) is None
+    assert pt.prefilter(dict(api, content_type="")) is None            # unknown type, JSON body
+    assert pt.prefilter(dict(api, body="<html></html>", content_type="text/html")) == "placeholder"
+
+
 @pytest.mark.parametrize("entry,ok", [
     ({"status_code": None, "title": "x"}, False),
     ({"status_code": 200}, False),                             # no body, title or size

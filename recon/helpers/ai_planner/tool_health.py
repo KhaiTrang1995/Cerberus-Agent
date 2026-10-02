@@ -56,6 +56,21 @@ def _header_values(settings: dict, extra: Iterable = ()) -> List[str]:
                 values.append(str(h.get("value", "")))
             elif isinstance(h, str) and ":" in h:
                 values.append(h.split(":", 1)[1].strip())
+    # The authenticated session lives in AUTH_PROFILE, not in a *_HEADERS list, and a
+    # partial run passes no merged headers: read it here, as sent and as stored.
+    profile = (settings or {}).get("AUTH_PROFILE")
+    if isinstance(profile, dict):
+        try:
+            from recon.helpers.auth_profile import build_auth_headers
+            values.extend(build_auth_headers(profile, log_prefix=None).values())
+        except Exception:  # noqa: BLE001 - redaction falls back to the patterns
+            pass
+        values.append(str(profile.get("authValue") or ""))
+        extras = profile.get("extraHeaders")
+        if isinstance(extras, dict):
+            values.extend(str(v) for v in extras.values())
+    # "Bearer x" / "Basic x": a tool can echo the token without its scheme.
+    values.extend(v.split(" ", 1)[1] for v in list(values) if " " in v.strip())
     return [v for v in values if len(v) >= 4]
 
 

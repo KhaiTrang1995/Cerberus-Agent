@@ -322,6 +322,12 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
     if settings is None:
         settings = {}
 
+    # Empty-result reports belong to the run that drains them. A previous run in
+    # this process (another domain group) that raised before its drain must not
+    # have its tool failures charged to this one.
+    from recon.helpers.resource_enum import tool_health as _tool_health
+    _tool_health.drain()
+
     effective_settings_display = dict(settings)
     if "ZAP_AJAX_SPIDER_CUSTOM_HEADERS" in effective_settings_display:
         header_count = len(effective_settings_display.get("ZAP_AJAX_SPIDER_CUSTOM_HEADERS") or [])

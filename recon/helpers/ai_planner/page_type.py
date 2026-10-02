@@ -111,8 +111,12 @@ def prefilter(entry: dict) -> Optional[str]:
         return "error"
     if _LOGIN_PATH_RE.search(urlparse(entry.get("url") or "").path or ""):
         return "login_only"
+    # Only an HTML page can be an empty holding page: a tiny JSON or text body is
+    # an API answering, which is application surface.
+    ctype = str(entry.get("content_type") or "").lower()
+    looks_html = "html" in ctype or (not ctype and str(entry.get("body") or "").lstrip().startswith("<"))
     words, size = entry.get("word_count"), entry.get("content_length")
-    if status == 200 and isinstance(words, int) and isinstance(size, int) \
+    if status == 200 and looks_html and isinstance(words, int) and isinstance(size, int) \
             and words <= _TINY_WORDS and size <= _TINY_BYTES:
         return "placeholder"
     return None
