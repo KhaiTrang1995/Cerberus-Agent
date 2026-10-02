@@ -346,6 +346,9 @@ Additional properties present on this node type, not yet described:
 - graphql_get_allowed (boolean): GET-method queries accepted (CSRF vector)
 - graphql_field_suggestions_enabled (boolean): "Did you mean X?" errors leak schema
 - graphql_batching_enabled (boolean): Array-based batched queries accepted
+- page_class (string): "app", "login_only", "parked", "default", "placeholder" or "error"
+- page_class_confidence (integer): 0-100; 100 when the pre-filter placed the page
+- page_class_source (string): "jev_classifier", or "prefilter" where Jev gave no answer
 
 Additional properties present on this node type, not yet described:
 - body_param_count (integer)
@@ -374,6 +377,7 @@ Additional properties present on this node type, not yet described:
 
 - GraphQL enrichment (set by graphql_scan when endpoint is a GraphQL endpoint):
 - graphql-cop capability flags (set by the external scanner, Phase 2):
+- Page type (set by http_probe when the project's Jev page-type hook is on):
 - _js_recon_created
 - ai_attack_synthetic
 - ai_mcp_prompt_count

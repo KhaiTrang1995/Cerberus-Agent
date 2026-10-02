@@ -236,15 +236,24 @@ describe('the AI in Pipeline panel', () => {
     expect(screen.getByTestId('ai-hook-list').children).toHaveLength(HOOKS.length + JEV_ONLY.length)
   })
 
-  test('a Jev-only hook is one card with an Off | Jev control, no hook toggle, and a shadow chip', () => {
+  test('a Jev-only hook is one card with an Off | Jev control and no hook toggle', () => {
     renderSection(AI_ON)
     for (const field of JEV_ONLY) {
       const card = screen.getByTestId(`ai-hook-${field}`)
       expect(within(card).queryByRole('switch')).not.toBeInTheDocument()
       expect(within(card).getByText('Jev only')).toBeInTheDocument()
       expect(within(card).getByRole('button', { name: 'Off' })).toBeInTheDocument()
-      expect(within(card).getByText('Shadow')).toHaveAttribute('title', expect.stringMatching(/recorded/))
     }
+  })
+
+  test('only a Jev-only hook still in shadow carries the shadow chip', () => {
+    renderSection(AI_ON)
+    const acting = ['httpxJevPageType', 'ffufJevBasePaths', 'hakrawlerJevSeedOrder']
+    for (const field of acting) {
+      expect(within(screen.getByTestId(`ai-hook-${field}`)).queryByText('Shadow')).not.toBeInTheDocument()
+    }
+    const toolHealth = screen.getByTestId('ai-hook-resourceEnumJevToolHealth')
+    expect(within(toolHealth).getByText('Shadow')).toHaveAttribute('title', expect.stringMatching(/recorded/))
   })
 
   test('a Jev-only card writes its own field, and the stored value is shown', async () => {

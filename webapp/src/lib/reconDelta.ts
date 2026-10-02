@@ -81,6 +81,9 @@ export const VOLATILE_PROPERTIES = new Set([
   // every finding without the finding itself changing (C20).
   ...TRIAGE_PROPERTIES,
   'muted_at',
+  // Jev's confidence in a page's label drifts between scans of an unchanged
+  // page; a change of the label itself (page_class) still counts.
+  'page_class_confidence',
 ])
 
 function stableString(value: unknown): string {

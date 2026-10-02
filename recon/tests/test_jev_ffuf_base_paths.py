@@ -116,16 +116,16 @@ def _run_ranker(answer_body, *, status=200, items=None, cap=4, recon_data=None, 
     return out, post
 
 
-def test_shadow_records_jev_pick_and_returns_none(capsys):
+def test_the_shipped_rollout_returns_jev_pick_and_records_it(capsys):
     items = sorted(PATHS)
     data = {}
     out, post = _run_ranker(_jev_answer(items, ["admin", "api", "static", "d05"], 0.9), recon_data=data)
-    assert out is None                                    # the seam keeps its random pick
+    assert out == ["admin", "api", "static", "d05"]       # the seam fuzzes Jev's pick
     body = post.call_args.kwargs["json"]
     assert post.call_args.args[0].endswith("/jev/ffuf-base-paths")
     assert body == {"candidates": items, "cap": 4, "user_id": "u1", "project_id": "p1"}
     stored = data["jev_shadow"]["ffuf_base_paths"]
-    assert stored["rollout"] == "shadow" and stored["model"] == "jev-1.13.0"
+    assert stored["rollout"] == "act" and stored["model"] == "jev-1.13.0"
     by_path = {r["path"]: r for r in stored["records"]}
     # The baseline is the sorted order's first 4: admin, api, api/v1, d00.
     assert by_path["static"]["jev"] == "keep" and by_path["static"]["baseline"] == "cut"
@@ -143,8 +143,18 @@ def test_act_returns_jev_order(monkeypatch):
     assert out == ["admin", "api"]
 
 
-def test_the_shipped_rollout_is_shadow():
-    assert fbp.ROLLOUT == jev_shadow.SHADOW
+def test_a_shadow_rollout_returns_none_so_the_random_pick_stands(monkeypatch):
+    """The gate itself: a hook switched back to SHADOW records but changes nothing."""
+    items = sorted(PATHS)
+    data = {}
+    out, _ = _run_ranker(_jev_answer(items, ["admin", "api"]), rollout=jev_shadow.SHADOW,
+                         recon_data=data, monkeypatch=monkeypatch)
+    assert out is None
+    assert data["jev_shadow"]["ffuf_base_paths"]["rollout"] == "shadow"
+
+
+def test_the_shipped_rollout_is_act():
+    assert fbp.ROLLOUT == jev_shadow.ACT
 
 
 @pytest.mark.parametrize("bad", [

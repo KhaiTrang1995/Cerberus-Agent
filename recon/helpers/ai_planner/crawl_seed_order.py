@@ -23,9 +23,9 @@ Partial recon builds its probe data from the graph with status and content type
 only, so there is nothing to rank on: it keeps the alphabetical order.
 
 Kind B, gated by AI_IN_PIPELINE and HAKRAWLER_JEV_SEED_ORDER at each call site.
-ROLLOUT is SHADOW: Jev's order is recorded next to the alphabetical one (which
-half of the list each host would start in) and Hakrawler gets the alphabetical
-list.
+ROLLOUT is ACT: Hakrawler crawls in Jev's order (the alphabetical order is the
+fallback when Jev is unavailable), and each host's rank is still recorded next
+to the alphabetical one so agreement stays visible.
 """
 
 import hashlib
@@ -33,9 +33,9 @@ import os
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
-from recon.helpers.ai_planner.jev_shadow import SHADOW, ShadowRecorder, jev_model, jev_post
+from recon.helpers.ai_planner.jev_shadow import ACT, SHADOW, ShadowRecorder, jev_model, jev_post
 
-ROLLOUT = SHADOW
+ROLLOUT = ACT
 
 HOOK = "crawl_seed_order"
 _TAG = "CrawlOrder-Jev"
@@ -116,7 +116,7 @@ def hakrawler_seed_order(target_urls: List[str], recon_data: Optional[dict], *,
         if len(scorable) < 2:
             return seeds
         print(f"[*][{_TAG}] Scoring {len(scorable)} of {len(hosts)} hosts for the Hakrawler order")
-        recorder = ShadowRecorder(HOOK)
+        recorder = ShadowRecorder(HOOK, rollout=ROLLOUT)
         data = jev_post("crawl-seed-order", {
             "hosts": [items[h] for h in scorable],
             "user_id": os.environ.get('USER_ID', ''), "project_id": os.environ.get('PROJECT_ID', ''),
@@ -141,8 +141,8 @@ def hakrawler_seed_order(target_urls: List[str], recon_data: Optional[dict], *,
                               round(score[h] * 100), "early" if i < half else "late",
                               hostname=h, jev_rank=jev_rank[h], baseline_rank=i)
         moved = sum(1 for i, h in enumerate(hosts) if h in score and jev_rank[h] < half <= i)
-        print(f"[+][{_TAG}] Jev would move {moved} host(s) from the second half of the list "
-              f"into the first")
+        print(f"[+][{_TAG}] Jev {'would move' if ROLLOUT == SHADOW else 'moved'} {moved} host(s) "
+              f"from the second half of the list into the first")
         if ROLLOUT == SHADOW:
             return seeds
         return [url for h in jev_hosts for url in by_host[h]]

@@ -153,6 +153,10 @@ class HttpMixin:
                         "is_ai_framework_detected": url_info.get("is_ai_framework_detected"),
                         "ai_framework_name": url_info.get("ai_framework_name"),
                         "ai_frontend_product_guess": url_info.get("ai_frontend_product_guess"),
+                        # Page type (TypeSafe Jev, the pre-filter where Jev gave no answer).
+                        "page_class": url_info.get("page_class"),
+                        "page_class_confidence": url_info.get("page_class_confidence"),
+                        "page_class_source": url_info.get("page_class_source"),
                     }
                     body_hash = url_info.get("body_hash", {})
                     if body_hash:

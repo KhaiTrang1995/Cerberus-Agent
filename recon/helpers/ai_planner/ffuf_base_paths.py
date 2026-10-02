@@ -17,17 +17,18 @@ to the seam; it never raises and returns None on any failure, which leaves the
 random pick in place.
 
 Kind B (no LLM twin), gated by AI_IN_PIPELINE and FFUF_JEV_BASE_PATHS at each
-call site. ROLLOUT is SHADOW: Jev's pick is logged and recorded next to the
-deterministic one, and the scan still fuzzes the random pick.
+call site. ROLLOUT is ACT: smart fuzz runs on Jev's pick (the random pick is the
+fallback when Jev is unavailable), and the pick is still recorded next to the
+deterministic one so agreement stays visible.
 """
 
 import os
 import random
 from typing import Callable, List, Optional
 
-from recon.helpers.ai_planner.jev_shadow import SHADOW, ShadowRecorder, jev_model, jev_post
+from recon.helpers.ai_planner.jev_shadow import ACT, SHADOW, ShadowRecorder, jev_model, jev_post
 
-ROLLOUT = SHADOW
+ROLLOUT = ACT
 
 HOOK = "ffuf_base_paths"
 _TAG = "FFuf-BasePaths-Jev"
@@ -80,7 +81,7 @@ def make_jev_ranker(
     `recon_data["jev_shadow"]` when a recon JSON exists.
     """
     def ranker(items: List[str], cap: int) -> Optional[List[str]]:
-        recorder = ShadowRecorder(HOOK)
+        recorder = ShadowRecorder(HOOK, rollout=ROLLOUT)
         try:
             askable = [p for p in items if 0 < len(p) <= MAX_PATH_CHARS]
             if len(askable) > MAX_CANDIDATES:

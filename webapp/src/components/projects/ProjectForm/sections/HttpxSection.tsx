@@ -425,14 +425,14 @@ export function HttpxSection({ data, updateField, onRun }: HttpxSectionProps) {
             <h3 className={styles.subSectionTitle}>Page Type (Jev)</h3>
             <div className={styles.toggleRow} style={{ alignItems: 'center', gap: 'var(--space-2)' }}>
               <AiToggleLabel
-                label="Label page types with Jev (shadow)"
+                label="Label page types with Jev"
                 tooltip={
                   'Labels each probed URL as an app, a login wall, a parked domain, a default install ' +
-                  'page, a placeholder or an error page. A deterministic pre-filter places the easy ' +
-                  'pages; Jev is asked about the rest, and an unsure answer is "app". Reads the ' +
-                  'response body when Include Response Body is on, else the title and size. Shadow ' +
-                  'mode: the labels are logged and kept in the recon output; nothing reaches the ' +
-                  'graph yet. Same switch as in the Target tab AI panel. ' +
+                  'page, a placeholder or an error page. Jev labels every page and an unsure answer ' +
+                  'is "app"; a deterministic pre-filter supplies the label only where Jev gives no ' +
+                  'answer. Reads the response body when Include Response Body is on, else the title ' +
+                  'and size. The label is written onto the Endpoint in the graph (page_class); what ' +
+                  'gets scanned does not change. Same switch as in the Target tab AI panel. ' +
                   (!data.aiInPipeline ? 'Enable "AI in Pipeline" in the Target tab to use this.' : '')
                 }
               />

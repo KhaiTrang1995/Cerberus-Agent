@@ -496,12 +496,12 @@ export function FfufSection({ data, updateField, projectId, mode, onRun }: FfufS
                     </span>
                     <div className={styles.toggleRow} style={{ marginTop: 'var(--space-2)', alignItems: 'center', gap: 'var(--space-2)' }}>
                       <AiToggleLabel
-                        label="Rank directories with Jev (shadow)"
+                        label="Rank directories with Jev"
                         tooltip={
                           'When crawlers find more base directories than the cap, Jev is asked per ' +
                           'directory whether it is likely to hold sensitive, administrative or application ' +
-                          'content. Shadow mode: Jev\'s pick is logged and kept in the recon output, and the ' +
-                          'random pick is still fuzzed. Same switch as in the Target tab AI panel. ' +
+                          'content, and its best ones are fuzzed. The random pick is the fallback when Jev ' +
+                          'is unavailable. Same switch as in the Target tab AI panel. ' +
                           (!data.aiInPipeline ? 'Enable "AI in Pipeline" in the Target tab to use this.' : '')
                         }
                       />

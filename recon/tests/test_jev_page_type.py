@@ -157,7 +157,9 @@ def _by_url(n=3, **over):
             for i in range(n)}
 
 
-def test_shadow_records_and_leaves_the_entries_alone(capsys):
+def test_a_shadow_rollout_records_and_leaves_the_entries_alone(monkeypatch, capsys):
+    """The gate itself: a hook switched back to SHADOW records but changes nothing."""
+    monkeypatch.setattr(pt, "ROLLOUT", jev_shadow.SHADOW)
     by_url = _by_url(3)
     by_url["http://h9.example.test/"] = _entry("http://h9.example.test/", title="Welcome to nginx!")
     data = {}
@@ -175,25 +177,50 @@ def test_shadow_records_and_leaves_the_entries_alone(capsys):
     out = capsys.readouterr().out
     assert "example.test" not in out and "Welcome to nginx" not in out
     assert "jev-shadow page_type: summary decisions=4" in out
+    assert data["jev_shadow"]["page_type"]["rollout"] == "shadow"
 
 
-def test_act_writes_the_label_and_the_prefilter_label(monkeypatch):
-    monkeypatch.setattr(pt, "ROLLOUT", jev_shadow.ACT)
-    by_url = _by_url(2)
+def _with_a_404(n=2):
+    by_url = _by_url(n)
     by_url["http://h9.example.test/"] = _entry("http://h9.example.test/", status_code=404)
+    return by_url
+
+
+def test_jev_labels_every_page_and_wins_over_the_prefilter():
+    by_url = _with_a_404()
+    data = {}
     calls, post = _echo_post(("login_only", 91))
     with mock.patch.object(jev_shadow.requests, "post", side_effect=post):
+        pt.run_page_type_pass(by_url, user_id="u", project_id="p", recon_data=data)
+    assert sum(len(c["pages"]) for c in calls) == 3              # the pre-filtered page is asked too
+    for entry in by_url.values():                                # the 404's "error" is overruled
+        assert entry["page_class"] == "login_only"
+        assert entry["page_class_confidence"] == 91
+        assert entry["page_class_source"] == "jev_classifier"
+    assert data["jev_shadow"]["page_type"]["rollout"] == "act"
+
+
+def test_the_prefilter_label_stands_where_jev_gives_no_answer():
+    by_url = _with_a_404()
+    _, post = _echo_post(status=503)
+    with mock.patch.object(jev_shadow.requests, "post", side_effect=post):
         pt.run_page_type_pass(by_url, user_id="u", project_id="p")
-    assert by_url["http://h0.example.test/"]["page_class"] == "login_only"
-    assert by_url["http://h0.example.test/"]["page_class_confidence"] == 91
-    assert by_url["http://h0.example.test/"]["page_class_source"] == "jev_classifier"
+    page = by_url["http://h9.example.test/"]
+    assert (page["page_class"], page["page_class_confidence"], page["page_class_source"]) == \
+        ("error", 100, "prefilter")
+    assert "page_class" not in by_url["http://h0.example.test/"]   # no deterministic label to keep
+
+
+def test_the_prefilter_label_stands_when_the_pass_fails():
+    by_url = _with_a_404()
+    with mock.patch.object(pt, "jev_post", side_effect=KeyError("boom")):
+        pt.run_page_type_pass(by_url, user_id="u", project_id="p")
     assert by_url["http://h9.example.test/"]["page_class"] == "error"
-    assert by_url["http://h9.example.test/"]["page_class_source"] == "prefilter"
-    assert sum(len(c["pages"]) for c in calls) == 2              # the pre-filtered page is not asked
+    assert "page_class" not in by_url["http://h0.example.test/"]
 
 
-def test_the_shipped_rollout_is_shadow():
-    assert pt.ROLLOUT == jev_shadow.SHADOW
+def test_the_shipped_rollout_is_act():
+    assert pt.ROLLOUT == jev_shadow.ACT
 
 
 def test_identical_pages_are_asked_once_and_all_get_the_answer():

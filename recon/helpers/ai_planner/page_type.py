@@ -22,10 +22,11 @@ question set (the cache key is exactly what decides the label), and a failed
 batch is remembered too, so a failure never re-asks per URL.
 
 Kind B (no LLM twin), gated by AI_IN_PIPELINE and HTTPX_JEV_PAGE_TYPE at the
-call site. ROLLOUT is SHADOW: Jev's label is recorded next to the pre-filter's
-(or "app" where the pre-filter has none) and nothing is written to the URL entry
-or the graph. In shadow the pre-filter's pages are asked about too, because they
-are the only ones with a deterministic label to agree or disagree with.
+call site. ROLLOUT is ACT: Jev's label becomes the page's `page_class` on the
+URL entry (and the Endpoint in the graph), with the pre-filter as the fallback
+where Jev is unavailable. Each decision is still recorded next to the
+deterministic label so agreement stays visible; the pre-filter's own pages are
+asked about too, so their label has something to agree or disagree with.
 
 Log lines carry counts and indexes only: a URL, title or hostname containing
 "port...scan" or "http...prob" would move the recon drawer to another phase.
@@ -38,9 +39,9 @@ import time
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from recon.helpers.ai_planner.jev_shadow import SHADOW, ShadowRecorder, jev_model, jev_post
+from recon.helpers.ai_planner.jev_shadow import ACT, SHADOW, ShadowRecorder, jev_model, jev_post
 
-ROLLOUT = SHADOW
+ROLLOUT = ACT
 
 HOOK = "page_type"
 _TAG = "PageType-Jev"
@@ -213,13 +214,15 @@ def run_page_type_pass(by_url: Dict[str, dict], *, user_id: str, project_id: str
                        recon_data: Optional[dict] = None, clock=time.monotonic) -> dict:
     """Label the probed pages. Never raises. Returns a count summary.
 
-    `by_url` is the httpx result map, bodies still attached. In ACT each labelled
-    entry gets `page_class`, `page_class_confidence` and `page_class_source`; in
-    SHADOW nothing on the entries changes.
+    `by_url` is the httpx result map, bodies still attached. In ACT every page is
+    asked and Jev's answer becomes the entry's `page_class`, `page_class_confidence`
+    and `page_class_source`; a page Jev leaves unanswered keeps the pre-filter's
+    label, if it has one. In SHADOW nothing on the entries changes.
     """
-    recorder = ShadowRecorder(HOOK)
+    recorder = ShadowRecorder(HOOK, rollout=ROLLOUT)
     stats = {"pages": 0, "prefiltered": 0, "asked": 0, "labelled": 0, "not_asked": 0,
              "skipped_no_signal": 0, "failed_batches": 0}
+    pre_labels: Dict[str, str] = {}
     try:
         urls = sorted(by_url)
         index = {url: i for i, url in enumerate(urls)}
@@ -235,11 +238,7 @@ def run_page_type_pass(by_url: Dict[str, dict], *, user_id: str, project_id: str
             baseline[url] = pre or "app"
             if pre:
                 stats["prefiltered"] += 1
-                if ROLLOUT != SHADOW:
-                    entry["page_class"] = pre
-                    entry["page_class_confidence"] = 100
-                    entry["page_class_source"] = "prefilter"
-                    continue
+                pre_labels[url] = pre
             groups.setdefault(cache_key(entry), []).append(url)
 
         keys = list(groups)
@@ -297,8 +296,24 @@ def run_page_type_pass(by_url: Dict[str, dict], *, user_id: str, project_id: str
         print(f"[!][{_TAG}] Pass failed ({type(e).__name__}) - pages left unlabelled.")
         recorder.fallback()
     finally:
+        if ROLLOUT != SHADOW:
+            _apply_prefilter_fallback(by_url, pre_labels)
         recorder.finish(recon_data)
     return stats
+
+
+def _apply_prefilter_fallback(by_url: Dict[str, dict], pre_labels: Dict[str, str]) -> None:
+    """Where Jev gave no answer (a failed batch, the budget, the page cap, an
+    error), the pre-filter's label stands. Never raises."""
+    try:
+        for url, label in pre_labels.items():
+            entry = by_url.get(url)
+            if isinstance(entry, dict) and "page_class" not in entry:
+                entry["page_class"] = label
+                entry["page_class_confidence"] = 100
+                entry["page_class_source"] = "prefilter"
+    except Exception:  # noqa: BLE001 - a label is never worth breaking the probe
+        pass
 
 
 def run_for_probe(httpx_results: dict, settings: dict, recon_data: Optional[dict]) -> None:

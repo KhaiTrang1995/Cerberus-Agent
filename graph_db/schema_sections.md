@@ -239,6 +239,10 @@ Additional properties present on this node type, not yet described:
   - graphql_get_allowed (boolean): GET-method queries accepted (CSRF vector)
   - graphql_field_suggestions_enabled (boolean): "Did you mean X?" errors leak schema
   - graphql_batching_enabled (boolean): Array-based batched queries accepted
+- Page type (set by http_probe when the project's Jev page-type hook is on):
+  - page_class (string): "app", "login_only", "parked", "default", "placeholder" or "error"
+  - page_class_confidence (integer): 0-100; 100 when the pre-filter placed the page
+  - page_class_source (string): "jev_classifier", or "prefilter" where Jev gave no answer
 Additional properties present on this node type, not yet described:
 - body_param_count (integer)
 - body_sha256 (string)

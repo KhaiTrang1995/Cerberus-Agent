@@ -47,21 +47,36 @@ def _scores(*values):
     return {"scores": list(values), "model": "jev-1.13.0"}
 
 
-def test_shadow_keeps_the_alphabetical_list_and_records_the_jev_order(capsys):
+def test_the_shipped_rollout_crawls_in_jev_order_and_records_each_decision(capsys):
     data = _recon(HOSTS)
     with mock.patch.object(jev_shadow.requests, "post", return_value=_resp(200, _scores(0.1, 0.2, 0.3, 0.95))) as post:
         out = cso.hakrawler_seed_order(SEEDS, data)
-    assert out == SEEDS
+    assert sorted(out) == SEEDS                                    # a permutation, no seed dropped
+    assert list(dict.fromkeys(cso._host(u) for u in out)) == [
+        "d.example.test", "c.example.test", "b.example.test", "a.example.test"]
     sent = post.call_args.kwargs["json"]["hosts"]
     assert [h["hostname"] for h in sent] == HOSTS
     assert sent[2]["url_count"] == 2 and sent[0]["title"] == "Title 0"
-    records = {r["hostname"]: r for r in data["jev_shadow"]["crawl_seed_order"]["records"]}
+    shadow = data["jev_shadow"]["crawl_seed_order"]
+    assert shadow["rollout"] == "act"
+    records = {r["hostname"]: r for r in shadow["records"]}
     assert records["d.example.test"]["jev"] == "early" and records["d.example.test"]["baseline"] == "late"
     assert records["a.example.test"]["jev"] == "late" and records["a.example.test"]["baseline"] == "early"
     assert records["d.example.test"]["jev_rank"] == 0 and records["d.example.test"]["conf"] == 95
     printed = capsys.readouterr().out
-    assert "Jev would move 2 host(s) from the second half of the list into the first" in printed
+    assert "Jev moved 2 host(s) from the second half of the list into the first" in printed
     assert "example.test" not in printed
+
+
+def test_a_shadow_rollout_keeps_the_alphabetical_list(monkeypatch, capsys):
+    """The gate itself: a hook switched back to SHADOW records but changes nothing."""
+    monkeypatch.setattr(cso, "ROLLOUT", jev_shadow.SHADOW)
+    data = _recon(HOSTS)
+    with mock.patch.object(jev_shadow.requests, "post", return_value=_resp(200, _scores(0.1, 0.2, 0.3, 0.95))):
+        out = cso.hakrawler_seed_order(SEEDS, data)
+    assert out == SEEDS
+    assert data["jev_shadow"]["crawl_seed_order"]["rollout"] == "shadow"
+    assert "Jev would move 2 host(s)" in capsys.readouterr().out
 
 
 def test_act_returns_the_seeds_host_by_host_in_jev_order(monkeypatch):
@@ -73,8 +88,8 @@ def test_act_returns_the_seeds_host_by_host_in_jev_order(monkeypatch):
     assert hosts_in_order == ["b.example.test", "c.example.test", "d.example.test", "a.example.test"]
 
 
-def test_the_shipped_rollout_is_shadow():
-    assert cso.ROLLOUT == jev_shadow.SHADOW
+def test_the_shipped_rollout_is_act():
+    assert cso.ROLLOUT == jev_shadow.ACT
 
 
 def test_unscored_hosts_follow_in_alphabetical_order(monkeypatch):

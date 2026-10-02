@@ -83,9 +83,10 @@ def jev_model(data: Any) -> str:
 class ShadowRecorder:
     """Collects one hook's shadow decisions for one run and prints them, capped."""
 
-    def __init__(self, hook: str, cap: int = STDOUT_CAP):
+    def __init__(self, hook: str, cap: int = STDOUT_CAP, rollout: str = SHADOW):
         self.hook = hook
         self.cap = cap
+        self.rollout = rollout
         self.model = "unknown"
         self.project = os.environ.get("PROJECT_ID", "")
         self.records: List[Dict[str, Any]] = []
@@ -122,7 +123,7 @@ class ShadowRecorder:
         print(f"jev-shadow {self.hook}: summary decisions={stats['decisions']} "
               f"agreed={stats['agreed_pct']}% mean_conf={stats['mean_conf']} "
               f"fallbacks={stats['fallbacks']} model={self.model}")
-        return {"hook": self.hook, "rollout": SHADOW, "model": self.model,
+        return {"hook": self.hook, "rollout": self.rollout, "model": self.model,
                 "summary": stats, "records": self.records}
 
     def finish(self, recon_data: Optional[dict]) -> None:
