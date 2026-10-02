@@ -16,13 +16,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Findings a run did not re-check are no longer pruned:** jsluice secrets when their crawl fails, nmap and Nuclei findings on skipped targets, unscanned or stopped GVM targets, and stopped, failed or throttled secret hunts.
+- **Findings a run did not re-check are no longer pruned:** jsluice secrets when their crawl fails, nmap and Nuclei findings on skipped or timed-out targets, unscanned or stopped GVM targets, and stopped, failed, partial or throttled TruffleHog and GitHub hunts.
+- **A Nuclei setup failure skips only Nuclei.** A template-update timeout or a missing Docker no longer skips the CVE lookup and the security checks.
+- **Stopping a GVM scan keeps its results.** A start is refused while a stop is in progress, and deleting a project leaves no GVM nodes behind.
+- **Port and service security checks run again** (SSH, databases, Redis, SMTP relay, Kubernetes API), with one finding per IP and port.
+- **Five security checks stop misfiring:** the Kubernetes API check needs a real API document, the rate-limit check counts only real login attempts, each session cookie is judged on its own, `ip_api_exposed` rates an API that asks for credentials medium, and IPv6 URLs are bracketed.
+- **IP mode no longer reports SPF, DMARC or DNSSEC findings** for its placeholder root.
+- **CVEs link to the right technology:** they need its whole product name and version, and nmap's multi-word product names now match.
+- **nmap results stay with their own IP**, ports only nmap confirms are kept, and IPv6 targets are scanned with `-6`.
+- **Triage** scores security checks by what they show, ranks Redis, Kubernetes and database exposure above DNS hygiene, scores public client keys low, and marks rejected credentials inactive.
 - **httpx keeps what it probed** when it hits its runtime budget.
 - **Partial recon** reads probe data from the Endpoint, rebuilds DAST URLs, skips co-hosted vhost names, gives Nuclei the graph's technologies and services, and applies the RoE exclusions to subdomain discovery.
 - **JS-found hostnames are capped**, and Uncover's pass the same scope gates as every other source.
-- **Port and service security checks run again**, five checks stop misfiring, and triage scores security checks and public client keys by what they show.
 - **Red Zone Web Init Access** reads status, Server and security headers from the probed Endpoint.
-- **Smaller fixes:** tlsx hostname mismatches on shared IPs, missing MITRE CVE year files, FOFA pagination, the cache-scan target list, per-run temp directories, the jhaddix wordlist, and a Jev token row never used as a chat model.
+- **tlsx hostname mismatches on a shared IP** are reported at low severity and name the other hosts the certificate covers.
+- **MITRE CVE year files** come from upstream's new gzip copies, missing years are fetched, and stale ones are refreshed.
+- **Smaller fixes:** FOFA pagination, the cache-scan target list, Shodan results on CDN IPs, per-run temp directories for concurrent scans, the jhaddix wordlist, and a Jev token row never used as a chat model.
 
 ## [6.23.0] - 2026-09-29
 
