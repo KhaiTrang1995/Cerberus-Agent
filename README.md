@@ -563,6 +563,10 @@ Run **any single tool** from the pipeline independently without re-running the e
 
 Optional **LLM-augmented decision points** wired inside the recon pipeline where static look-ups historically drift -- **Nuclei** prunes its tag list to the detected tech stack, the **WAF classifier** catches header-stripped Cloudflare/AWS WAF/Imperva, and many others across FFuf, Nuclei false-positive filtering, and subdomain-takeover disambiguation. Each hook is a **cascade fallback** after the static path with a deterministic safe fallback, so an LLM outage cannot break a scan. One master toggle in the Target tab governs them all.
 
+Four of these hooks can run on **TypeSafe Jev** instead of the LLM: a decision model that answers typed questions over a closed set of options, with a code-enforced floor, so an answer can rank or annotate but never drop coverage. Four more decisions run **only on Jev**, in shadow mode for now (Jev answers and is recorded, the scan runs as it does without AI): what kind of page each probed URL is, which discovered directories FFuf smart-fuzzes, which hosts Hakrawler reaches first under its URL cap, and whether a tool's empty result with odd error output was a transient failure. Jev needs a token on the project owner's account.
+
+> **[Wiki: TypeSafe Jev](https://github.com/samugit83/redamon/wiki/TypeSafe-Jev)**
+
 > **[Wiki: AI in Pipeline](https://github.com/samugit83/redamon/wiki/Recon-Pipeline-Workflow#ai-in-pipeline)**
 
 ### AI Gauntlet: Offensive AI/LLM Testing

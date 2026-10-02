@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.24.0] - 2026-10-02
+
+### Added
+
+- **TypeSafe Jev as a second engine for four recon AI hooks.** FFuf extensions, Nuclei tags, WAF classification and takeover disambiguation can each run on Jev, a typed decision model, instead of the LLM. Its answers are confined to closed sets with code-enforced floors, and any failure falls back to the static behaviour. The token lives on your account (Global Settings → LLM Providers, or the AI in Pipeline panel), and switching a hook onto Jev is refused when the project owner has none.
+- **Four Jev-only recon hooks, in shadow mode:** page-type labels, FFuf base-path ranking, Hakrawler seed order and a tool-health check. Each asks Jev and records its answer next to the deterministic one (in the recon output under `jev_shadow`); the scan still runs as it does without AI.
+- **`preflight_scope_check` reports each AI hook's effective engine**, including a hook that will fall back for lack of a token.
+- **Empty crawler and collector results are checked.** A timeout, a crash, a non-zero exit or error output is recorded as a coverage gap, and a failed Katana or Hakrawler keeps the previous run's jsluice secrets out of the prune.
+
+### Fixed
+
+- **Findings a run did not re-check are no longer pruned:** jsluice secrets when their crawl fails, nmap and Nuclei findings on skipped targets, unscanned or stopped GVM targets, and stopped, failed or throttled secret hunts.
+- **httpx keeps what it probed** when it hits its runtime budget.
+- **Partial recon** reads probe data from the Endpoint, rebuilds DAST URLs, skips co-hosted vhost names, gives Nuclei the graph's technologies and services, and applies the RoE exclusions to subdomain discovery.
+- **JS-found hostnames are capped**, and Uncover's pass the same scope gates as every other source.
+- **Port and service security checks run again**, five checks stop misfiring, and triage scores security checks and public client keys by what they show.
+- **Red Zone Web Init Access** reads status, Server and security headers from the probed Endpoint.
+- **Smaller fixes:** tlsx hostname mismatches on shared IPs, missing MITRE CVE year files, FOFA pagination, the cache-scan target list, per-run temp directories, the jhaddix wordlist, and a Jev token row never used as a chat model.
+
 ## [6.23.0] - 2026-09-29
 
 ### Added

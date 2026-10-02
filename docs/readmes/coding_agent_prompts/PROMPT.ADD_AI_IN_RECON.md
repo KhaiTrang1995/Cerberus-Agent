@@ -114,6 +114,40 @@ once before the tool's main command is built, don't.
    - Update the screenshot if the Target-tab AI panel layout changes (drop
      a refreshed `ai-in-pipeline-target-tab.png` into `redamon.wiki/images/`).
 
+## Running a hook on TypeSafe Jev
+
+Jev answers typed questions (a yes/no score, or a pick from a closed list) and
+cannot write free text, so it fits a decision that ranks, tunes or annotates
+over options the code defines. Two shapes exist; the `recon-ai-enrichment`
+skill holds the rules and [TypeSafe-Jev](../../../redamon.wiki/TypeSafe-Jev.md)
+the user-facing account.
+
+- **Engine switch on an LLM hook** (`{tool}AiUseJev`): the helper takes
+  `engine: str = "llm"`; `jev` posts the same body to `/jev/<hook>`, which
+  answers in the `/llm/<hook>` shape, so the existing validator is reused.
+- **Jev-only hook** (`{tool}Jev{Feature}`, no LLM twin): a new helper in
+  `recon/helpers/ai_planner/` built on `jev_shadow.jev_post`, a new request
+  model and a response shape recon validates. It starts in shadow mode
+  (`ROLLOUT = SHADOW`: ask, record next to the deterministic answer, act on
+  the deterministic one); flipping to act is a separate, reviewed change.
+
+Either way:
+
+- Take `agent_jev_gate()`, never `agent_llm_gate()`: the LLM breaker marks
+  401/402/403 fatal for the whole run, so a Jev credit failure recorded there
+  would silence every LLM hook.
+- A Jev failure uses the hook's static fallback. Never re-route to the LLM.
+- Target-derived text (headers, bodies, titles, hostnames, URLs, directory
+  names, tool stderr) goes in the agent's `state`, clipped then wrapped;
+  a per-item hook names an item by index (`page_3`), never by quoting it.
+- A hook that would need to delete or drop to be useful does not go on Jev.
+- The Jev field stays out of `apply_ai_pipeline_overrides`, goes in
+  `KEPT_WHEN_ABSENT` and `JEV_ENGINE_FIELDS` (the owner-token refusal), and in
+  `AI_HOOKS` with its `kind` (`engine` or `enable`) for `preflight_scope_check`.
+- Any stdout line it prints must not match `PHASE_PATTERNS` in
+  `recon_orchestrator/container_manager.py` (no URL, hostname or path in a
+  line), with a test in the style of `recon/tests/test_jev_shadow.py`.
+
 ## Do NOT
 
 - **Touch any file under `webapp/src/lib/recon-presets/presets/`.** The

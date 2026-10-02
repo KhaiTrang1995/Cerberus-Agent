@@ -9,7 +9,8 @@ description: >
   recon/helpers/ai_planner/{tool}_{feature}.py; a /llm/{tool}-{feature} endpoint
   in agentic/api.py; a data.{tool}Ai{feature} toggle; editing
   apply_ai_pipeline_overrides in recon/project_settings.py; an LLM | Jev engine
-  switch (a {tool}AiUseJev field, a /jev/* endpoint, agent_jev_gate).
+  switch (a {tool}AiUseJev field, a /jev/* endpoint, agent_jev_gate); a
+  Jev-only hook ({tool}Jev{Feature}, jev_shadow.py, shadow mode).
 license: MIT
 metadata:
   author: redamon
@@ -71,6 +72,22 @@ that toggles it, use `project-settings-cascade`.
   Jev engine only when a wrong answer cannot drop a finding: the Nuclei
   false-positive filter deletes findings from target-controlled bytes and has no
   Jev engine.
+- **A Jev-only hook (`{tool}Jev{Feature}`, no LLM twin) has TWO levels and
+  ships in shadow.** Nothing upstream folds its flag into `aiInPipeline`, so
+  EVERY call site, full and partial, tests `AI_IN_PIPELINE and <FLAG>` itself;
+  never add it to the master fan-out in `TargetSection.tsx`. Build it on
+  `recon/helpers/ai_planner/jev_shadow.py` (`jev_post` takes the `agent_jev`
+  breaker; `ShadowRecorder` caps the per-decision lines at 50, prints one
+  summary, and keeps the records in the recon JSON under `jev_shadow.<hook>`).
+  `ROLLOUT = SHADOW` acts on the deterministic path; flipping to act is a
+  separate change. In `AI_HOOKS` it is `kind: 'enable'`, so a false flag
+  reports `off`, not `llm`.
+- **A per-item hook puts its items in the state and names them by index.**
+  A hostname, URL, path, title or stderr line is target data even when recon
+  extracted it: never quote it in a question, never print it in a log line (a
+  hostname with "port...scan" in it moves the recon drawer's phase). Agent side,
+  use `_ask_items`, which sends each request only its own items; `_ask` re-sends
+  one state per chunk and a scan's items would exceed the request limit.
 - **NEVER hook the AI separately in partial recon.** Most tools share one entry
   function (e.g. `run_vuln_scan` is called by both `main_recon_modules/` and
   `partial_recon_modules/`); hook it **once** and both paths inherit. `grep` the
