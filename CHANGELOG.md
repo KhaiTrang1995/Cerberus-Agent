@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Three Jev-only recon hooks now act on Jev's answer instead of only recording it.** Page-type labels, FFuf base-path ranking and Hakrawler seed order drive the scan when their switch is on (the deterministic result is the fallback when Jev is unavailable). Page-type writes `page_class` onto each Endpoint in the graph. The tool-health hook stays in shadow — its action is a tool retry that is not built yet.
+- **Jev now drives three recon hooks.** With their switch on, page-type labels, FFuf base-path ranking and Hakrawler seed order use Jev's answer instead of only recording it; the built-in result is the fallback when Jev is unavailable. Page-type labels are written onto each Endpoint in the graph (`page_class`). The tool-health hook records Jev's verdict next to the coverage gap and re-runs nothing.
+- **The Shadow label is gone** from the project form and the Recon Preset schema, and the Jev wiki page and the redamon.org walkthrough now cover all eight hooks.
 
 ## [6.24.0] - 2026-10-02
 

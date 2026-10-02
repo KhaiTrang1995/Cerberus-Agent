@@ -24,7 +24,7 @@
 
 <p align="center">
   <a href="https://github.com/samugit83/redamon/stargazers"><img height="24" src="https://img.shields.io/github/stars/samugit83/redamon?style=flat&color=2E8B57&label=Stars" alt="GitHub Stars"/></a>
-  <img height="24" src="https://img.shields.io/badge/v6.24.0-release-2E8B57?style=flat" alt="Version 6.24.0"/>
+  <img height="24" src="https://img.shields.io/badge/v6.24.1-release-2E8B57?style=flat" alt="Version 6.24.1"/>
   <img height="24" src="https://img.shields.io/badge/WARNING-SECURITY%20TOOL-B22222?style=flat" alt="Security Tool Warning"/>
   <img height="24" src="https://img.shields.io/badge/LICENSE-MIT-4169A1?style=flat" alt="MIT License"/>
   <img height="24" src="https://img.shields.io/badge/AI-AUTONOMOUS%20AGENT-6A5ACD?style=flat&logo=openai&logoColor=white" alt="AI Powered"/>
@@ -563,7 +563,7 @@ Run **any single tool** from the pipeline independently without re-running the e
 
 Optional **LLM-augmented decision points** wired inside the recon pipeline where static look-ups historically drift -- **Nuclei** prunes its tag list to the detected tech stack, the **WAF classifier** catches header-stripped Cloudflare/AWS WAF/Imperva, and many others across FFuf, Nuclei false-positive filtering, and subdomain-takeover disambiguation. Each hook is a **cascade fallback** after the static path with a deterministic safe fallback, so an LLM outage cannot break a scan. One master toggle in the Target tab governs them all.
 
-Four of these hooks can run on **TypeSafe Jev** instead of the LLM: a decision model that answers typed questions over a closed set of options, with a code-enforced floor, so an answer can rank or annotate but never drop coverage. Four more decisions run **only on Jev**, in shadow mode for now (Jev answers and is recorded, the scan runs as it does without AI): what kind of page each probed URL is, which discovered directories FFuf smart-fuzzes, which hosts Hakrawler reaches first under its URL cap, and whether a tool's empty result with odd error output was a transient failure. Jev needs a token on the project owner's account.
+The recon pipeline uses **TypeSafe Jev**, a typed decision model, for eight decisions: what kind of page each URL is, which host Hakrawler crawls first, which directories and extensions FFuf fuzzes, whether a tool failed or just found nothing, which Nuclei tags to run, whether a WAF is in front, and whether a takeover is real. Jev needs a token on the project owner's account; see how it works in the [Jev Meets the Recon Pipeline](https://www.redamon.org/jev-meets-the-recon-pipeline) walkthrough on redamon.org.
 
 > **[Wiki: TypeSafe Jev](https://github.com/samugit83/redamon/wiki/TypeSafe-Jev)**
 

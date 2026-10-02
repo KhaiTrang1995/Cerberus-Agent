@@ -811,36 +811,30 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                         label: string
                         summary: string
                         description: string
-                        // 'act': Jev's answer drives the scan. 'shadow': it is only recorded.
-                        rollout: 'act' | 'shadow'
                       }> = [
                         {
                           field: 'httpxJevPageType',
                           label: 'HTTP Probe: Label Page Types with Jev',
                           summary: 'Labels each probed page: app, login wall, parked, default, placeholder or error.',
                           description: 'After httpx probes each URL, Jev labels every page with one yes/no question per class. A deterministic pre-filter (default install titles, parking CNAMEs, error statuses, login paths) supplies the label only where Jev gives no answer. An unsure answer is "app", so nothing is hidden. The label is written onto the Endpoint in the graph (page_class) and kept in the recon output; what gets scanned does not change. At most 300 distinct pages per scan, within 60 seconds. Same switch as in the httpx module.',
-                          rollout: 'act',
                         },
                         {
                           field: 'ffufJevBasePaths',
                           label: 'FFuf: Rank Smart-Fuzz Directories with Jev',
                           summary: 'Picks which discovered directories FFuf smart-fuzzes under its cap.',
                           description: 'When smart fuzz has more discovered base directories than its cap, Jev is asked, per directory, whether it is likely to hold sensitive, administrative or application content, and its best ones fill the cap. The same number of directories is fuzzed either way, and the random pick is the fallback when Jev is unavailable. Same switch as in the FFuf module.',
-                          rollout: 'act',
                         },
                         {
                           field: 'hakrawlerJevSeedOrder',
                           label: 'Hakrawler: Order Seeds with Jev',
                           summary: 'Orders hosts so a capped crawl reaches the promising ones first.',
                           description: 'Hakrawler crawls its seeds in list order and stops once its URL cap is reached, so with a tight cap hosts late in the alphabet are never crawled. Jev is asked, per probed host, whether it has a rich web application surface, and Hakrawler crawls host by host in that order (alphabetical when Jev is unavailable). Ordering only: every seed stays in the list. Partial recon keeps the alphabetical order. Same switch as in the Hakrawler module.',
-                          rollout: 'act',
                         },
                         {
                           field: 'resourceEnumJevToolHealth',
                           label: 'Resource Enum: Read Tool Errors with Jev',
                           summary: 'Asks whether an empty result with odd error output was a transient failure.',
-                          description: 'Every empty result from a crawler or collector is classified from its exit code and error output, and one that looks like a failure is recorded as a coverage gap, with or without this switch. When the error output fits neither a routine line nor a known failure, Jev is asked whether it describes a transient failure a second run could fix. At most 20 questions per run, header values redacted. Shadow mode: the verdict is logged and kept in the recon output, and nothing is retried. Same switch as in the Resource Enum AI module.',
-                          rollout: 'shadow',
+                          description: 'Every empty result from a crawler or collector is classified from its exit code and error output, and one that looks like a failure is recorded as a coverage gap, with or without this switch. When the error output fits neither a routine line nor a known failure, Jev is asked whether it describes a transient failure a second run could fix. At most 20 questions per run, header values redacted. The verdict is kept in the recon output next to the coverage gap; no tool is re-run. Same switch as in the Resource Enum AI module.',
                         },
                       ]
                       return (
@@ -896,14 +890,6 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                                   <AiToggleLabel label={hook.label} tooltip={hook.description} />
                                   <span className={aiStyles.hookSummary}>{hook.summary}</span>
                                 </div>
-                                {hook.rollout === 'shadow' && (
-                                  <span
-                                    className={aiStyles.shadowChip}
-                                    title="Shadow mode: Jev answers and is recorded, and the scan runs as it does without AI."
-                                  >
-                                    Shadow
-                                  </span>
-                                )}
                               </div>
                               <div className={aiStyles.hookEngine}>
                                 <span className={aiStyles.engineLabel}>Jev only</span>

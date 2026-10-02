@@ -132,12 +132,12 @@ export function ResourceEnumAiSection({ data, updateField, onRun }: ResourceEnum
             </p>
             <div className={styles.toggleRow} style={{ alignItems: 'center', gap: 'var(--space-2)' }}>
               <AiToggleLabel
-                label="Read unexplained tool errors with Jev (shadow)"
+                label="Read unexplained tool errors with Jev"
                 tooltip={
                   'When an empty result\'s error output fits neither a routine line nor a known ' +
                   'failure, Jev is asked whether it describes a transient failure a second run could ' +
-                  'fix. At most 20 questions per run, with header values redacted. Shadow mode: the ' +
-                  'verdict is logged and kept in the recon output, and nothing is retried. Same switch ' +
+                  'fix. At most 20 questions per run, with header values redacted. The verdict is ' +
+                  'kept in the recon output next to the coverage gap; no tool is re-run. Same switch ' +
                   'as in the Target tab AI panel. ' +
                   (!data.aiInPipeline ? 'Enable "AI in Pipeline" in the Target tab to use this.' : '')
                 }

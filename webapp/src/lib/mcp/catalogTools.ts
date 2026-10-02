@@ -159,8 +159,9 @@ const NOTES = [
   'Jev-only hooks have TWO levels: aiInPipeline, then the hook\'s own *Jev* flag (ffufJevBasePaths, ' +
     'httpxJevPageType, resourceEnumJevToolHealth, hakrawlerJevSeedOrder). They have no LLM engine, ' +
     'aiInPipeline does not set or reset them, and switching one ON is refused unless the project ' +
-    'owner has a Jev token. They run in shadow mode: Jev answers and is recorded, and the scan ' +
-    'still does what it does without AI.',
+    'owner has a Jev token. Page types, base paths and seed order take effect from Jev\'s answers ' +
+    '(page-type labels land on the Endpoint, FFuf fuzzes Jev\'s directories, Hakrawler crawls Jev\'s ' +
+    'host order); the tool-health check records its verdict in the recon output.',
 ]
 
 /**

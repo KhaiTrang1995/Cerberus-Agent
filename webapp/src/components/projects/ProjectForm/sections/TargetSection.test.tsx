@@ -246,14 +246,11 @@ describe('the AI in Pipeline panel', () => {
     }
   })
 
-  test('only a Jev-only hook still in shadow carries the shadow chip', () => {
+  test('no Jev-only hook card carries a shadow chip', () => {
     renderSection(AI_ON)
-    const acting = ['httpxJevPageType', 'ffufJevBasePaths', 'hakrawlerJevSeedOrder']
-    for (const field of acting) {
+    for (const field of JEV_ONLY) {
       expect(within(screen.getByTestId(`ai-hook-${field}`)).queryByText('Shadow')).not.toBeInTheDocument()
     }
-    const toolHealth = screen.getByTestId('ai-hook-resourceEnumJevToolHealth')
-    expect(within(toolHealth).getByText('Shadow')).toHaveAttribute('title', expect.stringMatching(/recorded/))
   })
 
   test('a Jev-only card writes its own field, and the stored value is shown', async () => {

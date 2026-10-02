@@ -73,14 +73,15 @@ that toggles it, use `project-settings-cascade`.
   false-positive filter deletes findings from target-controlled bytes and has no
   Jev engine.
 - **A Jev-only hook (`{tool}Jev{Feature}`, no LLM twin) has TWO levels and
-  ships in shadow.** Nothing upstream folds its flag into `aiInPipeline`, so
+  starts in shadow.** Nothing upstream folds its flag into `aiInPipeline`, so
   EVERY call site, full and partial, tests `AI_IN_PIPELINE and <FLAG>` itself;
   never add it to the master fan-out in `TargetSection.tsx`. Build it on
   `recon/helpers/ai_planner/jev_shadow.py` (`jev_post` takes the `agent_jev`
   breaker; `ShadowRecorder` caps the per-decision lines at 50, prints one
   summary, and keeps the records in the recon JSON under `jev_shadow.<hook>`).
-  `ROLLOUT = SHADOW` acts on the deterministic path; flipping to act is a
-  separate change. In `AI_HOOKS` it is `kind: 'enable'`, so a false flag
+  `ROLLOUT = SHADOW` acts on the deterministic path; `ROLLOUT = ACT` acts on
+  Jev's answer with the deterministic result as the fallback, and flipping a
+  hook is a separate change. In `AI_HOOKS` it is `kind: 'enable'`, so a false flag
   reports `off`, not `llm`.
 - **A per-item hook puts its items in the state and names them by index.**
   A hostname, URL, path, title or stderr line is target data even when recon

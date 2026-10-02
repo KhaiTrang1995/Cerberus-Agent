@@ -2413,15 +2413,15 @@ fields:
     mcp: settable
     group: llm
     meaning: >-
-      Ranks the smart-fuzz base paths with TypeSafe AI Jev (model jev-1.13.0):
+      Picks the smart-fuzz base paths with TypeSafe AI Jev (model jev-1.13.0):
       false keeps the random pick that fills ffufSmartFuzzMaxBasePaths, true asks
       Jev, per discovered directory, whether it is likely to hold sensitive,
-      administrative or application content. Takes effect only when aiInPipeline
-      is true, and aiInPipeline does not reset it. Needs a Jev token on the
-      project owner's account; without one the random pick is used. Jev only
-      ranks the directories the crawl found, and the cap keeps the same number
-      either way. Runs in shadow mode: Jev's pick is logged and kept in the recon
-      output next to the random pick, and FFuf still fuzzes the random pick.
+      administrative or application content, and FFuf fuzzes the directories Jev
+      ranks highest. Takes effect only when aiInPipeline is true, and
+      aiInPipeline does not reset it. Needs a Jev token on the project owner's
+      account; without one the random pick is used. Jev only ranks the
+      directories the crawl found, and the cap keeps the same number either way.
+      Jev's pick is kept in the recon output next to the deterministic one.
   ffufMatchCodes:
     tool: ffuf
     runtime_key: "FFUF_MATCH_CODES"
@@ -3626,14 +3626,13 @@ fields:
     meaning: >-
       Orders Hakrawler's seed URLs with TypeSafe AI Jev (model jev-1.13.0): false
       keeps the alphabetical order, true asks Jev, per probed host, whether it is
-      likely to have a rich web application surface, so that under
-      hakrawlerMaxUrls the promising hosts would be crawled first. Takes effect
-      only when aiInPipeline is true, and aiInPipeline does not reset it. Needs a
-      Jev token on the project owner's account; without one the alphabetical
-      order is used. Ordering only: every seed stays in the list, and partial
-      recon keeps the alphabetical order. Runs in shadow mode: Jev's order is
-      logged and kept in the recon output, and Hakrawler still gets the
-      alphabetical list.
+      likely to have a rich web application surface, and Hakrawler crawls the
+      promising hosts first, so under hakrawlerMaxUrls they are reached before
+      the cap. Takes effect only when aiInPipeline is true, and aiInPipeline does
+      not reset it. Needs a Jev token on the project owner's account; without one
+      the alphabetical order is used. Ordering only: every seed stays in the
+      list, and partial recon keeps the alphabetical order. Jev's order is kept
+      in the recon output next to the alphabetical one.
   hakrawlerMaxUrls:
     tool: hakrawler
     runtime_key: "HAKRAWLER_MAX_URLS"
@@ -3849,13 +3848,13 @@ fields:
       Labels each probed URL with TypeSafe AI Jev (model jev-1.13.0): false
       labels nothing, true asks Jev whether a page is a login wall, a parked
       domain, a default install page, a placeholder or an error page, and calls
-      it an app otherwise. A deterministic pre-filter places the easy pages
-      first. Takes effect only when aiInPipeline is true, and aiInPipeline does
-      not reset it. Needs a Jev token on the project owner's account; without one
-      no label is computed. Annotation only, and no traffic to the target: at
-      most 300 distinct pages per scan, within 60 seconds. Runs in shadow mode:
-      the labels are logged and kept in the recon output, and nothing is written
-      to the graph.
+      it an app otherwise. A deterministic pre-filter supplies the label for any
+      page Jev gives no answer for. Takes effect only when aiInPipeline is true,
+      and aiInPipeline does not reset it. Needs a Jev token on the project
+      owner's account; without one only the pre-filter labels. The label is
+      written onto the page's Endpoint in the graph (page_class) and changes
+      nothing about what is scanned. No traffic to the target: at most 300
+      distinct pages per scan, within 60 seconds.
   httpxMatchCodes:
     tool: httpx
     runtime_key: "HTTPX_MATCH_CODES"
@@ -6822,8 +6821,8 @@ fields:
       a result as a coverage gap whatever this says. Takes effect only when
       aiInPipeline is true, and aiInPipeline does not reset it. Needs a Jev token
       on the project owner's account. At most 20 questions per run, with header
-      values redacted. Runs in shadow mode: the verdict is logged and kept in the
-      recon output, and nothing is retried.
+      values redacted. The verdict (transient or permanent, with its confidence)
+      is kept in the recon output next to the coverage gap; no tool is re-run.
   roeAllowAccountLockout:
     tool: roe
     runtime_key: null

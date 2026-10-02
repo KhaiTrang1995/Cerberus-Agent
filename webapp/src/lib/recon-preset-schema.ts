@@ -685,7 +685,7 @@ export const RECON_PARAMETER_CATALOG = `
 - httpxProbeHash: string - Hash algo: "md5", "sha256", etc.
 - httpxIncludeResponse: boolean - Store full response body
 - httpxIncludeResponseHeaders: boolean
-- httpxJevPageType: boolean - Label each probed URL (app, login_only, parked, default, placeholder, error) with TypeSafe AI Jev (jev-1.13.0). Only when aiInPipeline=true; needs a Jev token on the owner's account. Annotation only, shadow mode: logged and kept in the recon output, nothing changes in the scan. Default false.
+- httpxJevPageType: boolean - Label each probed URL (app, login_only, parked, default, placeholder, error) with TypeSafe AI Jev (jev-1.13.0). Only when aiInPipeline=true; needs a Jev token on the owner's account. Jev's label is written onto the page's Endpoint in the graph (page_class) and changes nothing about what is scanned. Default false.
 - httpxProbeAsn: boolean
 - httpxProbeCdn: boolean
 - httpxPaths: string[] - Additional URL paths to probe
@@ -716,7 +716,7 @@ export const RECON_PARAMETER_CATALOG = `
 - resourceEnumAiRagPathFlagEnabled: boolean - Stamp Endpoint.is_ai_rag_ingest=true for known RAG paths (OpenAI Vector Stores, Pinecone /vectors/upsert, Weaviate /v1/objects, Qdrant /collections/.../points). Ambiguous paths (/upload, /search, /query) only fire when parent BaseURL is AI-tagged.
 - resourceEnumAiParamInjectableFlagEnabled: boolean - Stamp Parameter.is_ai_prompt_injectable=true on AI-classified endpoints when the parameter name matches the prompt-injection catalogue (prompt, messages, system, contents, inputs, arguments, etc.)
 - resourceEnumAiToolArgPathEnabled: boolean - Reserved for the future ai_surface_recon central module - resolves Parameter.ai_tool_arg_path against discovered OpenAPI / ai-plugin.json / MCP tools/list specs. No-op today.
-- resourceEnumJevToolHealth: boolean - Ask TypeSafe AI Jev (jev-1.13.0) whether a collection tool's empty result with unexplained error output was a transient failure. Only when aiInPipeline=true; needs a Jev token on the owner's account. Shadow mode: the verdict is logged, nothing is retried. Default false.
+- resourceEnumJevToolHealth: boolean - Ask TypeSafe AI Jev (jev-1.13.0) whether a collection tool's empty result with unexplained error output was a transient failure. Only when aiInPipeline=true; needs a Jev token on the owner's account. The verdict is kept in the recon output next to the coverage gap; no tool is re-run. Default false.
 
 ## AI Surface Recon (central module, ACTIVE)
 - aiSurfaceReconEnabled: boolean - Master toggle. Active protocol-aware AI/LLM/MCP fingerprinting that runs after resource_enum. Benign shape-probes only (1-token chat ping, MCP handshake, read-only GETs) against hosts already showing an AI signal.
@@ -779,7 +779,7 @@ export const RECON_PARAMETER_CATALOG = `
 - hakrawlerIncludeSubs: boolean - Include subdomains
 - hakrawlerInsecure: boolean - Skip TLS verification
 - hakrawlerParallelism: integer - Parallel crawler instances
-- hakrawlerJevSeedOrder: boolean - Order Hakrawler's seeds by a TypeSafe AI Jev (jev-1.13.0) score per host instead of alphabetically. Only when aiInPipeline=true; needs a Jev token on the owner's account. Ordering only; shadow mode: the order is logged, Hakrawler still gets the alphabetical list. Default false.
+- hakrawlerJevSeedOrder: boolean - Order Hakrawler's seeds by a TypeSafe AI Jev (jev-1.13.0) score per host instead of alphabetically. Only when aiInPipeline=true; needs a Jev token on the owner's account. Ordering only: Hakrawler crawls the hosts Jev ranks highest first. Default false.
 
 ## JavaScript Analysis - jsluice
 - jsluiceEnabled: boolean - Run jsluice JS analyzer (active tool, sends HTTP requests)
@@ -881,7 +881,7 @@ export const RECON_PARAMETER_CATALOG = `
 - ffufParallelism: integer - Targets fuzzed in parallel
 - ffufAiExtensions: boolean - When true, FFuf file extensions are picked per-target by AI from response headers (requires aiInPipeline=true). The static ffufExtensions list is ignored.
 - ffufAiUseJev: boolean - Engine for the FFuf extension picker: false uses the LLM in aiPipelineModel, true uses TypeSafe AI Jev (jev-1.13.0). Only when aiInPipeline=true; needs a Jev token on the owner's account, else the hook uses its static fallback. Jev picks only from a fixed 40-extension catalog.
-- ffufJevBasePaths: boolean - Rank the smart-fuzz base paths with TypeSafe AI Jev (jev-1.13.0) instead of the random pick, per discovered directory. Only when aiInPipeline=true; needs a Jev token on the owner's account. Same number of paths either way; shadow mode: Jev's pick is logged, FFuf still fuzzes the random pick. Default false.
+- ffufJevBasePaths: boolean - Rank the smart-fuzz base paths with TypeSafe AI Jev (jev-1.13.0) instead of the random pick, per discovered directory. Only when aiInPipeline=true; needs a Jev token on the owner's account. Same number of paths either way; FFuf fuzzes the directories Jev ranks highest. Default false.
 
 ## Parameter Discovery - Arjun
 - arjunEnabled: boolean - Run Arjun parameter discovery
