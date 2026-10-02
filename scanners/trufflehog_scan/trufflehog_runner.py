@@ -338,7 +338,8 @@ class TrufflehogRunner:
         except Exception as exc:
             self._log(f"[!] Error saving incremental results: {exc}")
 
-    def _build_output(self, status: str = "in_progress") -> dict:
+    def _build_output(self, status: str = "in_progress",
+                      incomplete_reason: Optional[str] = None) -> dict:
         return {
             "source": self.source.id,
             "source_label": self.source.label,
@@ -357,6 +358,13 @@ class TrufflehogRunner:
             # there would make a successful scan look failed.
             **({"error": "; ".join(self._scan_errors)}
                if self._scan_errors and status == "error" else {}),
+            # Present ONLY on a completed run although part of the target was
+            # never scanned (an invocation exited non-zero). The status stays
+            # `completed` for the UI and the orchestrator; the graph write reads
+            # this to keep the findings of what was skipped instead of clearing
+            # and pruning them.
+            **({"incomplete": True, "incomplete_reason": incomplete_reason}
+               if incomplete_reason and status == "completed" else {}),
             "statistics": dict(self.stats),
             "findings": self.findings,
         }
@@ -391,11 +399,27 @@ class TrufflehogRunner:
         # recording it as `completed` would tell the operator "no secrets here".
         failed = all(code != 0 for code in self._exit_codes) if self._exit_codes else True
         status = "error" if failed and not self.findings else "completed"
-        self._write_final(status)
+        self._write_final(status, self._incomplete_reason() if status == "completed" else None)
         return self.findings
 
-    def _write_final(self, status: str) -> None:
-        output = self._build_output(status)
+    def _incomplete_reason(self) -> Optional[str]:
+        """Why a completed run did not scan all of its target, or None if it did.
+
+        Every invocation runs with --fail-on-scan-errors, so a non-zero exit
+        means some of the target was not scanned: one of several Docker images
+        failed to pull, one of an org's repositories failed to clone. Findings
+        from the rest make the run `completed`, but it cannot say the skipped
+        part is clean.
+        """
+        codes = [code for code in self._exit_codes if code != 0]
+        if not codes:
+            return None
+        if self._scan_errors:
+            return "; ".join(self._scan_errors)
+        return f"TruffleHog exited with code {', '.join(str(c) for c in codes)}"
+
+    def _write_final(self, status: str, incomplete_reason: Optional[str] = None) -> None:
+        output = self._build_output(status, incomplete_reason)
         with open(self.output_file, "w") as fh:
             json.dump(output, fh, indent=2, default=str)
         try:
@@ -403,6 +427,9 @@ class TrufflehogRunner:
         except OSError:
             pass
         self._log(f"\n[+] Results saved to {self.output_file} (status={status})")
+        if "incomplete" in output:
+            self._log("[!] Part of the target was not scanned; its earlier findings "
+                      "are kept, not pruned")
 
     def save_results(self) -> str:
         return self.output_file

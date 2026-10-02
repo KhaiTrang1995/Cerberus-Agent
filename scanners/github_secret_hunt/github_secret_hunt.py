@@ -31,12 +31,21 @@ except ImportError:
     print("[!] PyGithub not installed. Run: pip install PyGithub")
     raise
 
+# Every transport failure, not only ConnectionError/Timeout. PyGithub 2.x
+# retries 5xx and rate-limited 403s itself (GithubRetry) and, once the retries
+# run out, requests raises RetryError; a body cut off mid-read is
+# ChunkedEncodingError. Neither is a GithubException, and both leave the file,
+# commit or gist unread.
 try:
-    from requests.exceptions import ConnectionError as _RequestsConnectionError
-    from requests.exceptions import Timeout as _RequestsTimeout
-    _TRANSPORT_ERRORS = (_RequestsConnectionError, _RequestsTimeout)
+    from requests.exceptions import RequestException as _RequestException
+    _TRANSPORT_ERRORS = (_RequestException,)
 except ImportError:
     _TRANSPORT_ERRORS = ()
+try:
+    from urllib3.exceptions import HTTPError as _Urllib3HTTPError
+    _TRANSPORT_ERRORS += (_Urllib3HTTPError,)
+except ImportError:
+    pass
 
 #: Gap records kept in the artifact. The count is always exact; the list is
 #: capped so a run throttled for an hour does not write megabytes of them.
@@ -1040,14 +1049,16 @@ class GitHubSecretHunter:
         try:
             # Check if target is org or user
             self.scan_organization()
-        except RateLimitExceededException:
-            self._handle_rate_limit()
-            self.run()
-            return self.findings
         except KeyboardInterrupt:
             print("\n\n[!] Scan interrupted by user.")
             status = "interrupted"
         except Exception as e:
+            # Not only RateLimitExceededException: PyGithub 2.x raises a 429 as
+            # a plain GithubException, which _is_rate_limit recognises.
+            if self._is_rate_limit(e):
+                self._handle_rate_limit()
+                self.run()
+                return self.findings
             print(f"[!] Error during scan: {e}")
             status = "error"
 

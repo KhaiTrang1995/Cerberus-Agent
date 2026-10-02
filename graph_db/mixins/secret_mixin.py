@@ -761,9 +761,12 @@ class SecretMixin:
         # writes "error" with no findings, so clearing or pruning on either
         # deletes findings nobody re-checked. Those runs are upserted only; every
         # node MERGEs on a deterministic id, so skipping the clear cannot
-        # duplicate anything.
+        # duplicate anything. A run the runner marked `incomplete` finished with
+        # findings but TruffleHog failed on part of its target (an image that
+        # would not pull), so it is upserted only too.
         run_status = str(trufflehog_data.get("status") or "").strip().lower()
-        run_completed = run_status == "completed"
+        run_incomplete = bool(trufflehog_data.get("incomplete"))
+        run_completed = run_status == "completed" and not run_incomplete
 
         # X7: taken BEFORE the clear and the ingest, so everything this run
         # writes has a later `updated_at` and survives the prune at the end.
@@ -776,6 +779,9 @@ class SecretMixin:
                 # left behind).
                 clear_stats = self.clear_trufflehog_data(user_id, project_id, source=source)
                 print(f"[*][graph-db] Pre-cleared {source}: {clear_stats}")
+            elif run_incomplete:
+                print(f"[*][graph-db] {source} run completed with part of its target "
+                      f"unscanned: keeping its previous findings, no clear and no prune")
             else:
                 print(f"[*][graph-db] {source} run is '{run_status or 'unknown'}', not "
                       f"completed: keeping its previous findings, no clear and no prune")

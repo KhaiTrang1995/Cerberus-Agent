@@ -65,12 +65,23 @@ _KEEP_HOST_FIELDS = (
 )
 
 #: What a hostname in `keep_hosts` must look like before it is regex-escaped:
-#: a DNS name, or an IPv6 literal without brackets.
-_KEEP_HOST_CHARS = re.compile(r"^[a-z0-9.\-]+$|^[0-9a-f:]+$")
+#: a DNS name, or an IPv6 literal without brackets. Underscores are allowed
+#: because real hostnames carry them (`_dmarc.`, `my_host.`) and dropping one
+#: here would let the prune delete a skipped host's findings.
+_KEEP_HOST_CHARS = re.compile(r"^[a-z0-9._\-]+$|^[0-9a-f:]+$")
 
 #: Hosts per regex, so a run that skipped hundreds builds several short
 #: patterns rather than one enormous alternation.
 _KEEP_HOSTS_PER_PATTERN = 100
+
+
+def _keep_host_name(host) -> str:
+    """A keep_hosts entry as findings store it: lowercased, and without the
+    trailing dot of a fully-qualified name, which no finding writer keeps."""
+    if not host:
+        return ""
+    name = str(host).strip().lower()
+    return name[:-1] if name.endswith(".") else name
 
 
 def keep_host_patterns(keep_hosts) -> list:
@@ -82,8 +93,8 @@ def keep_host_patterns(keep_hosts) -> list:
     set and `re.escape`d, and the patterns travel as query parameters - never
     concatenated into the Cypher text.
     """
-    names = sorted({str(h).strip().lower() for h in keep_hosts or ()
-                    if h and _KEEP_HOST_CHARS.match(str(h).strip().lower())})
+    names = sorted({n for n in (_keep_host_name(h) for h in keep_hosts or ())
+                    if _KEEP_HOST_CHARS.match(n)})
     patterns = []
     for i in range(0, len(names), _KEEP_HOSTS_PER_PATTERN):
         alternation = "|".join(re.escape(n) for n in names[i:i + _KEEP_HOSTS_PER_PATTERN])
