@@ -81,13 +81,42 @@ describe('preflight_scope_check: the effective engine of each AI hook', () => {
   const byHook = (r: Awaited<ReturnType<typeof preflightScopeCheck>>) =>
     Object.fromEntries(r.aiHooks.map(x => [x.hook, x]))
 
-  test('reports the four hooks with the engine each row asks for', async () => {
+  test('reports every hook with its kind and the engine each row asks for', async () => {
     h.findProject.mockResolvedValue(projectRow({ aiInPipeline: true, ffufAiUseJev: false }))
     const r = await preflightScopeCheck(ctx(), 'p1')
     expect(r.aiHooks.map(x => x.hook)).toEqual([
       'ffuf_extensions', 'nuclei_tags', 'waf_classification', 'takeover_disambiguation',
+      'ffuf_base_paths', 'page_type', 'tool_health', 'crawl_seed_order',
     ])
-    expect(byHook(r).ffuf_extensions).toEqual({ hook: 'ffuf_extensions', engine: 'llm', effective: 'llm' })
+    expect(byHook(r).ffuf_extensions).toEqual(
+      { hook: 'ffuf_extensions', kind: 'engine', engine: 'llm', effective: 'llm' })
+  })
+
+  test('a Jev-only hook switched off is off, never "llm"', async () => {
+    // It has no LLM engine: false means the step runs with no AI at all.
+    h.findProject.mockResolvedValue(projectRow({ aiInPipeline: true }))
+    const r = await preflightScopeCheck(ctx(), 'p1')
+    for (const hook of ['ffuf_base_paths', 'page_type', 'tool_health', 'crawl_seed_order']) {
+      expect(byHook(r)[hook]).toEqual({ hook, kind: 'enable', engine: 'off', effective: 'off' })
+    }
+  })
+
+  test('a Jev-only hook switched on runs on Jev with a token, or its fallback without one', async () => {
+    h.tokenCount.mockResolvedValue(1)
+    h.findProject.mockResolvedValue(projectRow({ aiInPipeline: true, httpxJevPageType: true }))
+    let r = await preflightScopeCheck(ctx(), 'p1')
+    expect(byHook(r).page_type).toMatchObject({ kind: 'enable', engine: 'jev', effective: 'jev' })
+    h.tokenCount.mockResolvedValue(0)
+    h.findProject.mockResolvedValue(projectRow({ aiInPipeline: true, hakrawlerJevSeedOrder: true }))
+    r = await preflightScopeCheck(ctx(), 'p1')
+    expect(byHook(r).crawl_seed_order.effective).toBe(
+      "jev → static fallback (no Jev token on the owner's account)")
+  })
+
+  test('a Jev-only hook is off when aiInPipeline is off, whatever its flag says', async () => {
+    h.findProject.mockResolvedValue(projectRow({ aiInPipeline: false, resourceEnumJevToolHealth: true }))
+    const r = await preflightScopeCheck(ctx(), 'p1')
+    expect(byHook(r).tool_health).toMatchObject({ engine: 'jev', effective: 'off' })
   })
 
   test('aiInPipeline off means every hook is off, whatever the engine field says', async () => {

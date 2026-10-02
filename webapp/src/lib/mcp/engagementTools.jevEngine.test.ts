@@ -85,3 +85,19 @@ describe('create_project: a Jev engine flag in settings', () => {
     expect(h.tokenCount).not.toHaveBeenCalled()
   })
 })
+
+describe('create_project: a Jev-only hook flag in settings', () => {
+  test.each(['ffufJevBasePaths', 'httpxJevPageType', 'resourceEnumJevToolHealth', 'hakrawlerJevSeedOrder'])(
+    '%s without a token is refused and no project is created', async (field) => {
+      await expect(createProject(ctx(), args({ [field]: true })))
+        .rejects.toThrow(new RegExp(`${field}.*no TypeSafe AI \\(Jev\\) token`, 's'))
+      expect(h.createProject).not.toHaveBeenCalled()
+    })
+
+  test('with a token it reaches the create call', async () => {
+    h.tokenCount.mockResolvedValue(1)
+    const r = await createProject(ctx(), args({ httpxJevPageType: true }))
+    expect(r.created).toBe(true)
+    expect(h.createProject.mock.calls[0][0].data.httpxJevPageType).toBe(true)
+  })
+})

@@ -156,6 +156,11 @@ const NOTES = [
     'the engine fields. A *UseJev flag only switches which engine answers (false = the LLM in ' +
     'aiPipelineModel, true = TypeSafe Jev), and switching one ON is refused unless the project ' +
     'owner has a Jev token. preflight_scope_check reports each hook\'s effective engine.',
+  'Jev-only hooks have TWO levels: aiInPipeline, then the hook\'s own *Jev* flag (ffufJevBasePaths, ' +
+    'httpxJevPageType, resourceEnumJevToolHealth, hakrawlerJevSeedOrder). They have no LLM engine, ' +
+    'aiInPipeline does not set or reset them, and switching one ON is refused unless the project ' +
+    'owner has a Jev token. They run in shadow mode: Jev answers and is recorded, and the scan ' +
+    'still does what it does without AI.',
 ]
 
 /**

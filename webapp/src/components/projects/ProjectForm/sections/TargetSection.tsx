@@ -803,6 +803,40 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                           description: "Subjack/Nuclei takeover fingerprints can collide with WAF block pages that say \"not found\" for a hostname the WAF doesn't recognize. When AI is on, each takeover candidate is probed; if the response carries no third-party vendor token (Heroku-Request-Id, x-amz-bucket-region, etc.), the LLM classifies the body as a real unclaimed-service page or a WAF block. AI-flagged collisions get a -40 score penalty so they land in manual_review instead of being shipped as criticals. Same toggle as in the Subdomain Takeover module: flipping it here flips it there.",
                         },
                       ]
+                      // Jev-only hooks: no LLM twin and no per-hook AI flag, so the card
+                      // has one Off | Jev control. Never part of the master cascade above:
+                      // aiInPipeline does not set or reset them.
+                      const jevOnlyHooks: Array<{
+                        field: 'ffufJevBasePaths' | 'httpxJevPageType' | 'resourceEnumJevToolHealth' | 'hakrawlerJevSeedOrder'
+                        label: string
+                        summary: string
+                        description: string
+                      }> = [
+                        {
+                          field: 'httpxJevPageType',
+                          label: 'HTTP Probe: Label Page Types with Jev',
+                          summary: 'Labels each probed page: app, login wall, parked, default, placeholder or error.',
+                          description: 'After httpx probes each URL, a deterministic pre-filter places the easy pages (default install titles, parking CNAMEs, error statuses, login paths) and Jev is asked, with one yes/no question per class, about the rest. An unsure answer is "app", so nothing is hidden. At most 300 distinct pages per scan, within 60 seconds. Shadow mode: the labels are logged and kept in the recon output; nothing is written to the graph yet and the scan is unchanged. Same switch as in the httpx module.',
+                        },
+                        {
+                          field: 'ffufJevBasePaths',
+                          label: 'FFuf: Rank Smart-Fuzz Directories with Jev',
+                          summary: 'Ranks which discovered directories FFuf smart-fuzzes under its cap.',
+                          description: 'When smart fuzz has more discovered base directories than its cap, the cap is filled by a random pick. Jev is asked, per directory, whether it is likely to hold sensitive, administrative or application content, and the best ones would fill the cap instead. The same number of directories is fuzzed either way. Shadow mode: Jev\'s pick is logged and kept in the recon output next to the random pick, and FFuf still fuzzes the random pick. Same switch as in the FFuf module.',
+                        },
+                        {
+                          field: 'hakrawlerJevSeedOrder',
+                          label: 'Hakrawler: Order Seeds with Jev',
+                          summary: 'Ranks hosts so a capped crawl would reach the promising ones first.',
+                          description: 'Hakrawler crawls its seeds in list order and stops once its URL cap is reached, so with a tight cap hosts late in the alphabet are never crawled. Jev is asked, per probed host, whether it has a rich web application surface, and the seeds would be ordered host by host by that answer. Ordering only: every seed stays in the list. Partial recon keeps the alphabetical order. Shadow mode: the order is logged and kept in the recon output, and Hakrawler still gets the alphabetical list. Same switch as in the Hakrawler module.',
+                        },
+                        {
+                          field: 'resourceEnumJevToolHealth',
+                          label: 'Resource Enum: Read Tool Errors with Jev',
+                          summary: 'Asks whether an empty result with odd error output was a transient failure.',
+                          description: 'Every empty result from a crawler or collector is classified from its exit code and error output, and one that looks like a failure is recorded as a coverage gap, with or without this switch. When the error output fits neither a routine line nor a known failure, Jev is asked whether it describes a transient failure a second run could fix. At most 20 questions per run, header values redacted. Shadow mode: the verdict is logged and kept in the recon output, and nothing is retried. Same switch as in the Resource Enum AI module.',
+                        },
+                      ]
                       return (
                         <div className={aiStyles.hookList} data-testid="ai-hook-list">
                           {aiPipelineHooks.map((hook) => {
@@ -845,6 +879,36 @@ export function TargetSection({ data, updateField, mode = 'create' }: TargetSect
                               </div>
                             )
                           })}
+                          {jevOnlyHooks.map((hook) => (
+                            <div
+                              key={hook.field}
+                              className={`${aiStyles.hookCard} ${data[hook.field] ? aiStyles.hookCardOn : ''}`}
+                              data-testid={`ai-hook-${hook.field}`}
+                            >
+                              <div className={aiStyles.hookHead}>
+                                <div className={aiStyles.hookText}>
+                                  <AiToggleLabel label={hook.label} tooltip={hook.description} />
+                                  <span className={aiStyles.hookSummary}>{hook.summary}</span>
+                                </div>
+                                <span
+                                  className={aiStyles.shadowChip}
+                                  title="Shadow mode: Jev answers and is recorded, and the scan runs as it does without AI."
+                                >
+                                  Shadow
+                                </span>
+                              </div>
+                              <div className={aiStyles.hookEngine}>
+                                <span className={aiStyles.engineLabel}>Jev only</span>
+                                <JevEngineControl
+                                  variant="jevOnly"
+                                  value={data[hook.field]}
+                                  enabled={data.aiInPipeline}
+                                  jevStatus={jevStatus}
+                                  onSelect={(on) => updateField(hook.field, on)}
+                                />
+                              </div>
+                            </div>
+                          ))}
                         </div>
                       )
                     })()}

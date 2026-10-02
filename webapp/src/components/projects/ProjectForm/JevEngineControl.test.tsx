@@ -132,3 +132,48 @@ describe('AI in Pipeline off', () => {
     expect(jev).toHaveAttribute('title', expect.stringContaining('AI in Pipeline'))
   })
 })
+
+describe('the Jev-only variant (Off | Jev)', () => {
+  function mountJevOnly(over: Partial<{ value: boolean; enabled: boolean; jevStatus: JevProviderStatus }> = {}) {
+    const onSelect = vi.fn()
+    render(<JevEngineControl variant="jevOnly" value={false} enabled jevStatus="yes" onSelect={onSelect} {...over} />)
+    return {
+      onSelect,
+      off: screen.getByRole('button', { name: 'Off' }),
+      jev: screen.getByRole('button', { name: 'Jev' }),
+    }
+  }
+
+  test('offers Off instead of LLM, and says what Off means', () => {
+    const { off } = mountJevOnly()
+    expect(screen.queryByRole('button', { name: 'LLM' })).not.toBeInTheDocument()
+    expect(off).toHaveAttribute('title', 'Leave this hook off: the step runs without AI.')
+    expect(screen.getByRole('group')).toHaveAttribute('aria-label', 'Jev hook')
+  })
+
+  test('Jev cannot be chosen without a token, same rule as the engine switch', () => {
+    const { jev } = mountJevOnly({ jevStatus: 'no' })
+    expect(jev).toBeDisabled()
+    expect(jev).toHaveAttribute('title', expect.stringMatching(/Settings → LLM Providers/))
+  })
+
+  test('a stored true without a token stays on, with the badge, and can be switched off', () => {
+    const { off, onSelect } = mountJevOnly({ value: true, jevStatus: 'no' })
+    expect(screen.getByText(BADGE)).toBeInTheDocument()
+    fireEvent.click(off)
+    expect(onSelect).toHaveBeenCalledWith(false)
+  })
+
+  test('both buttons are disabled with AI in Pipeline off', () => {
+    const { off, jev } = mountJevOnly({ enabled: false })
+    expect(off).toBeDisabled()
+    expect(jev).toBeDisabled()
+  })
+
+  test('with a token, Jev switches the hook on', () => {
+    const { jev, onSelect } = mountJevOnly()
+    expect(jev).toHaveAttribute('title', 'Run this hook on TypeSafe Jev.')
+    fireEvent.click(jev)
+    expect(onSelect).toHaveBeenCalledWith(true)
+  })
+})

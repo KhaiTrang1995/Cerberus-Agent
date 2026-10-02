@@ -9,6 +9,9 @@ import { NodeInfoTooltip } from '../NodeInfoTooltip'
 import { TimeEstimate } from '../TimeEstimate'
 import { FileImportButton } from '../FileImportButton'
 import { RegistryFields } from '../RegistryFields'
+import { AiToggleLabel } from '../AiToggleLabel'
+import { JevEngineControl } from '../JevEngineControl'
+import { useHasJevProvider } from '@/hooks/useHasJevProvider'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -20,6 +23,7 @@ interface HttpxSectionProps {
 
 export function HttpxSection({ data, updateField, onRun }: HttpxSectionProps) {
   const [isOpen, setIsOpen] = useState(true)
+  const jevStatus = useHasJevProvider()
 
   return (
     <div className={`${styles.section} ${styles.formSkin}`}>
@@ -413,6 +417,32 @@ export function HttpxSection({ data, updateField, onRun }: HttpxSectionProps) {
               <Toggle
                 checked={data.httpxIncludeResponseHeaders}
                 onChange={(checked) => updateField('httpxIncludeResponseHeaders', checked)}
+              />
+            </div>
+          </div>
+
+          <div className={styles.subSection}>
+            <h3 className={styles.subSectionTitle}>Page Type (Jev)</h3>
+            <div className={styles.toggleRow} style={{ alignItems: 'center', gap: 'var(--space-2)' }}>
+              <AiToggleLabel
+                label="Label page types with Jev (shadow)"
+                tooltip={
+                  'Labels each probed URL as an app, a login wall, a parked domain, a default install ' +
+                  'page, a placeholder or an error page. A deterministic pre-filter places the easy ' +
+                  'pages; Jev is asked about the rest, and an unsure answer is "app". Reads the ' +
+                  'response body when Include Response Body is on, else the title and size. Shadow ' +
+                  'mode: the labels are logged and kept in the recon output; nothing reaches the ' +
+                  'graph yet. Same switch as in the Target tab AI panel. ' +
+                  (!data.aiInPipeline ? 'Enable "AI in Pipeline" in the Target tab to use this.' : '')
+                }
+              />
+              <JevEngineControl
+                variant="jevOnly"
+                value={data.httpxJevPageType}
+                enabled={data.aiInPipeline}
+                jevStatus={jevStatus}
+                disabledHint='Enable "AI in Pipeline" in the Target tab to turn this on.'
+                onSelect={(on) => updateField('httpxJevPageType', on)}
               />
             </div>
           </div>

@@ -494,6 +494,26 @@ export function FfufSection({ data, updateField, projectId, mode, onRun }: FfufS
                     <span className={styles.fieldHint}>
                       The full wordlist runs under each one, per target. A random sample is taken when crawlers find more
                     </span>
+                    <div className={styles.toggleRow} style={{ marginTop: 'var(--space-2)', alignItems: 'center', gap: 'var(--space-2)' }}>
+                      <AiToggleLabel
+                        label="Rank directories with Jev (shadow)"
+                        tooltip={
+                          'When crawlers find more base directories than the cap, Jev is asked per ' +
+                          'directory whether it is likely to hold sensitive, administrative or application ' +
+                          'content. Shadow mode: Jev\'s pick is logged and kept in the recon output, and the ' +
+                          'random pick is still fuzzed. Same switch as in the Target tab AI panel. ' +
+                          (!data.aiInPipeline ? 'Enable "AI in Pipeline" in the Target tab to use this.' : '')
+                        }
+                      />
+                      <JevEngineControl
+                        variant="jevOnly"
+                        value={data.ffufJevBasePaths}
+                        enabled={data.aiInPipeline}
+                        jevStatus={jevStatus}
+                        disabledHint='Enable "AI in Pipeline" in the Target tab to turn this on.'
+                        onSelect={(on) => updateField('ffufJevBasePaths', on)}
+                      />
+                    </div>
                   </div>
                 )}
                 <div className={styles.toggleRow}>

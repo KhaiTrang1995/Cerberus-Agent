@@ -15,7 +15,8 @@ vi.mock('@/lib/prisma', () => ({
 }))
 
 import {
-  JEV_ENGINE_FIELDS, JEV_VERIFY_FAILED, jevImportWarnings, jevSwitchedOn, validateJevEngineChange,
+  JEV_ENGINE_FIELDS, JEV_HOOK_LABEL, JEV_VERIFY_FAILED, jevImportWarnings, jevSwitchedOn,
+  validateJevEngineChange,
 } from './jevEngine'
 
 beforeEach(() => {
@@ -44,9 +45,22 @@ describe('jevSwitchedOn', () => {
       .toEqual(['wafAiUseJev', 'takeoverAiUseJev'])
   })
 
-  test('only the four engine fields count', () => {
+  test('only the per-hook Jev fields count', () => {
     expect(jevSwitchedOn(null, { nucleiAiResponseFilter: true, ffufAiExtensions: true })).toEqual([])
-    expect(JEV_ENGINE_FIELDS).toHaveLength(4)
+    expect(JEV_ENGINE_FIELDS).toHaveLength(8)
+  })
+
+  test('a Jev-only hook turned on is a switch-on, like an engine switch', () => {
+    expect(jevSwitchedOn(null, {
+      ffufJevBasePaths: true, httpxJevPageType: true, resourceEnumJevToolHealth: true,
+      hakrawlerJevSeedOrder: true,
+    })).toEqual(['ffufJevBasePaths', 'httpxJevPageType', 'resourceEnumJevToolHealth', 'hakrawlerJevSeedOrder'])
+  })
+
+  test('every Jev field has a label for the refusal message', () => {
+    for (const field of JEV_ENGINE_FIELDS) {
+      expect(JEV_HOOK_LABEL[field], field).toBeTruthy()
+    }
   })
 
   test('a truthy non-boolean is not a switch-on', () => {
@@ -78,6 +92,13 @@ describe('validateJevEngineChange', () => {
     expect(error).toContain('ffufAiUseJev')
     expect(error).toContain('wafAiUseJev')
     expect(error).toContain('FFuf extensions')
+    expect(error).toContain('Settings → LLM Providers')
+  })
+
+  test('turning a Jev-only hook on without a token is refused the same way', async () => {
+    const error = await validateJevEngineChange(
+      { httpxJevPageType: false }, { httpxJevPageType: true }, 'owner')
+    expect(error).toContain('httpxJevPageType (page-type labels)')
     expect(error).toContain('Settings → LLM Providers')
   })
 

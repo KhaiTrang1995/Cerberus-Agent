@@ -1,11 +1,19 @@
 import prisma from '@/lib/prisma'
 
-/** The four per-hook engine flags. `true` runs the hook on TypeSafe Jev. */
+/**
+ * Every per-hook Jev field. The first four are engine switches on an LLM hook
+ * (`true` answers it with Jev instead of the LLM); the rest switch on a Jev-only
+ * hook that has no LLM twin. Either way `true` needs the owner's Jev token.
+ */
 export const JEV_ENGINE_FIELDS = [
   'ffufAiUseJev',
   'nucleiTagsAiUseJev',
   'wafAiUseJev',
   'takeoverAiUseJev',
+  'ffufJevBasePaths',
+  'httpxJevPageType',
+  'resourceEnumJevToolHealth',
+  'hakrawlerJevSeedOrder',
 ] as const
 
 export type JevEngineField = typeof JEV_ENGINE_FIELDS[number]
@@ -15,6 +23,10 @@ export const JEV_HOOK_LABEL: Record<JevEngineField, string> = {
   nucleiTagsAiUseJev: 'Nuclei tag selection',
   wafAiUseJev: 'WAF classification',
   takeoverAiUseJev: 'takeover disambiguation',
+  ffufJevBasePaths: 'FFuf base-path ranking',
+  httpxJevPageType: 'page-type labels',
+  resourceEnumJevToolHealth: 'silent tool-failure check',
+  hakrawlerJevSeedOrder: 'Hakrawler seed order',
 }
 
 export const JEV_VERIFY_FAILED = "Couldn't verify your Jev token, try again."
@@ -27,8 +39,8 @@ export function jevSwitchedOn(before: Row, next: Row): JevEngineField[] {
 }
 
 /**
- * Refuses a write that switches a hook onto Jev when the project owner has no
- * Jev token. Returns the error message, or null when the write may proceed.
+ * Refuses a write that switches a hook onto Jev (an engine switch to Jev, or a
+ * Jev-only hook turned on) when the project owner has no Jev token. Returns the error message, or null when the write may proceed.
  *
  * It refuses only a SWITCH-ON, never "any true value": the project form sends
  * every field on every save, so a rule over "any true" would block every save of
@@ -63,7 +75,7 @@ export async function validateJevEngineChange(
   if (tokens > 0) return null
 
   const named = on.map(k => `${k} (${JEV_HOOK_LABEL[k]})`).join(', ')
-  return `Can't switch to the Jev engine for ${named}: the project owner has no TypeSafe AI (Jev) token. Add one in Settings → LLM Providers.`
+  return `Can't use Jev for ${named}: the project owner has no TypeSafe AI (Jev) token. Add one in Settings → LLM Providers.`
 }
 
 /**
@@ -83,12 +95,12 @@ export async function jevImportWarnings(row: Row, importerUserId: string | null 
     tokens = await prisma.userLlmProvider.count({ where: { userId: importerUserId, providerType: 'jev' } })
   } catch {
     return [
-      `${on.map(k => JEV_HOOK_LABEL[k]).join(', ')}: set to the Jev engine, and your Jev token could not be ` +
+      `${on.map(k => JEV_HOOK_LABEL[k]).join(', ')}: set to use Jev, and your Jev token could not be ` +
       'checked. A hook with no token uses its static fallback.',
     ]
   }
   if (tokens > 0) return []
   return on.map(k =>
-    `${k} (${JEV_HOOK_LABEL[k]}) is set to the Jev engine, but your account has no TypeSafe AI (Jev) token: ` +
+    `${k} (${JEV_HOOK_LABEL[k]}) is set to use Jev, but your account has no TypeSafe AI (Jev) token: ` +
     'this hook uses its static fallback until you add one in Settings → LLM Providers.')
 }

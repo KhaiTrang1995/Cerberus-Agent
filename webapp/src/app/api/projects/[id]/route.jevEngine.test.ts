@@ -132,3 +132,19 @@ describe('PUT: a stored Jev choice is never a reason to refuse a save', () => {
     expect(mockTokenCount).not.toHaveBeenCalled()
   })
 })
+
+describe('PUT: turning on a Jev-only hook', () => {
+  test('without a token it is refused with 400 and nothing is written', async () => {
+    const res = await put({ name: 'p', httpxJevPageType: true })
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toContain('httpxJevPageType (page-type labels)')
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+
+  test('with a token on the owner\'s account it is written', async () => {
+    mockTokenCount.mockResolvedValue(1)
+    const res = await put({ name: 'p', resourceEnumJevToolHealth: true })
+    expect(res.status).toBe(200)
+    expect(mockUpdate.mock.calls[0][0].data.resourceEnumJevToolHealth).toBe(true)
+  })
+})

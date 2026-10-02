@@ -6,6 +6,9 @@ import { Toggle, WikiInfoButton } from '@/components/ui'
 import type { Project } from '@prisma/client'
 import styles from '../ProjectForm.module.css'
 import { NodeInfoTooltip } from '../NodeInfoTooltip'
+import { AiToggleLabel } from '../AiToggleLabel'
+import { JevEngineControl } from '../JevEngineControl'
+import { useHasJevProvider } from '@/hooks/useHasJevProvider'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -18,6 +21,7 @@ interface ResourceEnumAiSectionProps {
 export function ResourceEnumAiSection({ data, updateField, onRun }: ResourceEnumAiSectionProps) {
   const [isOpen, setIsOpen] = useState(true)
   const masterOn = data.resourceEnumAiClassifierEnabled ?? true
+  const jevStatus = useHasJevProvider()
 
   return (
     <div className={`${styles.section} ${styles.formSkin}`}>
@@ -119,6 +123,35 @@ export function ResourceEnumAiSection({ data, updateField, onRun }: ResourceEnum
               </div>
             </div>
           )}
+
+          {/* Not part of the classifier above, so outside its master toggle. */}
+          <div className={styles.subSection}>
+            <h3 className={styles.subSectionTitle}>Tool Health (Jev)</h3>
+            <p className={styles.fieldHint}>
+              Every empty result from a crawler or collector is checked from its exit code and error output, and one that looks like a failure is recorded as a coverage gap. That check always runs.
+            </p>
+            <div className={styles.toggleRow} style={{ alignItems: 'center', gap: 'var(--space-2)' }}>
+              <AiToggleLabel
+                label="Read unexplained tool errors with Jev (shadow)"
+                tooltip={
+                  'When an empty result\'s error output fits neither a routine line nor a known ' +
+                  'failure, Jev is asked whether it describes a transient failure a second run could ' +
+                  'fix. At most 20 questions per run, with header values redacted. Shadow mode: the ' +
+                  'verdict is logged and kept in the recon output, and nothing is retried. Same switch ' +
+                  'as in the Target tab AI panel. ' +
+                  (!data.aiInPipeline ? 'Enable "AI in Pipeline" in the Target tab to use this.' : '')
+                }
+              />
+              <JevEngineControl
+                variant="jevOnly"
+                value={data.resourceEnumJevToolHealth}
+                enabled={data.aiInPipeline}
+                jevStatus={jevStatus}
+                disabledHint='Enable "AI in Pipeline" in the Target tab to turn this on.'
+                onSelect={(on) => updateField('resourceEnumJevToolHealth', on)}
+              />
+            </div>
+          </div>
         </div>
       )}
     </div>

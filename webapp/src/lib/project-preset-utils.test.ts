@@ -328,6 +328,10 @@ describe('applyPresetSettings', () => {
     nucleiTagsAiUseJev: true,
     wafAiUseJev: true,
     takeoverAiUseJev: true,
+    ffufJevBasePaths: true,
+    httpxJevPageType: true,
+    resourceEnumJevToolHealth: true,
+    hakrawlerJevSeedOrder: true,
     naabuEnabled: false,
     katanaDepth: 9,
     sqliLevel: 5,
@@ -407,6 +411,20 @@ describe('applyPresetSettings', () => {
     expect(next.nucleiTagsAiUseJev).toBe(true)
     expect(next.wafAiUseJev).toBe(true)
     expect(next.takeoverAiUseJev).toBe(true)
+  })
+
+  test('keeps the Jev-only hook flags when a preset does not name them', () => {
+    // Same reason as the engine flags: they need the owner's Jev token.
+    const next = applyPresetSettings(current, {}, { naabuEnabled: true })
+    expect(next.ffufJevBasePaths).toBe(true)
+    expect(next.httpxJevPageType).toBe(true)
+    expect(next.resourceEnumJevToolHealth).toBe(true)
+    expect(next.hakrawlerJevSeedOrder).toBe(true)
+  })
+
+  test('a preset that names a Jev-only flag still sets it', () => {
+    const next = applyPresetSettings(current, { httpxJevPageType: false }, {})
+    expect(next.httpxJevPageType).toBe(false)
   })
 
   test('applies the LLM models when the preset names them', () => {

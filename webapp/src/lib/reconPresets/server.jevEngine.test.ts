@@ -99,3 +99,20 @@ describe('validateApplication: no switch-on, no lookup', () => {
     expect(mockTokenCount).not.toHaveBeenCalled()
   })
 })
+
+describe('validateApplication: a preset that turns on a Jev-only hook', () => {
+  test('without a token it is refused, naming the field', async () => {
+    const current = row()
+    const application = { data: { ...current, httpxJevPageType: true }, changed: ['httpxJevPageType'] }
+    const problem = await validateApplication(application, current, 'p1', 'actor')
+    expect(problem).not.toBeNull()
+    expect(problem!.error).toContain('httpxJevPageType')
+  })
+
+  test('with a token it is accepted', async () => {
+    mockTokenCount.mockResolvedValue(1)
+    const current = row()
+    const application = { data: { ...current, hakrawlerJevSeedOrder: true }, changed: ['hakrawlerJevSeedOrder'] }
+    expect(await validateApplication(application, current, 'p1', 'actor')).toBeNull()
+  })
+})

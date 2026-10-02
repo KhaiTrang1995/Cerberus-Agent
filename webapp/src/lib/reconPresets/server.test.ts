@@ -247,7 +247,8 @@ describe('computePresetApplication is the form\'s preset load', () => {
     expect(app.resetToDefault).not.toContain('naabuEnabled')
     expect(app.keptAsIs).toEqual([
       'agentOpenaiModel', 'aiPipelineModel',
-      'ffufAiUseJev', 'nucleiTagsAiUseJev', 'takeoverAiUseJev', 'wafAiUseJev',
+      'ffufAiUseJev', 'ffufJevBasePaths', 'hakrawlerJevSeedOrder', 'httpxJevPageType',
+      'nucleiTagsAiUseJev', 'resourceEnumJevToolHealth', 'takeoverAiUseJev', 'wafAiUseJev',
     ])
     expect(app.data.agentOpenaiModel).toBe('mine')
     expect(app.unchangedCount).toBe(PRESET_FIELD_KEYS.length - app.changed.length)

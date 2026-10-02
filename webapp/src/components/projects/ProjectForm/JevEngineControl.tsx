@@ -14,17 +14,26 @@ interface JevEngineControlProps {
   jevStatus: JevProviderStatus
   /** Why the control is disabled when `enabled` is false. Defaults to the master switch. */
   disabledHint?: string
+  /**
+   * `engine` (default): LLM | Jev on an LLM hook. `jevOnly`: Off | Jev on a hook
+   * that has no LLM twin, where false means the step runs without AI.
+   */
+  variant?: 'engine' | 'jevOnly'
 }
 
 /**
- * The LLM | Jev engine switch under a recon AI hook.
+ * The LLM | Jev engine switch under a recon AI hook, or the Off | Jev switch of
+ * a Jev-only hook (`variant="jevOnly"`). Both follow the same rules.
  *
  * It never auto-resets a stored `true`: a project whose owner lost the token
  * keeps the choice (the hook falls back to its static list at scan time), and a
  * badge says so. Switching a disabled-but-selected Jev back to LLM is allowed.
  * The server (validateJevEngineChange) is the authority on a switch-on.
  */
-export function JevEngineControl({ value, onSelect, enabled, jevStatus, disabledHint }: JevEngineControlProps) {
+export function JevEngineControl({
+  value, onSelect, enabled, jevStatus, disabledHint, variant = 'engine',
+}: JevEngineControlProps) {
+  const jevOnly = variant === 'jevOnly'
   const noToken = jevStatus === 'no'
   const loading = jevStatus === 'loading'
   const error = jevStatus === 'error'
@@ -38,20 +47,24 @@ export function JevEngineControl({ value, onSelect, enabled, jevStatus, disabled
     ? 'Checking whether you have a Jev token…'
     : noToken
     ? 'No TypeSafe Jev token on your account. Add one in Settings → LLM Providers.'
+    : jevOnly
+    ? 'Run this hook on TypeSafe Jev.'
     : 'Answer this hook with TypeSafe Jev instead of the LLM.'
 
   return (
     <div className={styles.wrap}>
-      <div className={styles.segmented} role="group" aria-label="AI engine">
+      <div className={styles.segmented} role="group" aria-label={jevOnly ? 'Jev hook' : 'AI engine'}>
         <button
           type="button"
           className={`${styles.option} ${!value ? styles.active : ''}`}
           aria-pressed={!value}
           disabled={!enabled}
-          title={!enabled ? jevTitle : 'Answer this hook with the LLM in the AI Model picker.'}
+          title={!enabled ? jevTitle
+            : jevOnly ? 'Leave this hook off: the step runs without AI.'
+            : 'Answer this hook with the LLM in the AI Model picker.'}
           onClick={() => onSelect(false)}
         >
-          LLM
+          {jevOnly ? 'Off' : 'LLM'}
         </button>
         <button
           type="button"

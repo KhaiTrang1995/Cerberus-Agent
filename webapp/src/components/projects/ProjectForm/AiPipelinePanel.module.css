@@ -241,3 +241,14 @@
   color: var(--text-tertiary);
   text-align: right;
 }
+
+/* A Jev-only hook in shadow mode: it answers and is recorded, nothing acts on it. */
+.shadowChip {
+  flex-shrink: 0;
+  padding: 1px var(--space-2);
+  font-size: 10px;
+  font-weight: var(--font-medium);
+  border-radius: 999px;
+  color: var(--text-tertiary);
+  border: 1px dashed var(--border-default);
+}

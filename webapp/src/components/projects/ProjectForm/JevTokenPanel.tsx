@@ -48,7 +48,8 @@ export function JevTokenPanel({ userId }: { userId: string | null }) {
         <>
           <p className={styles.tokenIntro}>
             Optional. Lets the FFuf, Nuclei, WAF and takeover hooks run on Jev instead of
-            the LLM. Saved to your account, like in Global Settings.
+            the LLM, and turns on the Jev-only hooks below. Saved to your account, like in
+            Global Settings.
           </p>
           <LlmProviderForm
             userId={userId}

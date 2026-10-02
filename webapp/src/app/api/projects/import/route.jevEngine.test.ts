@@ -87,3 +87,14 @@ describe('importing a bundle whose hooks run on Jev', () => {
     expect(h.tokenCount).not.toHaveBeenCalled()
   })
 })
+
+describe('importing a bundle with a Jev-only hook on', () => {
+  test('the flag is kept and named in a warning when the importer has no token', async () => {
+    const res = await POST(await bundle({ hakrawlerJevSeedOrder: true }))
+    expect(res.status).toBe(200)
+    expect(h.createProject.mock.calls[0][0].data.hakrawlerJevSeedOrder).toBe(true)
+    const { warnings } = await res.json()
+    expect(warnings).toHaveLength(1)
+    expect(warnings[0]).toContain('hakrawlerJevSeedOrder (Hakrawler seed order)')
+  })
+})

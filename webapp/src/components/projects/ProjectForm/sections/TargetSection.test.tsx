@@ -202,11 +202,13 @@ describe('the wildcard Root control', () => {
 
 describe('the AI in Pipeline panel', () => {
   const HOOKS = ['ffufAiExtensions', 'nucleiAiTags', 'wafAiClassifier', 'nucleiAiResponseFilter', 'takeoverAiClassifier']
+  const JEV_ONLY = ['httpxJevPageType', 'ffufJevBasePaths', 'hakrawlerJevSeedOrder', 'resourceEnumJevToolHealth']
   const AI_ON: Data = {
     domainBatchMode: false, aiInPipeline: true,
     ffufAiExtensions: true, nucleiAiTags: false, wafAiClassifier: true, nucleiAiResponseFilter: true,
     takeoverAiClassifier: true,
     ffufAiUseJev: false, nucleiTagsAiUseJev: false, wafAiUseJev: true, takeoverAiUseJev: false,
+    ffufJevBasePaths: false, httpxJevPageType: true, resourceEnumJevToolHealth: false, hakrawlerJevSeedOrder: false,
   }
 
   beforeEach(() => {
@@ -231,7 +233,42 @@ describe('the AI in Pipeline panel', () => {
       expect(within(card).getByRole('switch')).toBeInTheDocument()
       expect(within(card).getByText('Engine')).toBeInTheDocument()
     }
-    expect(screen.getByTestId('ai-hook-list').children).toHaveLength(HOOKS.length)
+    expect(screen.getByTestId('ai-hook-list').children).toHaveLength(HOOKS.length + JEV_ONLY.length)
+  })
+
+  test('a Jev-only hook is one card with an Off | Jev control, no hook toggle, and a shadow chip', () => {
+    renderSection(AI_ON)
+    for (const field of JEV_ONLY) {
+      const card = screen.getByTestId(`ai-hook-${field}`)
+      expect(within(card).queryByRole('switch')).not.toBeInTheDocument()
+      expect(within(card).getByText('Jev only')).toBeInTheDocument()
+      expect(within(card).getByRole('button', { name: 'Off' })).toBeInTheDocument()
+      expect(within(card).getByText('Shadow')).toHaveAttribute('title', expect.stringMatching(/recorded/))
+    }
+  })
+
+  test('a Jev-only card writes its own field, and the stored value is shown', async () => {
+    const s = renderSection(AI_ON)
+    const card = screen.getByTestId('ai-hook-hakrawlerJevSeedOrder')
+    const jev = within(card).getByRole('button', { name: 'Jev' })
+    await waitFor(() => expect(jev).toBeEnabled())
+    fireEvent.click(jev)
+    expect(s.updateField).toHaveBeenCalledWith('hakrawlerJevSeedOrder', true)
+    const pageType = screen.getByTestId('ai-hook-httpxJevPageType')
+    expect(within(pageType).getByRole('button', { name: 'Jev' })).toHaveAttribute('aria-pressed', 'true')
+    fireEvent.click(within(pageType).getByRole('button', { name: 'Off' }))
+    expect(s.updateField).toHaveBeenCalledWith('httpxJevPageType', false)
+  })
+
+  test('the master switch never sets or resets a Jev-only flag', () => {
+    const s = renderSection({ ...AI_ON, aiInPipeline: false })
+    // The nearest ancestor of the master label that holds a switch is its row.
+    let row: HTMLElement | null = screen.getByText('Enable AI in Pipeline').parentElement
+    while (row && within(row).queryAllByRole('switch').length === 0) row = row.parentElement
+    fireEvent.click(within(row!).getAllByRole('switch')[0])
+    const written = s.updateField.mock.calls.map((c: unknown[]) => c[0])
+    expect(written).toContain('aiInPipeline')
+    for (const field of JEV_ONLY) expect(written).not.toContain(field)
   })
 
   test('the false-positive filter offers no Jev engine, and says why', () => {

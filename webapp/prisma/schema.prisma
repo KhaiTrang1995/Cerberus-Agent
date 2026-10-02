@@ -618,6 +618,7 @@ model Project {
   httpxProbeHash              String   @default("sha256") @map("httpx_probe_hash")
   httpxIncludeResponse        Boolean  @default(true) @map("httpx_include_response")
   httpxIncludeResponseHeaders Boolean  @default(true) @map("httpx_include_response_headers")
+  httpxJevPageType            Boolean  @default(false) @map("httpx_jev_page_type")
   httpxProbeAsn               Boolean  @default(true) @map("httpx_probe_asn")
   httpxProbeCdn               Boolean  @default(true) @map("httpx_probe_cdn")
   httpxPaths                  String[] @default([]) @map("httpx_paths")
@@ -770,6 +771,7 @@ model Project {
   resourceEnumAiRagPathFlagEnabled        Boolean @default(true) @map("resource_enum_ai_rag_path_flag_enabled")
   resourceEnumAiParamInjectableFlagEnabled Boolean @default(true) @map("resource_enum_ai_param_injectable_flag_enabled")
   resourceEnumAiToolArgPathEnabled        Boolean @default(true) @map("resource_enum_ai_tool_arg_path_enabled")
+  resourceEnumJevToolHealth               Boolean @default(false) @map("resource_enum_jev_tool_health")
 
   // ========== AI SURFACE RECON (central module) ==========
   aiSurfaceReconEnabled                   Boolean @default(true) @map("ai_surface_recon_enabled")
@@ -835,6 +837,7 @@ model Project {
   hakrawlerInsecure           Boolean  @default(true) @map("hakrawler_insecure")
   hakrawlerCustomHeaders      String[] @default([]) @map("hakrawler_custom_headers")
   hakrawlerParallelism        Int      @default(5) @map("hakrawler_parallelism")
+  hakrawlerJevSeedOrder       Boolean  @default(false) @map("hakrawler_jev_seed_order")
 
   // ========== JSLUICE JS ANALYZER ==========
   jsluiceEnabled              Boolean  @default(true) @map("jsluice_enabled")
@@ -943,6 +946,7 @@ model Project {
   ffufParallelism             Int      @default(20) @map("ffuf_parallelism")
   ffufAiExtensions            Boolean  @default(false) @map("ffuf_ai_extensions")
   ffufAiUseJev                Boolean  @default(false) @map("ffuf_ai_use_jev")
+  ffufJevBasePaths            Boolean  @default(false) @map("ffuf_jev_base_paths")
 
   // ========== ARJUN PARAMETER DISCOVERY ==========
   arjunEnabled                Boolean  @default(true) @map("arjun_enabled")

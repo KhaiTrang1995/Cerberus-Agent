@@ -8,6 +8,9 @@ import styles from '../ProjectForm.module.css'
 import { NodeInfoTooltip } from '../NodeInfoTooltip'
 import { FileImportButton } from '../FileImportButton'
 import { RegistryFields } from '../RegistryFields'
+import { AiToggleLabel } from '../AiToggleLabel'
+import { JevEngineControl } from '../JevEngineControl'
+import { useHasJevProvider } from '@/hooks/useHasJevProvider'
 
 type FormData = Omit<Project, 'id' | 'userId' | 'createdAt' | 'updatedAt' | 'user'>
 
@@ -19,6 +22,7 @@ interface HakrawlerSectionProps {
 
 export function HakrawlerSection({ data, updateField, onRun }: HakrawlerSectionProps) {
   const [isOpen, setIsOpen] = useState(true)
+  const jevStatus = useHasJevProvider()
 
   return (
     <div className={`${styles.section} ${styles.formSkin}`}>
@@ -149,6 +153,28 @@ export function HakrawlerSection({ data, updateField, onRun }: HakrawlerSectionP
                   <Toggle
                     checked={data.hakrawlerInsecure}
                     onChange={(checked) => updateField('hakrawlerInsecure', checked)}
+                  />
+                </div>
+                <div className={styles.toggleRow} style={{ alignItems: 'center', gap: 'var(--space-2)' }}>
+                  <AiToggleLabel
+                    label="Order seeds with Jev (shadow)"
+                    tooltip={
+                      'Hakrawler crawls its seeds in list order and stops at Max URLs, so under a tight ' +
+                      'cap late-alphabet hosts are never crawled. Jev is asked, per probed host, whether ' +
+                      'it has a rich web application surface. Ordering only, never a dropped seed; ' +
+                      'partial recon keeps the alphabetical order. Shadow mode: the order is logged and ' +
+                      'kept in the recon output, and the alphabetical list is still crawled. Same switch ' +
+                      'as in the Target tab AI panel. ' +
+                      (!data.aiInPipeline ? 'Enable "AI in Pipeline" in the Target tab to use this.' : '')
+                    }
+                  />
+                  <JevEngineControl
+                    variant="jevOnly"
+                    value={data.hakrawlerJevSeedOrder}
+                    enabled={data.aiInPipeline}
+                    jevStatus={jevStatus}
+                    disabledHint='Enable "AI in Pipeline" in the Target tab to turn this on.'
+                    onSelect={(on) => updateField('hakrawlerJevSeedOrder', on)}
                   />
                 </div>
               </div>

@@ -111,3 +111,18 @@ describe('update_recon_settings: a stored Jev choice is not a reason to refuse',
     expect(h.updateManyProjects.mock.calls[0][0].data).toEqual({ wafAiUseJev: false })
   })
 })
+
+describe('update_recon_settings: turning on a Jev-only hook', () => {
+  test.each(['ffufJevBasePaths', 'httpxJevPageType', 'resourceEnumJevToolHealth', 'hakrawlerJevSeedOrder'])(
+    '%s without a token is refused and nothing is written', async (field) => {
+      await expect(updateReconSettings(ctx(), 'p1', { [field]: true }))
+        .rejects.toThrow(new RegExp(`${field}.*no TypeSafe AI \\(Jev\\) token`, 's'))
+      expect(h.updateManyProjects).not.toHaveBeenCalled()
+    })
+
+  test('with a token it is written', async () => {
+    h.tokenCount.mockResolvedValue(1)
+    await updateReconSettings(ctx(), 'p1', { ffufJevBasePaths: true })
+    expect(h.updateManyProjects.mock.calls[0][0].data).toEqual({ ffufJevBasePaths: true })
+  })
+})

@@ -54,8 +54,9 @@ beforeEach(() => {
   mockTokenCount.mockResolvedValue(0)
 })
 
-describe('the generated client knows the four engine columns', () => {
-  test.each(['ffufAiUseJev', 'nucleiTagsAiUseJev', 'wafAiUseJev', 'takeoverAiUseJev'])(
+describe('the generated client knows every Jev column', () => {
+  test.each(['ffufAiUseJev', 'nucleiTagsAiUseJev', 'wafAiUseJev', 'takeoverAiUseJev',
+    'ffufJevBasePaths', 'httpxJevPageType', 'resourceEnumJevToolHealth', 'hakrawlerJevSeedOrder'])(
     '%s is a Project scalar', name => {
       expect(Object.values(Prisma.ProjectScalarFieldEnum)).toContain(name)
     })
@@ -87,6 +88,25 @@ describe('POST: a new project asking for the Jev engine', () => {
   test('the form sends every engine flag as false: that is not a switch-on and needs no token', async () => {
     const res = await POST(postReq({
       ...base, ffufAiUseJev: false, nucleiTagsAiUseJev: false, wafAiUseJev: false, takeoverAiUseJev: false,
+    }))
+    expect(res.status).toBeLessThan(400)
+    expect(mockTokenCount).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST: a new project turning on a Jev-only hook', () => {
+  test.each(['ffufJevBasePaths', 'httpxJevPageType', 'resourceEnumJevToolHealth', 'hakrawlerJevSeedOrder'])(
+    '%s without a token is refused and no project is created', async (field) => {
+      const res = await POST(postReq({ ...base, [field]: true }))
+      expect(res.status).toBe(400)
+      expect((await res.json()).error).toContain(field)
+      expect(mockProjectCreate).not.toHaveBeenCalled()
+    })
+
+  test('the form sends every Jev-only flag as false: no switch-on, no lookup', async () => {
+    const res = await POST(postReq({
+      ...base, ffufJevBasePaths: false, httpxJevPageType: false, resourceEnumJevToolHealth: false,
+      hakrawlerJevSeedOrder: false,
     }))
     expect(res.status).toBeLessThan(400)
     expect(mockTokenCount).not.toHaveBeenCalled()

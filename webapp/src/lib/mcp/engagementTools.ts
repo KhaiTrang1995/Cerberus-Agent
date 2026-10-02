@@ -524,24 +524,33 @@ function resolveRates(row: Record<string, unknown>, ceiling: number | null): Res
 
 const ALLOWED_IMAGE_SUFFIX = 'DockerImage'
 
-/** The four recon AI hooks that have an LLM | Jev engine switch. */
+/**
+ * The recon hooks that can run on Jev. An `engine` hook is an LLM hook with an
+ * LLM | Jev switch: false means the LLM. An `enable` hook is Jev-only: false
+ * means the hook is off and the step runs without AI.
+ */
 const AI_HOOKS = [
-  { hook: 'ffuf_extensions', engineField: 'ffufAiUseJev' },
-  { hook: 'nuclei_tags', engineField: 'nucleiTagsAiUseJev' },
-  { hook: 'waf_classification', engineField: 'wafAiUseJev' },
-  { hook: 'takeover_disambiguation', engineField: 'takeoverAiUseJev' },
+  { hook: 'ffuf_extensions', engineField: 'ffufAiUseJev', kind: 'engine' },
+  { hook: 'nuclei_tags', engineField: 'nucleiTagsAiUseJev', kind: 'engine' },
+  { hook: 'waf_classification', engineField: 'wafAiUseJev', kind: 'engine' },
+  { hook: 'takeover_disambiguation', engineField: 'takeoverAiUseJev', kind: 'engine' },
+  { hook: 'ffuf_base_paths', engineField: 'ffufJevBasePaths', kind: 'enable' },
+  { hook: 'page_type', engineField: 'httpxJevPageType', kind: 'enable' },
+  { hook: 'tool_health', engineField: 'resourceEnumJevToolHealth', kind: 'enable' },
+  { hook: 'crawl_seed_order', engineField: 'hakrawlerJevSeedOrder', kind: 'enable' },
 ] as const
 
 /**
  * Which engine each AI hook will actually use at the next scan.
  *
  * `aiInPipeline` forces every per-hook AI flag to its own value at scan start
- * and never touches the engine fields, so with it off every hook is off, and
- * with it on the engine field alone decides. A hook on Jev runs only if the
- * project owner has a Jev token; otherwise it uses its static fallback, which
- * is what this reports. Over MCP the token's user IS the owner (a mismatch is
- * a hard deny), so the owner's rows are counted with it. The token itself is
- * never read: a count is all this needs, and the secret has no business here.
+ * and never touches the Jev fields, so with it off every hook is off, and with
+ * it on the Jev field alone decides: an engine hook is on the LLM or on Jev, an
+ * enable hook is off or on Jev. A hook on Jev runs only if the project owner has
+ * a Jev token; otherwise it uses its static fallback, which is what this
+ * reports. Over MCP the token's user IS the owner (a mismatch is a hard deny),
+ * so the owner's rows are counted with it. The token itself is never read: a
+ * count is all this needs, and the secret has no business here.
  */
 async function resolveAiHooks(row: Record<string, unknown>, ownerUserId: string) {
   const aiOn = row.aiInPipeline === true
@@ -558,15 +567,16 @@ async function resolveAiHooks(row: Record<string, unknown>, ownerUserId: string)
     }
   }
 
-  return AI_HOOKS.map(({ hook, engineField }) => {
-    const engine = row[engineField] === true ? 'jev' : 'llm'
+  return AI_HOOKS.map(({ hook, engineField, kind }) => {
+    const onJev = row[engineField] === true
+    const engine = onJev ? 'jev' : kind === 'engine' ? 'llm' : 'off'
     let effective: string
     if (!aiOn) effective = 'off'
-    else if (engine === 'llm') effective = 'llm'
+    else if (!onJev) effective = engine
     else if (ownerHasToken === true) effective = 'jev'
     else if (ownerHasToken === false) effective = 'jev → static fallback (no Jev token on the owner\'s account)'
     else effective = 'jev (could not check the owner\'s Jev token)'
-    return { hook, engine, effective }
+    return { hook, kind, engine, effective }
   })
 }
 
