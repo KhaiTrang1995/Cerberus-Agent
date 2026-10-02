@@ -110,11 +110,11 @@ def _hostnames_by_ip(combined_result: dict) -> dict:
     return out
 
 
-def _cert_names_a_sibling(submitted: str, cert_names: list, siblings) -> bool:
-    """True when the cert names another hostname that resolves to the same IP."""
+def _siblings_the_cert_names(submitted: str, cert_names: list, siblings) -> list:
+    """The OTHER hostnames resolving to the same IP that the cert is valid for, sorted."""
     submitted = (submitted or "").strip().lower().rstrip(".")
-    return any(name and name != submitted and _host_matches_cert(name, cert_names)
-               for name in (siblings or ()))
+    return sorted(name for name in (siblings or ())
+                  if name and name != submitted and _host_matches_cert(name, cert_names))
 
 
 def build_tlsx_command(targets_file: str, targets_dir: str, settings: dict) -> list:
@@ -239,8 +239,9 @@ def _build_tlsx_targets(combined_result: dict, settings: dict):
 def _parse_tlsx_output(stdout: str, meta: dict, ip_hostnames: dict | None = None) -> dict:
     """Parse tlsx JSONL into by_target keyed on the scanned ip:port.
 
-    ``ip_hostnames`` ({ip: {hostname}}, from ``_hostnames_by_ip``) lets the
-    mismatch verdict see the other names that share the scanned IP.
+    ``ip_hostnames`` ({ip: {hostname}}, from ``_hostnames_by_ip``) lets a
+    mismatch record which other names sharing the scanned IP the cert is valid
+    for (``mismatch_cert_covers_siblings``).
     """
     by_target = {}
     now = datetime.now(timezone.utc)
@@ -286,20 +287,23 @@ def _parse_tlsx_output(stdout: str, meta: dict, ip_hostnames: dict | None = None
             bool(subject_dn) and subject_dn == issuer_dn)
         # host mismatch: only meaningful when we submitted a hostname.
         submitted_is_host = bool(submitted) and submitted != scanned_ip
+        covers_siblings = []
         if submitted_is_host:
             names = ([subject_cn] if subject_cn else []) + raw_san
             derived = not _host_matches_cert(submitted, names) if probe_status else False
             mismatched = bool(row.get("mismatched")) or derived
             # The SNI is the alphabetically first of the IP's names
-            # (TLSX_MAX_HOSTNAMES_PER_IP defaults to 1), an arbitrary pick. A
-            # mail/LDAP service on a shared IP serves one cert for the name
-            # clients actually use; when that cert names another of the IP's
-            # hostnames the service is correctly configured for one of its
-            # names, a mismatch nobody would hit. A cert naming none of them is
-            # still reported.
-            if derived and _cert_names_a_sibling(
-                    submitted, names, (ip_hostnames or {}).get(scanned_ip)):
-                mismatched = False
+            # (TLSX_MAX_HOSTNAMES_PER_IP defaults to 1), an arbitrary pick, so a
+            # service whose one cert names a sibling on the IP looks mismatched
+            # for the name tlsx happened to dial. That is still what a client
+            # asking for that name gets, so the verdict is never cleared:
+            # clearing it would also hide a frontend serving another site's
+            # cert, and this entry replaces httpx's verdict for the same
+            # host:port in _iter_cert_targets. The covered siblings are
+            # recorded instead, for the finding to weigh.
+            if derived:
+                covers_siblings = _siblings_the_cert_names(
+                    submitted, names, (ip_hostnames or {}).get(scanned_ip))
         else:
             # H5: tlsx compares the cert against whatever it dialled, so on a
             # bare IP it reports mismatched=true for EVERY correctly configured
@@ -335,6 +339,8 @@ def _parse_tlsx_output(stdout: str, meta: dict, ip_hostnames: dict | None = None
             # recon. Advisory only -- it never renames the Service.
             "tls_service_hint": _TLS_SERVICE_HINTS.get(port),
         }
+        if covers_siblings:
+            entry["mismatch_cert_covers_siblings"] = covers_siblings
         # One ip:port can be probed under SEVERAL hostnames when
         # TLSX_MAX_HOSTNAMES_PER_IP > 1, and a vhost frontend legitimately
         # presents a DIFFERENT certificate per SNI. Overwriting on the shared

@@ -6,8 +6,10 @@ service serves the one cert for the name clients use (mail.<root>), so the cert
 "did not name" the alphabetically-first sibling and a medium
 tls_hostname_mismatch was raised for a host nobody connects to that way.
 
-A cert naming ANOTHER hostname of the same IP is now not a mismatch. A cert
-naming none of the IP's hostnames still is, and IP mode is unchanged.
+A cert naming ANOTHER hostname of the same IP is still a mismatch (it is what a
+client asking for the tested name gets), reported at "low" with the sibling
+names it covers. A cert naming none of the IP's hostnames stays medium, and IP
+mode is unchanged.
 
 The second half pins the Certificate node: one cert observed on several
 targets used to carry whichever target's verdict tlsx printed last.
@@ -71,7 +73,7 @@ def _mismatch_findings(combined):
 # --------------------------------------------------------------------------- #
 # The bug path
 # --------------------------------------------------------------------------- #
-def test_cert_for_a_sibling_name_on_the_same_ip_is_not_a_mismatch():
+def test_cert_for_a_sibling_name_on_the_same_ip_is_a_low_mismatch():
     combined = _combined(["alpha.example.test", "mail.example.test"])
     # The SNI pick stays deterministic: the alphabetically first name.
     lines, _ = tls_scan._build_tlsx_targets(combined, {})
@@ -81,16 +83,19 @@ def test_cert_for_a_sibling_name_on_the_same_ip_is_not_a_mismatch():
                                   ["mail.example.test"], tlsx_mismatched=True)])
     entry = out["tlsx"]["by_target"][f"{_IP}:993"]
     assert entry["host"] == "alpha.example.test"
-    assert entry["mismatched"] is False
-    assert out["tlsx"]["summary"]["mismatched"] == 0
-    assert _mismatch_findings(out) == []
+    assert entry["mismatched"] is True
+    assert entry["mismatch_cert_covers_siblings"] == ["mail.example.test"]
+    assert out["tlsx"]["summary"]["mismatched"] == 1
+    assert [f["severity"] for f in _mismatch_findings(out)] == ["low"]
 
 
-def test_wildcard_cert_covering_a_sibling_is_not_a_mismatch():
+def test_wildcard_cert_covering_a_sibling_is_a_low_mismatch():
     combined = _combined(["alpha.example.test", "imap.mail.example.test"])
     out, _ = _run(combined, [_row("alpha.example.test", "*.mail.example.test",
                                   ["*.mail.example.test"])])
-    assert out["tlsx"]["by_target"][f"{_IP}:993"]["mismatched"] is False
+    entry = out["tlsx"]["by_target"][f"{_IP}:993"]
+    assert entry["mismatched"] is True
+    assert entry["mismatch_cert_covers_siblings"] == ["imap.mail.example.test"]
 
 
 # --------------------------------------------------------------------------- #

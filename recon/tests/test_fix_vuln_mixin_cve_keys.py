@@ -78,6 +78,25 @@ def test_attach_decision(key, node_name, attach):
         (key, product, node_name)
 
 
+@pytest.mark.parametrize("key,node_name,attach", [
+    # nmap's multi-word product names, reached by another detector's key
+    ("openresty/1.19.3.1", "OpenResty web app server/1.19.3.1", True),
+    ("OpenResty:1.19.3.1", "OpenResty web app server/1.19.3.1", True),
+    ("Elasticsearch:7.10.2", "Elasticsearch REST API/7.10.2", True),
+    ("Golang:1.16", "Golang net/http server", True),
+    ("Samba:4.6.2", "Samba smbd/4.6.2", True),
+    # still another product
+    ("Django:3.2.4", "Django REST framework", False),
+    ("Node.js:14.17.0", "Node.js Express framework", False),
+    ("PHP/8.1.2", "phpMyAdmin", False),
+    ("Apache/2.4.49", "Apache Tomcat", False),
+])
+def test_regression_nmap_multiword_product_names_unlinked(key, node_name, attach):
+    product = _product(key)
+    assert tech_matches_cve_product(node_name, product, _clean(key), key) is attach, \
+        (key, product, node_name)
+
+
 def test_products_are_what_the_lookup_emits():
     # Guards the table above against a normalisation change it assumes.
     assert _product("Apache/2.4.49") == "apache"

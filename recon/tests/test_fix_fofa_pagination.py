@@ -2,10 +2,11 @@
 
 `_fofa_query` sent no `page` and each mode made one call with
 size = min(100, FOFA_MAX_RESULTS), so FOFA_MAX_RESULTS above 100 (the default
-is 1000, the UI allows 10000) was silently ignored. Pages are now walked until
-max_results, a short page, or FOFA's reported total; a failing page keeps what
-was already fetched. With max_results <= 100, or a short first page, exactly
-one request with today's params is made.
+is 1000, the UI allows 10000) was silently ignored. Domain mode now walks pages
+until max_results, a short page, or FOFA's reported total; a failing page keeps
+what was already fetched. With max_results <= 100, or a short first page,
+exactly one request with today's params is made. IP mode stays one request per
+IP (see test_regression_fofa_ip_mode_budget.py).
 
 requests.get is mocked throughout; nothing reaches fofa.info.
 """
@@ -150,7 +151,7 @@ def test_every_page_carries_the_key():
 # --------------------------------------------------------------------------- #
 # IP mode
 # --------------------------------------------------------------------------- #
-def test_ip_mode_pages_each_ip_with_the_same_bounds():
+def test_ip_mode_is_one_unpaged_request_per_ip():
     def get(url, params=None, timeout=None):
         ip = base64.b64decode(params["qbase64"]).decode().split('"')[1]
         return _fofa(total_rows=230 if ip == "192.88.98.10" else 12)(url, params=params,
@@ -162,8 +163,8 @@ def test_ip_mode_pages_each_ip_with_the_same_bounds():
     for c in mock_get.call_args_list:
         ip = base64.b64decode(c.kwargs["params"]["qbase64"]).decode().split('"')[1]
         by_ip.setdefault(ip, []).append(c.kwargs["params"].get("page"))
-    assert by_ip == {"192.88.98.10": [None, 2, 3], "192.88.98.11": [None]}
-    assert len(out["results"]) == 242
+    assert by_ip == {"192.88.98.10": [None], "192.88.98.11": [None]}
+    assert len(out["results"]) == 112
 
 
 def test_ip_mode_at_most_100_is_one_request_per_ip():

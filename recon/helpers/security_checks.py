@@ -1266,6 +1266,7 @@ def _iter_cert_targets(recon_data: Dict[str, Any]):
             "tls_version": e.get("tls_version"), "cipher": e.get("cipher"),
             "version_enum": e.get("version_enum") or [],
             "cipher_enum": e.get("cipher_enum") or [],
+            "covers_siblings": e.get("mismatch_cert_covers_siblings") or [],
             "source": "tlsx",
         }
 
@@ -1401,7 +1402,9 @@ def run_tls_data_checks(recon_data: Dict[str, Any], enabled_checks: Dict[str, bo
     findings: List[Dict] = []
 
     for host, ip, port, c in _iter_cert_targets(recon_data):
-        url = f"https://{host}:{port}" if host else None
+        # tlsx reports a bare IPv6 address as the host when it had no name, and
+        # unbracketed the writer reads the URL's host as "2001".
+        url = f"https://{_url_host(host)}:{port}" if host else None
         is_ip = _looks_like_ip(str(host))
         hostname = host if host and not is_ip else None
 
@@ -1429,9 +1432,22 @@ def run_tls_data_checks(recon_data: Dict[str, Any], enabled_checks: Dict[str, bo
         # httpx-sourced verdict is derived from the URL's host, so an
         # IP-addressed URL mismatches every certificate that names a hostname.
         if enabled_checks.get("tls_hostname_mismatch", True) and c["mismatched"] and not is_ip:
-            _add("tls_hostname_mismatch", "medium", "TLS Certificate Hostname Mismatch",
-                 f"The certificate on {target_desc}:{port} does not name the host it was served for.",
-                 f"subject_cn={c['subject_cn']} san={c['san']}")
+            siblings = c.get("covers_siblings") or []
+            if siblings:
+                # tlsx tests one of the IP's names, an arbitrary pick: a cert
+                # valid for a sibling is most likely the service's real name,
+                # and the tested one may be a name no client uses for it.
+                shown = ", ".join(siblings)
+                _add("tls_hostname_mismatch", "low", "TLS Certificate Hostname Mismatch",
+                     f"The certificate on {target_desc}:{port} does not name the host it was "
+                     f"served for, but it is valid for {shown} on the same IP. {target_desc} "
+                     "is one of several names that share this address; verify which name "
+                     "clients use to reach this service.",
+                     f"subject_cn={c['subject_cn']} san={c['san']} valid_for_same_ip={shown}")
+            else:
+                _add("tls_hostname_mismatch", "medium", "TLS Certificate Hostname Mismatch",
+                     f"The certificate on {target_desc}:{port} does not name the host it was served for.",
+                     f"subject_cn={c['subject_cn']} san={c['san']}")
 
         version = (c["tls_version"] or "").lower()
         if enabled_checks.get("tls_weak_version", True) and version in WEAK_TLS_VERSIONS:

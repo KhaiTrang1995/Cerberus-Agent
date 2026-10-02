@@ -503,5 +503,141 @@ class TestPredicateTable(unittest.TestCase):
                 self.assertIn(product, name.lower())
 
 
+# --------------------------------------------------------------------------- #
+# Review regressions
+# --------------------------------------------------------------------------- #
+class TestReviewRegressions(unittest.TestCase):
+    def test_regression_version_dotted_qualifier_unlinked(self):
+        # nmap's own node keeps the qualifier ("9.4.44.v20210927") while the
+        # CVE lookup's version is the numeric part ("9.4.44"): Try 1 misses on
+        # the exact version and the fallback rejected ".v...", so the CVE
+        # linked to nothing.
+        links = _tech_cves([
+            ("Jetty/9.4.44.v20210927", "jetty", "9.4.44", "CVE-2021-0101"),
+            ("Spring Framework/5.3.20.RELEASE", "spring framework", "5.3.20", "CVE-2022-0102"),
+            ("JBoss/7.1.1.Final", "jboss", "7.1.1", "CVE-2012-0103"),
+            ("Apache Tomcat/9.0.0.M26", "tomcat", "9.0.0", "CVE-2017-0104"),
+        ], [
+            {"name": "Jetty/9.4.44.v20210927", "version": "9.4.44.v20210927"},
+            {"name": "Spring Framework/5.3.20.RELEASE", "version": "5.3.20.RELEASE"},
+            {"name": "JBoss/7.1.1.Final", "version": "7.1.1.Final"},
+            {"name": "Apache Tomcat/9.0.0.M26", "version": "9.0.0.M26"},
+        ])
+        self.assertEqual(links, [
+            ("Apache Tomcat/9.0.0.M26", "9.0.0.M26"),
+            ("JBoss/7.1.1.Final", "7.1.1.Final"),
+            ("Jetty/9.4.44.v20210927", "9.4.44.v20210927"),
+            ("Spring Framework/5.3.20.RELEASE", "5.3.20.RELEASE"),
+        ])
+
+    def test_regression_version_dotted_qualifier_keeps_other_versions_apart(self):
+        from graph_db.mixins.recon.vuln_mixin import tech_version_regex
+        table = [
+            ("9.4.44", "9.4.44.v20210927", True), ("5.3.20", "5.3.20.RELEASE", True),
+            ("7.1.1", "7.1.1.Final", True), ("9.0.0", "9.0.0.M26", True),
+            ("8.2", "8.2p1", True), ("8.2", "8.2-1ubuntu", True), ("10", "10.0", True),
+            ("8.2", "8.20", False), ("8.2", "8.2.1", False), ("9.4.4", "9.4.44.v1", False),
+            ("9.4.44", "9.4.44.1.v1", False), ("8.2", "8.2.", False),
+        ]
+        wrong = [(v, node, want) for v, node, want in table
+                 if (re.fullmatch(tech_version_regex(v), node) is not None) is not want]
+        self.assertEqual(wrong, [])
+
+    def test_regression_nmap_multiword_product_names_unlinked(self):
+        links = _tech_cves([
+            ("openresty/1.19.3.1", "openresty", "1.19.3.1", "CVE-2021-0201"),
+            ("Elasticsearch:7.10.2", "elasticsearch", "7.10.2", "CVE-2021-0202"),
+            ("Golang:1.16", "golang", "1.16", "CVE-2021-0203"),
+            ("Samba:4.6.2", "samba", "4.6.2", "CVE-2017-0204"),
+        ], [
+            {"name": "OpenResty web app server/1.19.3.1", "version": "1.19.3.1"},
+            {"name": "Elasticsearch REST API/7.10.2", "version": "7.10.2"},
+            {"name": "Golang net/http server", "version": ""},
+            {"name": "Samba smbd/4.6.2", "version": "4.6.2"},
+        ])
+        self.assertEqual(links, [
+            ("Elasticsearch REST API/7.10.2", "7.10.2"),
+            ("Golang net/http server", ""),
+            ("OpenResty web app server/1.19.3.1", "1.19.3.1"),
+            ("Samba smbd/4.6.2", "4.6.2"),
+        ])
+
+    def test_regression_nmap_multiword_product_names_stay_product_exact(self):
+        table = [
+            ("OpenResty web app server/1.19.3.1", "openresty", True),
+            ("Elasticsearch REST API/7.10.2", "elasticsearch", True),
+            ("Golang net/http server", "golang", True), ("Samba smbd/4.6.2", "samba", True),
+            ("IBM WebSphere Application Server", "websphere", True),
+            ("WordPress REST API", "wordpress", True),
+            # The cross-product cases the whole-name rule exists for.
+            ("phpMyAdmin", "php", False), ("Django", "go", False), ("Preact", "react", False),
+            ("Apache Tomcat", "apache", False), ("jQuery UI", "jquery", False),
+            # Products of their own behind a generic word.
+            ("Django REST framework", "django", False),
+            ("Node.js Express framework", "node.js", False),
+        ]
+        wrong = [(name, product, want) for name, product, want in table
+                 if tech_matches_cve_product(name, product) is not want]
+        self.assertEqual(wrong, [])
+
+    def test_regression_port_findings_share_one_delta_key(self):
+        session = _security_findings([
+            _port_finding("admin_port_exposed", "198.51.100.1", 22),
+            _port_finding("admin_port_exposed", "198.51.100.2", 22),
+            _port_finding("redis_no_auth", "2001:db8::7", 6379, "Redis", "critical"),
+            {"type": "missing_coop", "severity": "info", "name": "n", "description": "d",
+             "url": "https://www.example.test", "hostname": "www.example.test"},
+        ])
+        props = session.vuln_props()
+        self.assertEqual([p["matched_at"] for p in props], [
+            "198.51.100.1:22", "198.51.100.2:22", "[2001:db8::7]:6379",
+            "https://www.example.test"])
+        # webapp/src/lib/reconDelta.ts: IDENTITY_KEYS.Vulnerability, empty values dropped.
+        delta_keys = {"|".join(str(p[k]) for k in ("template_id", "matched_at", "name")
+                               if p.get(k) not in (None, "")) for p in props}
+        self.assertEqual(len(delta_keys), 4)
+        # The id stays keyed as before, and a skipped host still protects it.
+        self.assertEqual(props[0]["id"],
+                         stable_vuln_id("admin_port_exposed", "", "198.51.100.1:22", U, P))
+        from graph_db.mixins.base_mixin import keep_host_patterns
+        for host, matched_at in (("198.51.100.1", "198.51.100.1:22"),
+                                 ("2001:db8::7", "[2001:db8::7]:6379")):
+            [rx] = keep_host_patterns([host])
+            self.assertIsNotNone(re.fullmatch(rx, matched_at), matched_at)
+
+    def test_regression_domain_link_counted_without_a_domain(self):
+        session = _Session(matched=0)
+        recon = {"domain": "example.test", "vuln_scan": {"security_checks": {"findings": [
+            {"type": "missing_coop", "severity": "info", "name": "n", "description": "d",
+             "url": "https://gone.example.test", "hostname": "gone.example.test"},
+            {"type": "hostname_only_check", "severity": "info", "name": "n", "description": "d",
+             "hostname": "gone.example.test"},
+        ]}}}
+        stats = _writer(session).update_graph_from_vuln_scan(recon, U, P)
+        self.assertEqual(stats["errors"], [])
+        self.assertEqual(stats["relationships_created"], 0)
+        self.assertEqual(len(session.links("d:Domain")), 2)
+
+    def test_domain_link_still_counted_when_the_domain_matches(self):
+        class _OnlyTheDomainExists(_Session):
+            def run(self, query, **params):
+                result = super().run(query, **params)
+                if "HAS_VULNERABILITY" in query:
+                    return _Result({"matched": int("MATCH (d:Domain " in query)})
+                return result
+
+        session = _OnlyTheDomainExists()
+        recon = {"domain": "example.test", "vuln_scan": {"security_checks": {"findings": [
+            {"type": "missing_coop", "severity": "info", "name": "n", "description": "d",
+             "url": "https://example.test", "hostname": "example.test"},
+            {"type": "hostname_only_check", "severity": "info", "name": "n", "description": "d",
+             "hostname": "example.test"},
+        ]}}}
+        stats = _writer(session).update_graph_from_vuln_scan(recon, U, P)
+        self.assertEqual(stats["errors"], [])
+        self.assertEqual(stats["relationships_created"], 2)
+        self.assertEqual(len(session.links("d:Domain")), 2)
+
+
 if __name__ == "__main__":
     unittest.main()

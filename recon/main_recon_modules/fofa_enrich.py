@@ -309,19 +309,15 @@ def run_fofa_enrichment(combined_result: dict, settings: dict[str, Any]) -> dict
                 rate_limiter.wait()
                 q = f'ip="{ip}"'
                 size = min(per_request_size, max_results)
-
-                def _admit_next_page():
-                    if not breaker.allow():
-                        return False
-                    rate_limiter.wait()
-                    return True
-
-                rows, t, answered = _fofa_fetch_pages(
-                    q, keys, size, max_results, admitted=True,
-                    before_next_page=_admit_next_page)
-                if not answered:
+                # One request per IP, never paged: max_results caps the
+                # combined list in completion order, so paging would let one
+                # shared-hosting IP spend the whole budget (in IPs x max/100
+                # requests) and crowd out the target's own IPs, differently
+                # every run.
+                res = _fofa_query(q, keys, size, admitted=True)
+                if not res.answered:
                     return None
-                return rows, t
+                return _parse_fofa_rows(res.data or {})
 
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = {

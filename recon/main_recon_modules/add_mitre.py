@@ -20,6 +20,7 @@ Enriches:
 
 import json
 import os
+import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -107,8 +108,12 @@ def _atomic_write_bytes(dest_path: Path, data: bytes) -> None:
     tracked in the host checkout that recon/ is bind-mounted from, and a
     root-owned copy left by the scan container is what redamon.sh warns blocks
     a future `git pull`.
+
+    The temp name is random, not the pid: every scan container is pid 1 and
+    shares this bind-mounted directory, so two concurrent scans would write the
+    same temp file and one could install the other's half-written copy.
     """
-    tmp = dest_path.with_name(f".{dest_path.name}.{os.getpid()}.tmp")
+    tmp = dest_path.with_name(f".{dest_path.name}.{uuid.uuid4().hex}.tmp")
     try:
         tmp.write_bytes(data)
         try:

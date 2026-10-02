@@ -65,11 +65,14 @@ _SECURITY_CHECK_EXTRA_FIELDS = (
 
 #: Words nmap and the fingerprinters put after a product name without making
 #: it another product: "Apache httpd", "Microsoft IIS httpd", "Apache HTTP
-#: Server", "Squid http proxy", "PostgreSQL DB", "Node.js Express framework".
+#: Server", "Squid http proxy", "PostgreSQL DB", "Node.js Express framework",
+#: "OpenResty web app server", "Elasticsearch REST API", "Golang net/http
+#: server", "Samba smbd". "rest" counts only as "rest api": "Django REST
+#: framework" is a product of its own, not Django.
 _TECH_DESCRIPTOR_WORDS = (
     "http", "https", "httpd", "server", "web", "webserver", "daemon", "smtpd",
-    "ftpd", "sshd", "imapd", "pop3d", "proxy", "accelerator", "framework",
-    "db", "database",
+    "ftpd", "sshd", "imapd", "pop3d", "smbd", "proxy", "accelerator", "framework",
+    "db", "database", "app", "application", r"rest[\s-]+api", "api", "net",
 )
 
 
@@ -97,11 +100,12 @@ def tech_name_regex(product: str) -> str:
 
 def tech_version_regex(version: str) -> str:
     """The regex a Technology.version must fully match to be `version` in another
-    spelling: "8.2p1" and "8.2-1ubuntu" are 8.2, "10.0" is 10; "8.20" and "8.2.1"
-    are not 8.2."""
+    spelling: "8.2p1", "8.2-1ubuntu" and nmap's dotted qualifiers
+    ("9.4.44.v20210927", "5.3.20.RELEASE", "7.1.1.Final") are the version before
+    them, "10.0" is 10; "8.20" and "8.2.1" are not 8.2."""
     v = re.sub(r"^[vV]", "", str(version or "").strip())
     v = re.sub(r"(?:\.0)+$", "", v) or v
-    return rf"[vV]?{re.escape(v)}(?:\.0)*(?:[^0-9.].*)?"
+    return rf"[vV]?{re.escape(v)}(?:\.0)*(?:[^0-9.].*|\.[^0-9].*)?"
 
 
 def tech_matches_cve_product(tech_name: str, product: str, *exact_names: str) -> bool:
@@ -1052,7 +1056,10 @@ class VulnMixin:
                         "name": name,
                         "description": description,
                         "url": url,
-                        "matched_at": url,
+                        # Recon Delta keys a Vulnerability on template_id/
+                        # matched_at/name; with no url, every IP's port finding
+                        # of a name would share one key without the ip:port.
+                        "matched_at": ip_port_key or url,
                         "is_dast_finding": False,
                     }
 
@@ -1150,16 +1157,18 @@ class VulnMixin:
                                     relationship_created = True
                                 else:
                                     # Try Domain
-                                    session.run(
+                                    result = session.run(
                                         """
                                         MATCH (d:Domain {name: $hostname, user_id: $user_id, project_id: $project_id})
                                         MATCH (v:Vulnerability {id: $vuln_id, user_id: $user_id, project_id: $project_id})
                                         MERGE (d)-[:HAS_VULNERABILITY]->(v)
+                                        RETURN count(*) as matched
                                         """,
                                         hostname=url_host, user_id=user_id, project_id=project_id, vuln_id=vuln_id
                                     )
-                                    stats["relationships_created"] += 1
-                                    relationship_created = True
+                                    if result.single()["matched"] > 0:
+                                        stats["relationships_created"] += 1
+                                        relationship_created = True
 
                     # For hostname-only findings (no URL): connect to Subdomain/Domain
                     elif hostname and not relationship_created:
@@ -1178,16 +1187,18 @@ class VulnMixin:
                             relationship_created = True
                         else:
                             # Try Domain node if not a subdomain
-                            session.run(
+                            result = session.run(
                                 """
                                 MATCH (d:Domain {name: $hostname, user_id: $user_id, project_id: $project_id})
                                 MATCH (v:Vulnerability {id: $vuln_id, user_id: $user_id, project_id: $project_id})
                                 MERGE (d)-[:HAS_VULNERABILITY]->(v)
+                                RETURN count(*) as matched
                                 """,
                                 hostname=hostname, user_id=user_id, project_id=project_id, vuln_id=vuln_id
                             )
-                            stats["relationships_created"] += 1
-                            relationship_created = True
+                            if result.single()["matched"] > 0:
+                                stats["relationships_created"] += 1
+                                relationship_created = True
 
                     # For IP-only findings (no URL, no hostname): connect to IP
                     elif matched_ip and not relationship_created:
