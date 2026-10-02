@@ -11,12 +11,13 @@ Three modes:
   3. Manual upload: analyze user-uploaded JS files
 """
 
-import os
+import atexit
 import re
 import json
 import time
 import shutil
 import hashlib
+import uuid
 import requests
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -965,8 +966,10 @@ def run_js_recon(combined_result: dict, settings: dict) -> dict:
         Updated combined_result
     """
     start_time = time.time()
-    pid = os.getpid()
-    work_dir = Path(f'/tmp/redamon/js_recon_{pid}')
+    # /tmp/redamon is shared by every concurrent scan, and the recon process is
+    # pid 1 in every container, so the directory is unique to this run: the
+    # supply-chain stage reads it (via 'work_dir' below) as this run's JS only.
+    work_dir = Path(f'/tmp/redamon/js_recon_{uuid.uuid4().hex[:12]}')
 
     global _JS_SCOPE
     from recon.helpers import circuit_breaker as _cb
@@ -1190,5 +1193,10 @@ def run_js_recon(combined_result: dict, settings: dict) -> dict:
                 shutil.rmtree(work_dir)
             except Exception:
                 pass
+        elif _keep_work_dir(settings) and not (settings or {}).get('JS_RECON_KEEP_WORK_DIR'):
+            # Only some callers run the supply-chain stage after us (IP mode and
+            # partial supply-chain do; domain mode and partial JS recon do not),
+            # so a dir kept for it goes when the process ends, whoever used it.
+            atexit.register(shutil.rmtree, str(work_dir), ignore_errors=True)
 
     return combined_result

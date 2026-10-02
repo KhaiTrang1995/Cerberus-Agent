@@ -81,10 +81,19 @@ echo -e "${GREEN}[+] Directories ready${NC}"
 RESOLVER_FILE="/app/recon/data/resolvers.txt"
 if [ ! -f "$RESOLVER_FILE" ] || [ $(find "$RESOLVER_FILE" -mtime +7 2>/dev/null | wc -l) -gt 0 ]; then
     echo -e "${YELLOW}[*][Puredns] Downloading fresh DNS resolvers...${NC}"
-    curl -sL https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt \
-        -o "$RESOLVER_FILE" 2>/dev/null && \
-        echo -e "${GREEN}[+][Puredns] Resolvers downloaded ($(wc -l < "$RESOLVER_FILE") entries)${NC}" || \
+    # Downloaded beside the list and moved over it only once it looks like one:
+    # -f refuses an HTTP error page, a cut transfer fails curl, and scans copy
+    # this file into the shared list, so it is never seen half-written.
+    RESOLVER_TMP="$(dirname "$RESOLVER_FILE")/.resolvers.txt.$$.tmp"
+    if curl -fsSL https://raw.githubusercontent.com/trickest/resolvers/main/resolvers.txt \
+            -o "$RESOLVER_TMP" 2>/dev/null \
+            && grep -qE '^[0-9]{1,3}(\.[0-9]{1,3}){3}$' "$RESOLVER_TMP" \
+            && mv -f "$RESOLVER_TMP" "$RESOLVER_FILE"; then
+        echo -e "${GREEN}[+][Puredns] Resolvers downloaded ($(wc -l < "$RESOLVER_FILE") entries)${NC}"
+    else
+        rm -f "$RESOLVER_TMP"
         echo -e "${RED}[!][Puredns] Failed to download resolvers${NC}"
+    fi
 else
     echo -e "${GREEN}[✓][Puredns] DNS resolvers up to date${NC}"
 fi

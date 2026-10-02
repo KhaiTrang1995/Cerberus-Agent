@@ -1177,6 +1177,8 @@ def run_ip_recon(target_ips: list, settings: dict) -> dict:
             combined_result["metadata"].setdefault("phase_errors", {})["nmap"] = str(e)
             _note_phase_error("nmap")
             save_recon_file(combined_result, output_file)
+    elif nmap_enabled:
+        _note_nmap_without_port_data(combined_result, settings)
 
     # =====================================================================
     # GROUP 3.6 — TLS certificate grab (tlsx), IP mode.
@@ -1808,6 +1810,8 @@ def run_domain_recon(target: str, bruteforce: bool = False,
             combined_result["metadata"].setdefault("phase_errors", {})["nmap"] = str(e)
             _note_phase_error("nmap")
             save_recon_file(combined_result, output_file)
+    elif nmap_enabled:
+        _note_nmap_without_port_data(combined_result, _settings)
 
     # =====================================================================
     # GROUP 3.6 — TLS certificate grab (tlsx)
@@ -2247,8 +2251,10 @@ def _prune_recon_findings():
 
     A degraded run never deletes what it did not re-check: a source whose
     coverage was cut is left out of the prune, and every finding on a host the
-    run skipped as unreachable is kept. If the run's coverage cannot be
-    established at all, nothing is pruned (fail closed).
+    run skipped as unreachable is kept. A host only one tool gave up on (an nmap
+    host timeout) keeps that tool's findings alone, since the others re-checked
+    it. If the run's coverage cannot be established at all, nothing is pruned
+    (fail closed).
     """
     if not UPDATE_GRAPH_DB or not _RUN_STARTED_AT:
         return
@@ -2268,13 +2274,21 @@ def _prune_recon_findings():
         print(f"[*][graph-db] Findings this run could not re-check are kept: "
               f"{len(cut)} source(s) cut ({', '.join(cut) or 'none'}), "
               f"findings on {len(keep_hosts)} unreachable host(s)")
+        for source, hosts in report.source_hosts:
+            print(f"[*][graph-db]   {len(hosts)} of those host(s) only for {source}")
+    # One prune per distinct keep set. With no per-source host every source
+    # shares one set, which is the single call a run has always made.
+    batches: dict = {}
+    for source in sources:
+        batches.setdefault(report.keep_hostnames(source), []).append(source)
     try:
         from graph_db import Neo4jClient
         with Neo4jClient() as graph_client:
             if graph_client.verify_connection():
-                graph_client.prune_unseen_findings(
-                    USER_ID, PROJECT_ID, sources, _RUN_STARTED_AT,
-                    keep_hosts=keep_hosts)
+                for keep, batch in batches.items():
+                    graph_client.prune_unseen_findings(
+                        USER_ID, PROJECT_ID, batch, _RUN_STARTED_AT,
+                        keep_hosts=keep)
     except Exception as e:
         # Never fail a completed scan over housekeeping: a finding that should
         # have been pruned is visible and wrong, which beats losing the run.
@@ -2299,16 +2313,44 @@ _PHASE_FINDING_SOURCES = {
 }
 
 
-def _note_phase_error(phase: str) -> None:
+def _note_phase_error(phase: str, reason: str = "the phase failed") -> None:
     """Record a crashed phase's finding sources as not re-checked. Never raises."""
     sources = _PHASE_FINDING_SOURCES.get(phase)
     if not sources:
         return
     try:
         from recon.helpers import circuit_breaker
-        circuit_breaker.note_degraded(phase, sources=sources, reason="the phase failed")
+        circuit_breaker.note_degraded(phase, sources=sources, reason=reason)
     except Exception:  # noqa: BLE001
         pass
+
+
+def _note_nmap_without_port_data(combined_result: dict, settings: dict) -> None:
+    """nmap is on and a port scan was meant to feed it, but none came back.
+
+    The port scan's isolated wrapper returns {} for a failure, a timeout and a
+    crash alike, so nmap is skipped without a word and the prune would read
+    "no nmap_nse finding this run" as "every one is gone". The port scan
+    itself writes no finding source (Port nodes are assets), so nmap_nse is
+    the only finding source its failure leaves unchecked. A port scan turned
+    off by configuration, or one with no target at all, is not a gap: nmap was
+    not meant to run, or had nothing to re-check.
+    """
+    if not settings.get('NMAP_ENABLED', True) or "port_scan" in combined_result:
+        return
+    if "port_scan" not in SCAN_MODULES or not (
+            settings.get('NAABU_ENABLED', True) or settings.get('MASSCAN_ENABLED', True)):
+        return
+    try:
+        from recon.helpers import extract_targets_from_recon
+        ips, hostnames, _ = extract_targets_from_recon(combined_result)
+        if not ips and not hostnames:
+            return
+    except Exception:  # noqa: BLE001 - unknown targets: keep the findings
+        pass
+    print("[!][Pipeline] The port scan returned no data - nmap skipped, "
+          "previous nmap NSE findings are kept")
+    _note_phase_error("nmap", reason="no port scan data")
 
 
 def _apply_node_filters():

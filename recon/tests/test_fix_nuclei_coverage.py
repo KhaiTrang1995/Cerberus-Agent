@@ -3,9 +3,10 @@
 C1 - when Docker or the templates are unavailable, only the Nuclei passes are
      skipped: the CVE lookup and the custom security checks still run, and the
      Nuclei sources are recorded as not re-checked, so the prune keeps their
-     findings. A Nuclei container that failed and wrote nothing parseable is
-     recorded the same way. A template UPDATE that times out over a volume
-     that already holds templates no longer stops the scan.
+     findings. A Nuclei container that exited non-zero for any reason but the
+     runtime cap is recorded the same way, whatever it wrote first. A template
+     UPDATE that times out is stopped, and Nuclei is skipped like an unavailable
+     one, since the volume may be half-written.
 C8 - the targets and JSONL files live in a directory unique to the run, so two
      concurrent scans sharing the /tmp/redamon bind mount never touch each
      other's files.
@@ -185,11 +186,11 @@ class TestNucleiExitCode:
         self._pass(monkeypatch, tmp_path, 0, jsonl="")
         assert not cb.coverage_report().degraded
 
-    def test_a_non_zero_exit_that_still_wrote_findings_is_not_a_failure(self, monkeypatch, tmp_path):
+    def test_a_non_zero_exit_that_still_wrote_findings_keeps_the_rest(self, monkeypatch, tmp_path):
         line = '{"template-id":"x","matched-at":"https://a.test","info":{"severity":"low"}}\n'
         findings, _, _, _ = self._pass(monkeypatch, tmp_path, 1, jsonl=line)
         assert len(findings) == 1
-        assert not cb.coverage_report().degraded
+        assert {"nuclei", "vuln_scan"} <= cb.coverage_report().degraded_sources
 
 
 class TestTemplateUpdateTimeout:
@@ -202,6 +203,8 @@ class TestTemplateUpdateTimeout:
             if cmd[:3] == ["docker", "volume", "inspect"]:
                 return subprocess.CompletedProcess(cmd, 0 if volume_exists else 1, "", "")
             if cmd[:3] == ["docker", "volume", "create"]:
+                return subprocess.CompletedProcess(cmd, 0, "", "")
+            if cmd[:2] == ["docker", "kill"]:
                 return subprocess.CompletedProcess(cmd, 0, "", "")
             if "alpine" in cmd:
                 if count_raises:
@@ -217,10 +220,11 @@ class TestTemplateUpdateTimeout:
         return docker_helpers.ensure_templates_volume("projectdiscovery/nuclei:latest",
                                                       auto_update=True), commands
 
-    def test_an_update_timeout_over_existing_templates_still_scans(self, monkeypatch):
+    def test_an_update_timeout_over_existing_templates_skips_nuclei(self, monkeypatch):
         ok, commands = self._run(monkeypatch, volume_exists=True, update_raises=True)
-        assert ok is True
+        assert ok is False
         assert any("-ut" in c for c in commands)
+        assert any(c[:2] == ["docker", "kill"] for c in commands)
 
     def test_a_first_download_that_times_out_has_no_templates(self, monkeypatch):
         ok, _ = self._run(monkeypatch, volume_exists=False, update_raises=True)

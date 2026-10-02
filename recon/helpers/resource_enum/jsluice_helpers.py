@@ -6,7 +6,6 @@ jsluice is compiled into the recon container (no Docker image needed).
 """
 
 import json
-import os
 import shutil
 import ssl
 import subprocess

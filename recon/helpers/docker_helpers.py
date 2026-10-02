@@ -7,6 +7,7 @@ Utilities for Docker container operations, image management, and file permission
 import os
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 # Volume name for persistent nuclei templates
@@ -34,6 +35,15 @@ def is_docker_running() -> bool:
         return result.returncode == 0
     except Exception:
         return False
+
+
+def _kill_container(name: str) -> None:
+    """`docker kill` a named container. Never raises."""
+    try:
+        subprocess.run(["docker", "kill", name],
+                       capture_output=True, text=True, timeout=15, check=False)
+    except Exception as e:  # noqa: BLE001
+        print(f"[!][Docker] failed to kill {name}: {type(e).__name__}")
 
 
 def get_real_user_ids() -> tuple:
@@ -156,9 +166,13 @@ def ensure_templates_volume(docker_image: str, auto_update: bool = False) -> boo
             print(f"[*][Docker] Checking for template updates...")
         
         if needs_download or auto_update:
+            # Named so a timed-out update can be stopped: the timeout kills only
+            # the docker CLI, and the container would go on rewriting the volume
+            # the scan is about to read.
+            updater = f"redamon-nuclei-update-{uuid.uuid4().hex[:12]}"
             try:
                 update_result = subprocess.run(
-                    ["docker", "run", "--rm",
+                    ["docker", "run", "--rm", "--name", updater,
                      "-v", f"{NUCLEI_TEMPLATES_VOLUME}:/root/nuclei-templates",
                      docker_image,
                      "-ut"],  # Update templates
@@ -167,12 +181,13 @@ def ensure_templates_volume(docker_image: str, auto_update: bool = False) -> boo
                     timeout=600  # 10 minutes for initial download
                 )
             except subprocess.TimeoutExpired:
-                if needs_download:
-                    raise
-                # The volume already holds templates: scan with those, as a
-                # failed (non-zero) update below already does.
-                print("[!][Docker] Template update timed out - using the templates already in the volume")
-                return True
+                _kill_container(updater)
+                # Stopped mid-write, the volume can hold half-updated templates
+                # that fail to load, so Nuclei is skipped (its findings kept)
+                # rather than run on them.
+                print("[!][Docker] Template update timed out - stopped it; the templates "
+                      "may be half-written, so Nuclei is skipped this run")
+                return False
             
             if update_result.returncode != 0:
                 print(f"[!][Docker] Warning: Template update may have issues")

@@ -237,12 +237,19 @@ def _execute_nuclei_pass(cmd: list, output_file: str, label: str,
                 except json.JSONDecodeError:
                     continue
 
-    # Nuclei exits 0 whether or not it matched anything; a non-zero exit is a
-    # docker error (125-127), a kill or a fatal nuclei error. With no output at
-    # all, nothing was scanned. A run truncated by the cap is recorded above.
-    if process.returncode != 0 and not parsed_lines and not truncated["hit"]:
-        print(f"[!][Nuclei] {label} pass failed (exit {process.returncode}) with no results "
-              f"- previous Nuclei findings are kept")
+    # Nuclei exits 0 whether or not it matched anything (no flag build_nuclei_command
+    # passes changes that); a non-zero exit is a docker error (125-127), a kill
+    # such as an OOM (137) or a fatal nuclei error. Whatever it wrote before
+    # stopping is still ingested, but the targets and templates it never reached
+    # were not re-checked, so their findings are kept. A run truncated by the
+    # cap is recorded above.
+    if process.returncode != 0 and not truncated["hit"]:
+        if parsed_lines:
+            print(f"[!][Nuclei] {label} pass stopped (exit {process.returncode}) after "
+                  f"{parsed_lines} result(s) - previous Nuclei findings are kept")
+        else:
+            print(f"[!][Nuclei] {label} pass failed (exit {process.returncode}) with no "
+                  f"results - previous Nuclei findings are kept")
         _keep_nuclei_findings(f"nuclei {label} pass exited {process.returncode}")
 
     return findings, false_positives, duration, process.returncode
@@ -480,7 +487,10 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
         if nuclei_unavailable:
             _keep_nuclei_findings(nuclei_unavailable)
 
-    if NUCLEI_ENABLED and not nuclei_unavailable:
+    # Cleared by the two checks below that leave the Nuclei passes nothing to
+    # run; the CVE lookup and the security checks after them still run.
+    run_nuclei = NUCLEI_ENABLED and not nuclei_unavailable
+    if run_nuclei:
         print(f"[*][Nuclei] Execution Mode: DOCKER ({NUCLEI_DOCKER_IMAGE})")
         nuclei_version = f"Docker: {NUCLEI_DOCKER_IMAGE}"
         template_count = 8000  # Approximate, Docker image includes templates
@@ -490,11 +500,16 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
 
         # Extract targets
         ips, hostnames, ip_to_hostnames = extract_targets_from_recon(recon_data)
-    
+
         if not hostnames and not ips:
+            # Not degraded: this run resolved no host at all, which every other
+            # scanner also takes as nothing left to re-check. Keeping Nuclei's
+            # findings here would make those of a target that stopped
+            # resolving permanent.
             print("[!][Nuclei] No targets found in recon data")
-            return recon_data
-    
+            run_nuclei = False
+
+    if run_nuclei:
         # Build target URLs using httpx/naabu data if available
         target_urls = build_target_urls(hostnames, ips, recon_data, scan_all_ips=NUCLEI_SCAN_ALL_IPS)
 
@@ -648,12 +663,16 @@ def run_vuln_scan(recon_data: dict, output_file: Path = None, settings: dict = N
             # If DAST has parameterized URLs we can still run the DAST pass --
             # DAST has its own template set and doesn't depend on tags.
             if not do_dast_pass:
-                return recon_data
+                # Nuclei is on but this configuration gives it no template to
+                # run, so none of its findings was re-checked: keep them.
+                _keep_nuclei_findings("no Nuclei templates selected")
+                run_nuclei = False
             # Mark detection as skipped; downstream merge handles empty findings.
             skip_detection_pass = True
         else:
             skip_detection_pass = False
 
+    if run_nuclei:
         nuclei_temp_dir.mkdir(parents=True, exist_ok=True)
 
         # Detection pass targets

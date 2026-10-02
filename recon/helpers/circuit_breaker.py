@@ -1234,24 +1234,27 @@ class ReportScope:
 
     def finish(self, module: str, *, sources: Iterable[str] = (), host_source: str = "",
                host_field: bool = True, payload: Optional[dict] = None,
-               log: bool = True) -> list[dict]:
+               log: bool = True, source_only_hosts: bool = False) -> list[dict]:
         """Print the module's DEGRADED summary, note it for the run, tag the payload.
 
         ``sources`` are the finding sources a breaker skip cuts at the source
         level (the prune leaves them alone). Host skips cut ``host_source`` for
         those hosts only - unless ``host_field`` is False (the module's findings
-        carry no host), in which case they cut it at the source level. The
-        payload gains ``degraded`` / ``unreachable_hosts`` only when something
-        was cut, so a clean run keeps today's shape. Never raises.
+        carry no host), in which case they cut it at the source level. With
+        ``source_only_hosts`` the hosts are cut for ``host_source`` alone (see
+        ``note_degraded``). The payload gains ``degraded`` /
+        ``unreachable_hosts`` only when something was cut, so a clean run keeps
+        today's shape. Never raises.
         """
         try:
             return self._finish(module, tuple(s for s in sources if s), host_source,
-                                host_field, payload, log)
+                                host_field, payload, log, source_only_hosts)
         except Exception:  # noqa: BLE001
             _mark_accumulator_broken()
             return []
 
-    def _finish(self, module, sources, host_source, host_field, payload, log) -> list[dict]:
+    def _finish(self, module, sources, host_source, host_field, payload, log,
+                source_only_hosts=False) -> list[dict]:
         entries = self.report()
         hosts = self.hosts()
         if log:
@@ -1277,7 +1280,8 @@ class ReportScope:
         if hosts:
             target_source = host_source or (sources[0] if sources else module)
             if host_field:
-                note_degraded(module, hosts=hosts, host_source=target_source)
+                note_degraded(module, hosts=hosts, host_source=target_source,
+                              source_only_hosts=source_only_hosts)
             else:
                 note_degraded(module, sources=(target_source,),
                               reason=f"{len(hosts)} unreachable host(s) skipped")
@@ -1306,12 +1310,25 @@ class CoverageUnknown(RuntimeError):
     """The accumulator faulted, so what this run covered cannot be established."""
 
 
+def _prune_hostnames(keys: Iterable[str]) -> tuple:
+    names = set()
+    for key in keys:
+        name = hostname_of(key)
+        if name and _HOST_CHARS.match(name):
+            names.add(name)
+    return tuple(sorted(names))
+
+
 @dataclass(frozen=True)
 class CoverageReport:
     degraded_sources: frozenset
+    # Every skipped host, whatever it was skipped for: the coverage record.
     skipped_hosts: tuple
     nuclei_truncated: bool
     gaps: tuple
+    # ((source, (host, ...)), ...): hosts only that source gave up on. Each is
+    # also in skipped_hosts; a host some note cut for every source is not here.
+    source_hosts: tuple = ()
 
     @property
     def degraded(self) -> bool:
@@ -1320,12 +1337,19 @@ class CoverageReport:
 
     def skipped_hostnames(self) -> tuple:
         """Hostnames (port stripped, lower-cased) safe to build a prune regex from."""
-        names = set()
-        for key in self.skipped_hosts:
-            name = hostname_of(key)
-            if name and _HOST_CHARS.match(name):
-                names.add(name)
-        return tuple(sorted(names))
+        return _prune_hostnames(self.skipped_hosts)
+
+    def keep_hostnames(self, source: str = "") -> tuple:
+        """The hostnames whose ``source`` findings the prune must keep.
+
+        Every host skipped for all sources, plus the hosts only ``source`` gave
+        up on. Another tool's per-source host is left out: ``source`` re-checked
+        it, so its stale findings there are pruned as on any other host.
+        """
+        scoped = dict(self.source_hosts)
+        others = {h for s, hosts in scoped.items() if s != source for h in hosts}
+        own = set(scoped.get(source, ()))
+        return _prune_hostnames(h for h in self.skipped_hosts if h in own or h not in others)
 
     def stored_skipped_hosts(self) -> list:
         return sorted(self.skipped_hosts)[:STORED_HOSTS_MAX]
@@ -1360,13 +1384,17 @@ def _norm_host(value: Any) -> str:
 
 def note_degraded(module: str, *, sources: Iterable[str] = (), hosts: Iterable[str] = (),
                   host_source: str = "", nuclei_truncated: bool = False, reason: str = "",
-                  entries: Iterable[dict] = ()) -> None:
+                  entries: Iterable[dict] = (), source_only_hosts: bool = False) -> None:
     """Record, for the run, what ``module`` could not check. Never raises.
 
     ``sources``: finding sources cut as a whole - the prune leaves every one of
     their findings alone. ``hosts`` (``host:port`` keys): cut for these hosts
-    only, recorded under ``host_source``. ``entries``: breaker report entries
-    of a module that writes no findings; recorded as gaps, no prune effect.
+    only, recorded under ``host_source``. By default an unreachable host is cut
+    for every source, since no tool could re-check it; ``source_only_hosts``
+    cuts them for ``host_source`` alone, for a host that answered the other
+    tools while this one gave up on it (an nmap host timeout). ``entries``:
+    breaker report entries of a module that writes no findings; recorded as
+    gaps, no prune effect.
     A fault here marks the accumulator broken, which makes the prune fail closed.
     """
     try:
@@ -1375,6 +1403,7 @@ def note_degraded(module: str, *, sources: Iterable[str] = (), hosts: Iterable[s
             "sources": sorted({_token(s) for s in sources if _token(s)}),
             "hosts": sorted({h for h in (_norm_host(x) for x in hosts) if h}),
             "host_source": _token(host_source) or _token(module) or "recon",
+            "source_only_hosts": bool(source_only_hosts),
             "nuclei_truncated": bool(nuclei_truncated),
             "reason": _detail(reason),
             "entries": [
@@ -1395,6 +1424,8 @@ def note_degraded(module: str, *, sources: Iterable[str] = (), hosts: Iterable[s
 def _aggregate(notes: list[dict]) -> CoverageReport:
     degraded_sources: set[str] = set()
     skipped_hosts: set[str] = set()
+    every_source_hosts: set[str] = set()
+    per_source_hosts: dict[str, set[str]] = {}
     truncated = False
     merged: dict[tuple[str, str], dict] = {}
 
@@ -1417,6 +1448,10 @@ def _aggregate(notes: list[dict]) -> CoverageReport:
             _gap(source, module, note["reason"] or "coverage cut")
         if note["hosts"]:
             skipped_hosts.update(note["hosts"])
+            if note.get("source_only_hosts"):
+                per_source_hosts.setdefault(note["host_source"], set()).update(note["hosts"])
+            else:
+                every_source_hosts.update(note["hosts"])
             _gap(note["host_source"], module, "unreachable host(s) skipped",
                  hosts=len(note["hosts"]))
         if not note["sources"]:
@@ -1424,8 +1459,11 @@ def _aggregate(notes: list[dict]) -> CoverageReport:
                 _gap(entry["source"], module, entry["reason"], skipped=entry["skipped"])
 
     gaps = tuple(sorted(merged.values(), key=lambda g: (g["source"], g["module"])))
+    source_hosts = tuple(sorted(
+        (source, tuple(sorted(hosts - every_source_hosts)))
+        for source, hosts in per_source_hosts.items() if hosts - every_source_hosts))
     return CoverageReport(frozenset(degraded_sources), tuple(sorted(skipped_hosts)),
-                          truncated, gaps)
+                          truncated, gaps, source_hosts)
 
 
 def coverage_report() -> CoverageReport:

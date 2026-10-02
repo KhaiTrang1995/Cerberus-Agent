@@ -92,13 +92,18 @@ def _keep_every_nse_finding(reason: str) -> None:
 
 
 def _keep_nse_findings_on(ips, payload: dict) -> None:
-    """Record IPs nmap did not scan to completion: their nmap_nse findings are kept."""
+    """Record IPs nmap did not scan to completion: their nmap_nse findings are kept.
+
+    Only nmap_nse's: the port scan found these IPs answering, and Nuclei and the
+    other tools re-checked them, so their stale findings there are still pruned.
+    """
     try:
         from recon.helpers import circuit_breaker
         nmap_scope = circuit_breaker.scope((), label="Nmap", unit="host(s)")
         for ip in sorted(ips):
             nmap_scope.note_host_skipped(ip)
-        nmap_scope.finish("nmap", host_source="nmap_nse", payload=payload)
+        nmap_scope.finish("nmap", host_source="nmap_nse", payload=payload,
+                          source_only_hosts=True)
     except Exception:  # noqa: BLE001
         pass
 
@@ -246,6 +251,14 @@ def build_nmap_command(target_ip: str, ports: str, output_file: str, settings: d
         if timeout_str.isdigit():
             timeout_str = f"{timeout_str}s"
         cmd.extend(["--host-timeout", timeout_str])
+
+    # Without -6 nmap skips an IPv6 target ("you have to use the -6 option"),
+    # still exits 0 and lists it status="skipped", so it was never scanned.
+    try:
+        if ipaddress.ip_address(str(target_ip).strip()).version == 6:
+            cmd.append("-6")
+    except ValueError:
+        pass
 
     # Target IP
     cmd.append(target_ip)
@@ -507,9 +520,14 @@ def run_nmap_scan(recon_data: dict, output_file: Path = None, settings: dict = N
         _keep_every_nse_finding("nmap binary not found")
         return recon_data
 
-    # Check that port_scan data exists
+    # No port_scan section means the port scan failed or never ran, so nothing
+    # was re-checked. One with no IPs is a port scan that found nothing open.
     port_scan = recon_data.get("port_scan", {})
-    if not port_scan or not port_scan.get("by_ip"):
+    if not port_scan:
+        print("[!][Nmap] No port_scan data found -- run port scanners first")
+        _keep_every_nse_finding("no port scan data")
+        return recon_data
+    if not port_scan.get("by_ip"):
         print("[!][Nmap] No port_scan data found -- run port scanners first")
         return recon_data
 
