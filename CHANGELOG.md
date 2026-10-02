@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Concurrent scans no longer lose crawler output.** The Docker broker could drop a tool's output stream mid-run, so Katana and Hakrawler found nothing while their containers exited cleanly.
 - **Findings a run did not re-check are no longer pruned:** jsluice secrets when their crawl fails, nmap and Nuclei findings on skipped or timed-out targets, unscanned or stopped GVM targets, and stopped, failed, partial or throttled TruffleHog and GitHub hunts.
 - **A Nuclei setup failure skips only Nuclei.** A template-update timeout or a missing Docker no longer skips the CVE lookup and the security checks.
 - **Stopping a GVM scan keeps its results.** A start is refused while a stop is in progress, and deleting a project leaves no GVM nodes behind.

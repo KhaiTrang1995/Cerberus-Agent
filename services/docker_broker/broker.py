@@ -605,11 +605,24 @@ async def _pipe(src: asyncio.StreamReader, dst: asyncio.StreamWriter):
             pass
 
 
+# Strong references to every running handler. The event loop holds tasks only
+# weakly and a StreamReaderProtocol holds its reader only by weakref, so once a
+# client half-closes an attach stream (`docker run` does it right after the 101,
+# before the container starts) nothing anchors the handler: a cyclic GC pass then
+# destroys it mid-stream ("Task was destroyed but it is pending!"), the attach
+# socket closes, and the tool's stdout/stderr is lost while `docker run` exits 0.
+# GC runs more often under load, so this hit concurrent scans: katana and
+# hakrawler reported 0 URLs as a genuine empty crawl.
+_IN_FLIGHT: set = set()
+
+
 async def handle_client(client_reader, client_writer):
     """Handle one Docker-API request. Connects to upstream LAZILY — only after a
     request is allowed — so a denied request never touches the real daemon at all
     (not even a connection)."""
     up_writer = None
+    me = asyncio.current_task()
+    _IN_FLIGHT.add(me)
     try:
         head, request_line, headers = await _read_headers(client_reader)
         if not request_line:
@@ -737,6 +750,7 @@ async def handle_client(client_reader, client_writer):
     except Exception as e:
         _log(f"error: {e}")
     finally:
+        _IN_FLIGHT.discard(me)
         for w in (client_writer, up_writer):
             if w is not None:
                 try:
