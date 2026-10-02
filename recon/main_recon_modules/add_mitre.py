@@ -18,6 +18,7 @@ Enriches:
 - gvm_scan output: scans[].unique_cves
 """
 
+import gzip
 import json
 import os
 import uuid
@@ -494,11 +495,71 @@ def download_capec_metadata(db_path: Path, settings: Optional[Dict] = None) -> b
 
 
 def download_cve_database_year(db_path: Path, year: int) -> bool:
-    """Download CVE database for a specific year."""
+    """Download CVE database for a specific year, stored as plain CVE-<year>.jsonl.
+
+    Upstream publishes each year gzipped (CVE-<year>.jsonl.gz) and no longer
+    serves the plain file, so the plain URL 404s for every year. The plain URL
+    stays as the fallback in case upstream serves it again.
+    """
     filename = f"CVE-{year}.jsonl"
-    url = f"{CVE2CAPEC_RAW_BASE}/database/{filename}"
     dest = db_path / "database" / filename
-    return download_file(url, dest)
+    gz_url = f"{CVE2CAPEC_RAW_BASE}/database/{filename}.gz"
+    try:
+        print(f"[*][MITRE] Downloading: {filename}.gz...", end=" ", flush=True)
+        response = requests.get(gz_url, timeout=60)
+        response.raise_for_status()
+        _atomic_write_bytes(dest, gzip.decompress(response.content))
+        print("OK")
+        return True
+    except Exception as e:
+        print(f"[!][MITRE] gzip copy unavailable ({e}), trying the plain file")
+    return download_file(f"{CVE2CAPEC_RAW_BASE}/database/{filename}", dest)
+
+
+#: Years upstream did not serve, with when that was learned. A missing year
+#: is fetched even within the TTL, so without this one upstream lacks would be
+#: re-requested on every scan; it is retried once per TTL instead.
+_UNAVAILABLE_YEARS_FILE = ".unavailable_years.json"
+
+
+def _unavailable_years(db_path: Path) -> Dict[str, str]:
+    try:
+        data = json.loads((db_path / _UNAVAILABLE_YEARS_FILE).read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _recently_unavailable(db_path: Path, year: int, ttl_hours) -> bool:
+    seen = _unavailable_years(db_path).get(str(year))
+    if not seen:
+        return False
+    try:
+        age_hours = (datetime.now() - datetime.fromisoformat(seen)).total_seconds() / 3600
+    except ValueError:
+        return False
+    return age_hours < ttl_hours
+
+
+def _note_year_availability(db_path: Path, year: int, available: bool) -> None:
+    """Remember a year upstream lacked, or forget it once it downloads. Never raises."""
+    try:
+        data = _unavailable_years(db_path)
+        if available:
+            if str(year) not in data:
+                return
+            data.pop(str(year))
+        else:
+            data[str(year)] = datetime.now().isoformat()
+        _atomic_write_bytes(db_path / _UNAVAILABLE_YEARS_FILE, json.dumps(data).encode())
+    except Exception:  # noqa: BLE001 - bookkeeping must never fail the update
+        pass
+
+
+def _fetch_year(db_path: Path, year: int) -> bool:
+    ok = download_cve_database_year(db_path, year)
+    _note_year_availability(db_path, year, ok)
+    return ok
 
 
 def get_needed_years(cve_ids: List[str]) -> set:
@@ -541,11 +602,13 @@ def update_database(cve_ids: List[str] = None, force: bool = False, settings: Op
         # The TTL marker covers resources and metadata only. A year this run's
         # CVEs need but the DB has never fetched would otherwise stay missing
         # for the whole TTL, silently giving those CVEs no CWE/CAPEC.
-        missing = sorted(y for y in get_needed_years(cve_ids or []) if not year_file(y).exists())
+        missing = sorted(y for y in get_needed_years(cve_ids or [])
+                         if not year_file(y).exists()
+                         and not _recently_unavailable(db_path, y, cache_ttl))
         if missing:
             print(f"[*][MITRE] Database within TTL; fetching missing CVE years: {missing}")
             for year in missing:
-                download_cve_database_year(db_path, year)
+                _fetch_year(db_path, year)
         else:
             print("[*][MITRE] Database is up to date (within TTL)")
         return True
@@ -587,7 +650,7 @@ def update_database(cve_ids: List[str] = None, force: bool = False, settings: Op
         db_file = year_file(year)
         if (force or not db_file.exists()
                 or (refresh_stale and _is_older_than(db_file, cache_ttl))):
-            download_cve_database_year(db_path, year)
+            _fetch_year(db_path, year)
 
     mark_database_updated(settings)
     print("[+][MITRE] Database update complete")

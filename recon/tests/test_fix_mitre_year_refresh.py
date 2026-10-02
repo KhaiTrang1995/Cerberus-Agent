@@ -70,7 +70,9 @@ def _update(tmp_path, cve_ids, get=None):
 
 
 def _year_urls(urls):
-    return sorted(u.rsplit("/", 1)[-1] for u in urls if "/database/" in u)
+    """The year files requested, once each: a year is tried as the upstream
+    .jsonl.gz, then the plain .jsonl, and both name the same CVE-<year>.jsonl."""
+    return sorted({u.rsplit("/", 1)[-1].removesuffix(".gz") for u in urls if "/database/" in u})
 
 
 # --------------------------------------------------------------------------- #
@@ -99,7 +101,7 @@ def test_fresh_db_fetches_a_missing_needed_year(tmp_path):
     ok, urls, cwe, _ = _update(tmp_path, [f"CVE-{OLD}-1234", f"CVE-{YEAR}-5678"])
     assert ok is True
     assert _year_urls(urls) == [f"CVE-{YEAR}.jsonl"]      # only the missing one
-    assert len(urls) == 1                                  # no resource refresh
+    assert all("/database/" in u for u in urls)            # no resource refresh
     cwe.assert_not_called()
     assert (db / "database" / f"CVE-{YEAR}.jsonl").read_bytes() == b'{"CVE-X": {}}\n'
 

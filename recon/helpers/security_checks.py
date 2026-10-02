@@ -3054,14 +3054,28 @@ def run_security_headers_checks(
 # Main Entry Point
 # =============================================================================
 
+#: The root recon gives an IP-mode scan, "ip-targets.<project_id>". The project
+#: id is a cuid (lower-case, digits, no hyphen), so a real domain - whose TLD is
+#: letters, or "xn--..." - never has this shape.
+_SYNTHETIC_IP_ROOT = re.compile(r"^ip-targets\.(?=[a-z0-9]*[0-9])[a-z0-9]+$")
+
+
 def _dns_check_domains(recon_data: Dict[str, Any]) -> List[str]:
-    """The roots whose mail and zone records to check: recon_data["domains"], else "domain"."""
+    """The roots whose mail and zone records to check: recon_data["domains"], else "domain".
+
+    An IP-mode scan has no domain: its root is a name in no DNS zone, so every
+    record would read as "missing" and SPF/DMARC/DNSSEC would report findings
+    about a domain that does not exist.
+    """
+    if (recon_data.get("metadata") or {}).get("ip_mode"):
+        return []
     roots = recon_data.get("domains")
     if not isinstance(roots, list) or not roots:
         roots = [recon_data.get("domain", "")]
     seen = []
     for root in roots:
-        if isinstance(root, str) and root.strip() and root not in seen:
+        if (isinstance(root, str) and root.strip() and root not in seen
+                and not _SYNTHETIC_IP_ROOT.match(root.strip().lower())):
             seen.append(root)
     return seen
 

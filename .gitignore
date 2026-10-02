@@ -109,6 +109,13 @@ recon/data/resolvers.txt
 # recon container, which volume-mounts the host's recon/ — so every scan dirtied
 # a tracked file and `./redamon.sh update` then refused to fast-forward.
 recon/main_recon_modules/data/mitre_db/.last_update
+# The years upstream did not serve, so they are retried once per TTL rather than
+# on every scan. Written at runtime, like .last_update.
+recon/main_recon_modules/data/mitre_db/.unavailable_years.json
+# A CVE year file add_mitre.py downloads that the checkout does not ship. The
+# shipped years stay tracked (an ignore rule never untracks a file); a runtime
+# one is expendable, so it can never block a fast-forward that adds the same path.
+recon/main_recon_modules/data/mitre_db/database/CVE-*.jsonl
 
 # Recon output files (contain sensitive scan data)
 recon/output/*.json
