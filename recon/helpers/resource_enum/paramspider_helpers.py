@@ -6,6 +6,7 @@ Passive URL parameter discovery from Wayback Machine using ParamSpider.
 
 import shutil
 import subprocess
+import time
 import uuid
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
@@ -44,6 +45,8 @@ def run_paramspider_for_domain(
     """
     cmd = ['paramspider', '-d', domain, '-s', '-p', placeholder]
 
+    from recon.helpers.resource_enum import tool_health
+    started = time.time()
     try:
         result = subprocess.run(
             cmd,
@@ -71,16 +74,27 @@ def run_paramspider_for_domain(
                     if line and line.startswith('http'):
                         urls.add(line)
 
+        # ParamSpider exits 0 after giving up on the archive ("Failed to fetch URL
+        # ... after N retries"), so its stderr is the only sign of a failure.
+        if not urls:
+            tool_health.check_empty("paramspider", seeds=1, return_code=result.returncode,
+                                    stderr=result.stderr, elapsed_s=time.time() - started)
         return sorted(urls)
 
     except subprocess.TimeoutExpired:
         print(f"[!][ParamSpider] Timeout after {timeout}s for {domain}")
+        tool_health.report_empty("paramspider", tool_health.FAILURE, return_code=None, seeds=1,
+                                 elapsed_s=time.time() - started)
         return []
     except FileNotFoundError:
         print("[!][ParamSpider] paramspider binary not found — is it installed?")
+        tool_health.report_empty("paramspider", tool_health.FAILURE, return_code=None, seeds=1,
+                                 elapsed_s=0)
         return []
     except Exception as e:
         print(f"[!][ParamSpider] Error for {domain}: {e}")
+        tool_health.report_empty("paramspider", tool_health.FAILURE, return_code=None, seeds=1,
+                                 elapsed_s=time.time() - started)
         return []
 
 

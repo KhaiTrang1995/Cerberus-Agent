@@ -14,6 +14,7 @@ import signal
 import shutil
 import subprocess
 import tempfile
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Set, Tuple
 from urllib.parse import urlparse
@@ -104,6 +105,9 @@ def _run_arjun_single_method(
             env["HTTP_PROXY"] = _cap_url
             env["HTTPS_PROXY"] = _cap_url
 
+        from recon.helpers.resource_enum import tool_health
+        started = time.time()
+        stdout, stderr = "", ""
         timed_out = False
         proc = subprocess.Popen(
             cmd,
@@ -141,6 +145,10 @@ def _run_arjun_single_method(
                 print(f"[-][Arjun/{method}] No parameters found")
             else:
                 print(f"[-][Arjun/{method}] No partial results saved before timeout")
+            # A crash also leaves no file: the exit code and stderr tell it apart.
+            tool_health.check_empty("arjun", seeds=len(target_urls), return_code=proc.returncode,
+                                    stderr=stderr, elapsed_s=time.time() - started,
+                                    timed_out=timed_out)
             return [], []
 
         with open(output_file, 'r') as f:
@@ -150,6 +158,9 @@ def _run_arjun_single_method(
                     print(f"[-][Arjun/{method}] No parameters found")
                 else:
                     print(f"[-][Arjun/{method}] Output file empty after timeout")
+                tool_health.check_empty("arjun", seeds=len(target_urls), return_code=proc.returncode,
+                                        stderr=stderr, elapsed_s=time.time() - started,
+                                        timed_out=timed_out)
                 return [], []
 
         try:

@@ -137,6 +137,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'HTTPX_PROBE_HASH': 'sha256',
     'HTTPX_INCLUDE_RESPONSE': True,
     'HTTPX_INCLUDE_RESPONSE_HEADERS': True,
+    'HTTPX_JEV_PAGE_TYPE': False,
     'HTTPX_PROBE_ASN': True,
     'HTTPX_PROBE_CDN': True,
     'HTTPX_PATHS': [],
@@ -292,6 +293,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'RESOURCE_ENUM_AI_RAG_PATH_FLAG_ENABLED': True,
     'RESOURCE_ENUM_AI_PARAM_INJECTABLE_FLAG_ENABLED': True,
     'RESOURCE_ENUM_AI_TOOL_ARG_PATH_ENABLED': True,
+    'RESOURCE_ENUM_JEV_TOOL_HEALTH': False,
 
     # AI Surface Recon (central module) — active, protocol-aware AI/LLM/MCP
     # fingerprinting. Runs after resource_enum (display Phase 4.5). Benign
@@ -442,6 +444,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'HAKRAWLER_INSECURE': True,
     'HAKRAWLER_CUSTOM_HEADERS': [],
     'HAKRAWLER_PARALLELISM': 5,
+    'HAKRAWLER_JEV_SEED_ORDER': False,
 
     # jsluice JavaScript Analyzer
     'JSLUICE_ENABLED': True,
@@ -557,6 +560,7 @@ DEFAULT_SETTINGS: dict[str, Any] = {
     'FFUF_PARALLELISM': 20,
     'FFUF_AI_EXTENSIONS': False,
     'FFUF_AI_USE_JEV': False,
+    'FFUF_JEV_BASE_PATHS': False,
 
     # Arjun Parameter Discovery
     'ARJUN_ENABLED': True,
@@ -1335,6 +1339,7 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['HTTPX_PROBE_HASH'] = project.get('httpxProbeHash', DEFAULT_SETTINGS['HTTPX_PROBE_HASH'])
     settings['HTTPX_INCLUDE_RESPONSE'] = project.get('httpxIncludeResponse', DEFAULT_SETTINGS['HTTPX_INCLUDE_RESPONSE'])
     settings['HTTPX_INCLUDE_RESPONSE_HEADERS'] = project.get('httpxIncludeResponseHeaders', DEFAULT_SETTINGS['HTTPX_INCLUDE_RESPONSE_HEADERS'])
+    settings['HTTPX_JEV_PAGE_TYPE'] = project.get('httpxJevPageType', DEFAULT_SETTINGS['HTTPX_JEV_PAGE_TYPE'])
     settings['HTTPX_PROBE_ASN'] = project.get('httpxProbeAsn', DEFAULT_SETTINGS['HTTPX_PROBE_ASN'])
     settings['HTTPX_PROBE_CDN'] = project.get('httpxProbeCdn', DEFAULT_SETTINGS['HTTPX_PROBE_CDN'])
     settings['HTTPX_PATHS'] = project.get('httpxPaths', DEFAULT_SETTINGS['HTTPX_PATHS'])
@@ -1455,6 +1460,7 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['RESOURCE_ENUM_AI_RAG_PATH_FLAG_ENABLED'] = project.get('resourceEnumAiRagPathFlagEnabled', DEFAULT_SETTINGS['RESOURCE_ENUM_AI_RAG_PATH_FLAG_ENABLED'])
     settings['RESOURCE_ENUM_AI_PARAM_INJECTABLE_FLAG_ENABLED'] = project.get('resourceEnumAiParamInjectableFlagEnabled', DEFAULT_SETTINGS['RESOURCE_ENUM_AI_PARAM_INJECTABLE_FLAG_ENABLED'])
     settings['RESOURCE_ENUM_AI_TOOL_ARG_PATH_ENABLED'] = project.get('resourceEnumAiToolArgPathEnabled', DEFAULT_SETTINGS['RESOURCE_ENUM_AI_TOOL_ARG_PATH_ENABLED'])
+    settings['RESOURCE_ENUM_JEV_TOOL_HEALTH'] = project.get('resourceEnumJevToolHealth', DEFAULT_SETTINGS['RESOURCE_ENUM_JEV_TOOL_HEALTH'])
 
     # AI Surface Recon (central module)
     settings['AI_SURFACE_RECON_ENABLED'] = project.get('aiSurfaceReconEnabled', DEFAULT_SETTINGS['AI_SURFACE_RECON_ENABLED'])
@@ -1522,6 +1528,7 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['HAKRAWLER_INSECURE'] = project.get('hakrawlerInsecure', DEFAULT_SETTINGS['HAKRAWLER_INSECURE'])
     settings['HAKRAWLER_CUSTOM_HEADERS'] = project.get('hakrawlerCustomHeaders', DEFAULT_SETTINGS['HAKRAWLER_CUSTOM_HEADERS'])
     settings['HAKRAWLER_PARALLELISM'] = project.get('hakrawlerParallelism', DEFAULT_SETTINGS['HAKRAWLER_PARALLELISM'])
+    settings['HAKRAWLER_JEV_SEED_ORDER'] = project.get('hakrawlerJevSeedOrder', DEFAULT_SETTINGS['HAKRAWLER_JEV_SEED_ORDER'])
 
     # jsluice JavaScript Analyzer
     settings['JSLUICE_ENABLED'] = project.get('jsluiceEnabled', DEFAULT_SETTINGS['JSLUICE_ENABLED'])
@@ -1604,6 +1611,7 @@ def fetch_project_settings(project_id: str, webapp_url: str) -> dict[str, Any]:
     settings['FFUF_PARALLELISM'] = project.get('ffufParallelism', DEFAULT_SETTINGS['FFUF_PARALLELISM'])
     settings['FFUF_AI_EXTENSIONS'] = project.get('ffufAiExtensions', DEFAULT_SETTINGS['FFUF_AI_EXTENSIONS'])
     settings['FFUF_AI_USE_JEV'] = project.get('ffufAiUseJev', DEFAULT_SETTINGS['FFUF_AI_USE_JEV'])
+    settings['FFUF_JEV_BASE_PATHS'] = project.get('ffufJevBasePaths', DEFAULT_SETTINGS['FFUF_JEV_BASE_PATHS'])
 
     # AI in Pipeline (master switch + model)
     settings['AI_IN_PIPELINE'] = project.get('aiInPipeline', DEFAULT_SETTINGS['AI_IN_PIPELINE'])

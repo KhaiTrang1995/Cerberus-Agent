@@ -8,6 +8,7 @@ import json
 import platform
 import shutil
 import subprocess
+import time
 import tarfile
 import urllib.request
 import uuid
@@ -305,6 +306,8 @@ def run_kiterunner_discovery(
         if _cap_url and _cap_token:
             cmd.extend(["--proxy", _cap_url, "-H", f"X-Redamon-Ctx: {_cap_token}"])
 
+        from recon.helpers.resource_enum import tool_health
+        started = time.time()
         try:
             print(f"[*][Kiterunner] Command: {' '.join(cmd[:6])}...")  # Show partial command
             # Heartbeat every 30s -- Kiterunner brute-forces large wordlists
@@ -410,11 +413,19 @@ def run_kiterunner_discovery(
 
             if result.stderr and "error" in result.stderr.lower():
                 print(f"[!][Kiterunner] stderr: {result.stderr[:200]}")
+            if not discovered_endpoints:
+                tool_health.check_empty("kiterunner", seeds=len(target_urls),
+                                        return_code=result.returncode, stderr=result.stderr,
+                                        elapsed_s=time.time() - started)
 
         except subprocess.TimeoutExpired:
             print(f"[!][Kiterunner] Timeout after {scan_timeout}s")
+            tool_health.report_empty("kiterunner", tool_health.FAILURE, return_code=None,
+                                     seeds=len(target_urls), elapsed_s=time.time() - started)
         except Exception as e:
             print(f"[!][Kiterunner] Error: {e}")
+            tool_health.report_empty("kiterunner", tool_health.FAILURE, return_code=None,
+                                     seeds=len(target_urls), elapsed_s=time.time() - started)
     finally:
         _cleanup_temp_dir(temp_path)
 

@@ -2403,6 +2403,25 @@ fields:
     meaning: >-
       Follows a redirect rather than recording it, which can turn one request into
       several.
+  ffufJevBasePaths:
+    tool: ffuf
+    runtime_key: "FFUF_JEV_BASE_PATHS"
+    unit: none
+    phase: resource_enum
+    traffic: active
+    roe_capped: false
+    mcp: settable
+    group: llm
+    meaning: >-
+      Ranks the smart-fuzz base paths with TypeSafe AI Jev (model jev-1.13.0):
+      false keeps the random pick that fills ffufSmartFuzzMaxBasePaths, true asks
+      Jev, per discovered directory, whether it is likely to hold sensitive,
+      administrative or application content. Takes effect only when aiInPipeline
+      is true, and aiInPipeline does not reset it. Needs a Jev token on the
+      project owner's account; without one the random pick is used. Jev only
+      ranks the directories the crawl found, and the cap keeps the same number
+      either way. Runs in shadow mode: Jev's pick is logged and kept in the recon
+      output next to the random pick, and FFuf still fuzzes the random pick.
   ffufMatchCodes:
     tool: ffuf
     runtime_key: "FFUF_MATCH_CODES"
@@ -3595,6 +3614,26 @@ fields:
     group: not-tuning
     meaning: >-
       Skip TLS verification
+  hakrawlerJevSeedOrder:
+    tool: hakrawler
+    runtime_key: "HAKRAWLER_JEV_SEED_ORDER"
+    unit: none
+    phase: resource_enum
+    traffic: active
+    roe_capped: false
+    mcp: settable
+    group: llm
+    meaning: >-
+      Orders Hakrawler's seed URLs with TypeSafe AI Jev (model jev-1.13.0): false
+      keeps the alphabetical order, true asks Jev, per probed host, whether it is
+      likely to have a rich web application surface, so that under
+      hakrawlerMaxUrls the promising hosts would be crawled first. Takes effect
+      only when aiInPipeline is true, and aiInPipeline does not reset it. Needs a
+      Jev token on the project owner's account; without one the alphabetical
+      order is used. Ordering only: every seed stays in the list, and partial
+      recon keeps the alphabetical order. Runs in shadow mode: Jev's order is
+      logged and kept in the recon output, and Hakrawler still gets the
+      alphabetical list.
   hakrawlerMaxUrls:
     tool: hakrawler
     runtime_key: "HAKRAWLER_MAX_URLS"
@@ -3797,6 +3836,26 @@ fields:
     meaning: >-
       Records the full response headers, which later checks read and which make
       the output much larger.
+  httpxJevPageType:
+    tool: http_probe_ai
+    runtime_key: "HTTPX_JEV_PAGE_TYPE"
+    unit: none
+    phase: http_probe
+    traffic: none
+    roe_capped: false
+    mcp: settable
+    group: llm
+    meaning: >-
+      Labels each probed URL with TypeSafe AI Jev (model jev-1.13.0): false
+      labels nothing, true asks Jev whether a page is a login wall, a parked
+      domain, a default install page, a placeholder or an error page, and calls
+      it an app otherwise. A deterministic pre-filter places the easy pages
+      first. Takes effect only when aiInPipeline is true, and aiInPipeline does
+      not reset it. Needs a Jev token on the project owner's account; without one
+      no label is computed. Annotation only, and no traffic to the target: at
+      most 300 distinct pages per scan, within 60 seconds. Runs in shadow mode:
+      the labels are logged and kept in the recon output, and nothing is written
+      to the graph.
   httpxMatchCodes:
     tool: httpx
     runtime_key: "HTTPX_MATCH_CODES"
@@ -6746,6 +6805,25 @@ fields:
       decides whether the tool runs INSIDE its phase, and scanModules decides
       whether the phase runs at all. Setting one without the other is a silent
       no-op.
+  resourceEnumJevToolHealth:
+    tool: resource_enum_ai
+    runtime_key: "RESOURCE_ENUM_JEV_TOOL_HEALTH"
+    unit: none
+    phase: resource_enum
+    traffic: active
+    roe_capped: false
+    mcp: settable
+    group: llm
+    meaning: >-
+      Asks TypeSafe AI Jev (model jev-1.13.0) about a collection tool's empty
+      result whose error output the deterministic checks cannot place: false
+      asks nothing, true asks whether it describes a transient failure that a
+      second run could fix. The deterministic checks always run and record such
+      a result as a coverage gap whatever this says. Takes effect only when
+      aiInPipeline is true, and aiInPipeline does not reset it. Needs a Jev token
+      on the project owner's account. At most 20 questions per run, with header
+      values redacted. Runs in shadow mode: the verdict is logged and kept in the
+      recon output, and nothing is retried.
   roeAllowAccountLockout:
     tool: roe
     runtime_key: null

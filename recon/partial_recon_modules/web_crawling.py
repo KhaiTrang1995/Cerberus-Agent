@@ -431,10 +431,17 @@ def run_hakrawler(config: dict) -> None:
     print(f"[*][Partial Recon] Pulling Hakrawler Docker image: {HAKRAWLER_DOCKER_IMAGE}")
     pull_hakrawler_docker_image(HAKRAWLER_DOCKER_IMAGE)
 
+    # The graph-built probe data has no per-host signal, so the Jev seed order keeps
+    # the alphabetical list here; the call only says so.
+    hakrawler_seeds = target_urls
+    if settings.get('AI_IN_PIPELINE') and settings.get('HAKRAWLER_JEV_SEED_ORDER'):
+        from recon.helpers.ai_planner.crawl_seed_order import hakrawler_seed_order
+        hakrawler_seeds = hakrawler_seed_order(target_urls, recon_data, partial=True)
+
     # Run Hakrawler crawler
     print(f"[*][Partial Recon] Running Hakrawler crawler on {len(target_urls)} URLs...")
     hakrawler_urls, hakrawler_meta = run_hakrawler_crawler(
-        target_urls,
+        hakrawler_seeds,
         HAKRAWLER_DOCKER_IMAGE,
         HAKRAWLER_DEPTH,
         HAKRAWLER_THREADS,
@@ -1085,7 +1092,12 @@ def run_ffuf(config: dict) -> None:
                                 if len(parts) >= 1 and parts[0]:
                                     base_paths.add(parts[0])
                             if base_paths:
-                                discovered_base_paths = select_base_paths(base_paths, FFUF_SMART_FUZZ_MAX_BASE_PATHS)
+                                from recon.helpers.ai_planner.ffuf_base_paths import ranker_for
+                                # No recon JSON in a partial run: the shadow records
+                                # stay in the capped log lines and the summary.
+                                discovered_base_paths = select_base_paths(
+                                    base_paths, FFUF_SMART_FUZZ_MAX_BASE_PATHS,
+                                    ranker=ranker_for(settings))
                                 print(f"[*][Partial Recon] Smart fuzz: targeting {len(discovered_base_paths)} discovered base paths")
         except Exception as e:
             print(f"[!][Partial Recon] Smart fuzz query failed: {e}")

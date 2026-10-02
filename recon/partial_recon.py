@@ -274,6 +274,14 @@ def main():
     finally:
         _apply_node_filters(started_at)
 
+    # A partial run never prunes, so its coverage gaps protect nothing here; the
+    # drain still says which empty results looked like a failure, and asks Jev
+    # about the unexplained ones when the hook is on.
+    from recon.helpers.ai_planner.tool_health import finish_tool_health
+    finish_tool_health(
+        settings,
+        jev=bool(settings.get('AI_IN_PIPELINE') and settings.get('RESOURCE_ENUM_JEV_TOOL_HEALTH')))
+
     # Clean up orphan UserInput nodes (created but no PRODUCED children)
     if completed and user_id and project_id:
         _cleanup_orphan_user_inputs(user_id, project_id)

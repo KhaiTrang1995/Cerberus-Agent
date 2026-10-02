@@ -2036,6 +2036,16 @@ def run_http_probe(recon_data: dict, output_file: Path = None, settings: dict = 
         except Exception as _capture_err:  # noqa: BLE001
             print(f"[!][traffic-capture] skipped: {_capture_err}")
 
+        # Page-type labels on Jev: here because it reads the bodies dropped just below.
+        # Its own guard, because an exception reaching the except at the end of this
+        # function would discard the whole probe result.
+        if settings.get('AI_IN_PIPELINE') and settings.get('HTTPX_JEV_PAGE_TYPE'):
+            try:
+                from recon.helpers.ai_planner.page_type import run_for_probe
+                run_for_probe(httpx_results, settings, recon_data)
+            except Exception as _page_type_err:  # noqa: BLE001
+                print(f"[!][PageType-Jev] Skipped ({type(_page_type_err).__name__}).")
+
         # Remove body from results to keep JSON small (already used for analysis)
         for url_data in httpx_results.get("by_url", {}).values():
             url_data.pop("body", None)

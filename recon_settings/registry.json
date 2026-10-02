@@ -2630,6 +2630,23 @@
    "type": "boolean",
    "unit": "none"
   },
+  "ffufJevBasePaths": {
+   "default": false,
+   "form_section": "FfufSection",
+   "group": "llm",
+   "has_default": true,
+   "mcp": "settable",
+   "meaning": "Ranks the smart-fuzz base paths with TypeSafe AI Jev (model jev-1.13.0): false keeps the random pick that fills ffufSmartFuzzMaxBasePaths, true asks Jev, per discovered directory, whether it is likely to hold sensitive, administrative or application content. Takes effect only when aiInPipeline is true, and aiInPipeline does not reset it. Needs a Jev token on the project owner's account; without one the random pick is used. Jev only ranks the directories the crawl found, and the cap keeps the same number either way. Runs in shadow mode: Jev's pick is logged and kept in the recon output next to the random pick, and FFuf still fuzzes the random pick.",
+   "optional": false,
+   "phase": "resource_enum",
+   "prisma_type": "Boolean",
+   "roe_capped": false,
+   "runtime_key": "FFUF_JEV_BASE_PATHS",
+   "tool": "ffuf",
+   "traffic": "active",
+   "type": "boolean",
+   "unit": "none"
+  },
   "ffufMatchCodes": {
    "default": [
     200,
@@ -4585,6 +4602,23 @@
    "type": "boolean",
    "unit": "none"
   },
+  "hakrawlerJevSeedOrder": {
+   "default": false,
+   "form_section": "HakrawlerSection",
+   "group": "llm",
+   "has_default": true,
+   "mcp": "settable",
+   "meaning": "Orders Hakrawler's seed URLs with TypeSafe AI Jev (model jev-1.13.0): false keeps the alphabetical order, true asks Jev, per probed host, whether it is likely to have a rich web application surface, so that under hakrawlerMaxUrls the promising hosts would be crawled first. Takes effect only when aiInPipeline is true, and aiInPipeline does not reset it. Needs a Jev token on the project owner's account; without one the alphabetical order is used. Ordering only: every seed stays in the list, and partial recon keeps the alphabetical order. Runs in shadow mode: Jev's order is logged and kept in the recon output, and Hakrawler still gets the alphabetical list.",
+   "optional": false,
+   "phase": "resource_enum",
+   "prisma_type": "Boolean",
+   "roe_capped": false,
+   "runtime_key": "HAKRAWLER_JEV_SEED_ORDER",
+   "tool": "hakrawler",
+   "traffic": "active",
+   "type": "boolean",
+   "unit": "none"
+  },
   "hakrawlerMaxUrls": {
    "bounds": {
     "min": 1,
@@ -4883,6 +4917,23 @@
    "runtime_key": "HTTPX_INCLUDE_RESPONSE_HEADERS",
    "tool": "httpx",
    "traffic": "active",
+   "type": "boolean",
+   "unit": "none"
+  },
+  "httpxJevPageType": {
+   "default": false,
+   "form_section": "HttpxSection",
+   "group": "llm",
+   "has_default": true,
+   "mcp": "settable",
+   "meaning": "Labels each probed URL with TypeSafe AI Jev (model jev-1.13.0): false labels nothing, true asks Jev whether a page is a login wall, a parked domain, a default install page, a placeholder or an error page, and calls it an app otherwise. A deterministic pre-filter places the easy pages first. Takes effect only when aiInPipeline is true, and aiInPipeline does not reset it. Needs a Jev token on the project owner's account; without one no label is computed. Annotation only, and no traffic to the target: at most 300 distinct pages per scan, within 60 seconds. Runs in shadow mode: the labels are logged and kept in the recon output, and nothing is written to the graph.",
+   "optional": false,
+   "phase": "http_probe",
+   "prisma_type": "Boolean",
+   "roe_capped": false,
+   "runtime_key": "HTTPX_JEV_PAGE_TYPE",
+   "tool": "http_probe_ai",
+   "traffic": "none",
    "type": "boolean",
    "unit": "none"
   },
@@ -9416,6 +9467,23 @@
    "runtime_key": "RESOURCE_ENUM_AI_TOOL_ARG_PATH_ENABLED",
    "tool": "resource_enum_ai",
    "traffic": "none",
+   "type": "boolean",
+   "unit": "none"
+  },
+  "resourceEnumJevToolHealth": {
+   "default": false,
+   "form_section": "ResourceEnumAiSection",
+   "group": "llm",
+   "has_default": true,
+   "mcp": "settable",
+   "meaning": "Asks TypeSafe AI Jev (model jev-1.13.0) about a collection tool's empty result whose error output the deterministic checks cannot place: false asks nothing, true asks whether it describes a transient failure that a second run could fix. The deterministic checks always run and record such a result as a coverage gap whatever this says. Takes effect only when aiInPipeline is true, and aiInPipeline does not reset it. Needs a Jev token on the project owner's account. At most 20 questions per run, with header values redacted. Runs in shadow mode: the verdict is logged and kept in the recon output, and nothing is retried.",
+   "optional": false,
+   "phase": "resource_enum",
+   "prisma_type": "Boolean",
+   "roe_capped": false,
+   "runtime_key": "RESOURCE_ENUM_JEV_TOOL_HEALTH",
+   "tool": "resource_enum_ai",
+   "traffic": "active",
    "type": "boolean",
    "unit": "none"
   },

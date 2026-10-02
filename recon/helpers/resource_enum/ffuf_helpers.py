@@ -14,10 +14,11 @@ import os
 import random
 import shutil
 import subprocess
+import time
 
 from recon.helpers.subprocess_helpers import run_with_heartbeat
 import tempfile
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 
@@ -91,6 +92,8 @@ def _fuzz_single_target(
     cmd.extend(["-of", "json", "-o", output_file])
     cmd.extend(["-s"])  # Silent mode (no banner/progress)
 
+    from recon.helpers.resource_enum import tool_health
+    started = time.time()
     try:
         # Heartbeat every 30s while FFuf fuzzes -- otherwise the drawer goes
         # silent during long wordlist runs (FFuf -s suppresses its own progress).
@@ -101,12 +104,20 @@ def _fuzz_single_target(
             timeout=max_time + 60,
         )
 
+        # No output file at all is an FFuf that never got to write one, not a
+        # target with nothing to find (that writes a file with no results).
+        if not os.path.exists(output_file):
+            tool_health.report_empty("ffuf", tool_health.FAILURE, return_code=result.returncode,
+                                     seeds=1, elapsed_s=time.time() - started, stderr=result.stderr)
         if os.path.exists(output_file):
             with open(output_file, 'r') as f:
                 try:
                     ffuf_output = json.load(f)
                 except json.JSONDecodeError:
                     print(f"[!][FFuf] Failed to parse JSON output for {fuzz_url}")
+                    tool_health.report_empty("ffuf", tool_health.FAILURE,
+                                             return_code=result.returncode, seeds=1,
+                                             elapsed_s=time.time() - started, stderr=result.stderr)
                     return results, external_entries
 
             for entry in ffuf_output.get("results", []):
@@ -136,11 +147,18 @@ def _fuzz_single_target(
                     "duration": entry.get("duration", 0),
                     "input_fuzz": entry.get("input", {}).get("FUZZ", ""),
                 })
+            if not results and not external_entries:
+                tool_health.check_empty("ffuf", seeds=1, return_code=result.returncode,
+                                        stderr=result.stderr, elapsed_s=time.time() - started)
 
     except subprocess.TimeoutExpired:
         print(f"[!][FFuf] Timeout exceeded for {fuzz_url}")
+        tool_health.report_empty("ffuf", tool_health.FAILURE, return_code=None, seeds=1,
+                                 elapsed_s=time.time() - started)
     except Exception as e:
         print(f"[!][FFuf] Error fuzzing {fuzz_url}: {e}")
+        tool_health.report_empty("ffuf", tool_health.FAILURE, return_code=None, seeds=1,
+                                 elapsed_s=time.time() - started)
 
     return results, external_entries
 
@@ -301,22 +319,50 @@ def select_base_paths(
     cap: int,
     *,
     rng: Optional[random.Random] = None,
+    ranker: Optional[Callable[[List[str], int], Optional[List[str]]]] = None,
 ) -> List[str]:
-    """Pick up to `cap` base paths to smart-fuzz under.
+    """Pick up to `cap` base paths to smart-fuzz under. The single seam.
 
-    Placeholder RANDOM selection: an unbiased sample, chosen over the old
-    alphabetical cut which systematically favored early-letter dirs. A later
-    task replaces this body with a JEV value-ranking; keep this the single seam.
+    Without a `ranker` the pick is a RANDOM sample: unbiased, where the old
+    alphabetical cut systematically favoured early-letter dirs. A `ranker`
+    (the Jev base-path hook) is asked only when the cap actually cuts; it gets
+    the sorted candidates and the cap and returns its order, or None to keep
+    the random pick. Its answer is filtered to real candidates, and any slot it
+    leaves is filled from the random pick, so the result has exactly as many
+    paths either way: a ranker changes which survive, never how many.
+
+    Never raises: the full-pipeline caller has no guard around this call, and in
+    partial recon a raise would leave smart fuzz off for the whole run.
 
     The input is sorted first only to give it a canonical order: `base_paths`
     is usually a set of strings, whose iteration order changes with every
     process's hash seed, so without it a seeded `rng` would still pick a
     different sample on every run.
     """
+    if cap <= 0:
+        return []
     items = sorted(base_paths)
     if len(items) <= cap:
         return items
-    return (rng or random).sample(items, cap)
+    picker = rng or random
+    if ranker is not None:
+        try:
+            ranked = ranker(list(items), cap)
+        except Exception as e:  # noqa: BLE001 - a ranker failure is the random pick
+            print(f"[!][FFuf] Base-path ranker failed ({type(e).__name__}) - using the random pick")
+            ranked = None
+        if ranked:
+            known = set(items)
+            chosen: List[str] = []
+            for path in ranked:
+                if isinstance(path, str) and path in known and path not in chosen:
+                    chosen.append(path)
+                if len(chosen) == cap:
+                    return chosen
+            if chosen:
+                rest = [p for p in items if p not in set(chosen)]
+                return chosen + picker.sample(rest, cap - len(chosen))
+    return picker.sample(items, cap)
 
 
 def _deduplicate_results(results: List[Dict]) -> List[Dict]:

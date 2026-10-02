@@ -265,6 +265,14 @@ def run_katana_crawler(
                           f"({len(valid_urls)} URL(s))")
                     if process.returncode != 0 or stderr_output.strip():
                         crawl_failed = True
+                    # Everything it printed was filtered by scope or excludes: that
+                    # is the crawl working, not an empty result.
+                    if not filtered_out_of_scope:
+                        from recon.helpers.resource_enum import tool_health
+                        tool_health.check_empty(
+                            "katana", seeds=len(valid_urls), elapsed_s=elapsed,
+                            return_code=process.returncode if isinstance(process.returncode, int) else None,
+                            stderr=stderr_output)
                     if stderr_output.strip():
                         print("[!][Katana] stderr:")
                         for line in stderr_output.strip().splitlines()[:20]:
@@ -276,6 +284,9 @@ def run_katana_crawler(
         except Exception as e:
             crawl_failed = True
             print(f"[!][Katana] Error: {e}")
+            from recon.helpers.resource_enum import tool_health
+            tool_health.report_empty("katana", tool_health.FAILURE, return_code=None,
+                                     seeds=len(valid_urls), elapsed_s=0)
 
     finally:
         # Clean up temp file

@@ -9,6 +9,7 @@ import os
 import platform
 import shutil
 import subprocess
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -206,6 +207,8 @@ def _run_gau_docker(
     # Add domain at the end
     cmd.append(domain)
 
+    from recon.helpers.resource_enum import tool_health
+    started = time.time()
     try:
         result = subprocess.run(
             cmd,
@@ -225,11 +228,18 @@ def _run_gau_docker(
 
         if result.stderr and verbose:
             print(f"[*][GAU] GAU stderr: {result.stderr[:200]}")
+        if not result.stdout.strip():
+            tool_health.check_empty("gau", seeds=1, return_code=result.returncode,
+                                    stderr=result.stderr, elapsed_s=time.time() - started)
 
     except subprocess.TimeoutExpired:
         print(f"[!][GAU] Timeout for {domain}")
+        tool_health.report_empty("gau", tool_health.FAILURE, return_code=None, seeds=1,
+                                 elapsed_s=time.time() - started)
     except Exception as e:
         print(f"[!][GAU] Error for {domain}: {e}")
+        tool_health.report_empty("gau", tool_health.FAILURE, return_code=None, seeds=1,
+                                 elapsed_s=time.time() - started)
 
     return sorted(list(discovered_urls))
 

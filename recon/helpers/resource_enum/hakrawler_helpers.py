@@ -6,11 +6,14 @@ Active URL discovery using Hakrawler web crawler (Docker-in-Docker).
 
 import math
 import subprocess
+import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
+
+from recon.helpers.resource_enum import tool_health
 
 
 def per_url_budget(timeout: int) -> int:
@@ -56,9 +59,15 @@ def _crawl_single_url(
     shared_urls: set,
     urls_lock: threading.Lock,
     max_urls: int,
+    health: Optional[dict] = None,
 ) -> Tuple[set, int, list]:
     """
     Crawl a single URL with Hakrawler. Thread-safe via shared_urls + lock.
+
+    A seed that printed nothing is classified (tool_health): a non-zero exit, a
+    watchdog kill or error output counts in `health["failed"]` (under the lock),
+    so the caller can protect jsluice. A seed stopped because the shared URL cap
+    was reached is not an empty result.
 
     Returns:
         Tuple of (discovered_urls_set, filtered_out_of_scope_count, external_entries)
@@ -66,6 +75,13 @@ def _crawl_single_url(
     local_urls = set()
     filtered_count = 0
     external_entries = []
+    lines_seen = 0
+    capped = False
+    overran = threading.Event()
+    return_code = None
+    stderr_text = ""
+    raised = False
+    start_time = time.time()
 
     # --net=host is ALWAYS passed so Hakrawler can reach loopback / local-lab
     # targets. See recon/helpers/resource_enum/katana_helpers.py for the long
@@ -97,12 +113,15 @@ def _crawl_single_url(
     if _cap_headers:
         cmd.extend(["-h", ";;".join(_cap_headers)])
 
+    # stderr goes to a file, not a pipe: nothing drains a pipe while stdout is
+    # read line by line, so a chatty hakrawler would block on a full one.
+    stderr_file = tempfile.TemporaryFile(mode="w+")
     try:
         process = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=stderr_file,
             text=True,
         )
 
@@ -110,7 +129,6 @@ def _crawl_single_url(
         # readline() loop below, which can block for arbitrary periods
         # while the subprocess is silent. Defined outside the inner try
         # so the finally always sees a valid thread reference.
-        start_time = time.time()
         overall_timeout = per_url_budget(timeout)
         heartbeat_stop = threading.Event()
 
@@ -134,6 +152,7 @@ def _crawl_single_url(
         def _overrun():
             if process.poll() is None:
                 print(f"[!][Hakrawler] Overall timeout for {base_url}", flush=True)
+                overran.set()
                 process.kill()
 
         watchdog = threading.Timer(overall_timeout, _overrun)
@@ -148,6 +167,7 @@ def _crawl_single_url(
                 # Check if global max_urls already reached by other workers
                 with urls_lock:
                     if len(shared_urls) >= max_urls:
+                        capped = True
                         process.kill()
                         break
 
@@ -158,6 +178,7 @@ def _crawl_single_url(
                 url = line.strip()
                 if not url:
                     continue
+                lines_seen += 1
 
                 try:
                     parsed = urlparse(url)
@@ -182,6 +203,7 @@ def _crawl_single_url(
                     shared_urls.add(url)
                     if len(shared_urls) >= max_urls:
                         print(f"[+][Hakrawler] Reached max URL limit ({max_urls}), stopping")
+                        capped = True
                         process.kill()
                         break
 
@@ -192,9 +214,26 @@ def _crawl_single_url(
                 process.kill()
             process.wait()
             heartbeat_thread.join(timeout=1)
+            return_code = process.returncode if isinstance(process.returncode, int) else None
 
     except Exception as e:
+        raised = True
         print(f"[!][Hakrawler] Error for {base_url}: {e}")
+    finally:
+        try:
+            stderr_file.seek(0)
+            stderr_text = stderr_file.read(tool_health.STDERR_KEEP)
+            stderr_file.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    if lines_seen == 0 and not capped:
+        verdict = tool_health.check_empty(
+            "hakrawler", seeds=1, return_code=return_code, stderr=stderr_text,
+            elapsed_s=time.time() - start_time, timed_out=overran.is_set(), raised=raised)
+        if verdict in (tool_health.FAILURE, tool_health.UNDECIDED) and health is not None:
+            with urls_lock:
+                health["failed"] = health.get("failed", 0) + 1
 
     return local_urls, filtered_count, external_entries
 
@@ -235,7 +274,10 @@ def run_hakrawler_crawler(
         parallelism: Number of URLs to crawl in parallel
 
     Returns:
-        Tuple of (discovered_urls, {"external_domains": [...]})
+        Tuple of (discovered_urls, {"external_domains": [...], "failed": bool,
+        "failed_seeds": int}). `failed` is true when any seed came back empty
+        with a failure or unexplained error output (tool_health), so the caller
+        keeps last run's jsluice secrets out of the prune.
     """
     print(f"\n[*][Hakrawler] Running Hakrawler crawler for endpoint discovery...")
     print(f"[*][Hakrawler] Crawl depth: {depth}")
@@ -250,10 +292,11 @@ def run_hakrawler_crawler(
     filtered_out_of_scope = 0
     external_domain_entries = []
     urls_lock = threading.Lock()
+    health = {"failed": 0}
 
     valid_urls = _crawlable_urls(target_urls)
     if not valid_urls:
-        return [], {"external_domains": []}
+        return [], {"external_domains": [], "failed": False, "failed_seeds": 0}
 
     # Skip a seed whose host another module already found unreachable: each
     # crawl otherwise costs its full per-seed timeout against a dead host. The
@@ -264,7 +307,7 @@ def run_hakrawler_crawler(
     live_urls = [u for u in valid_urls if not _scope.skip_if_down(u)]
     if not live_urls:
         _scope.finish("resource_enum", host_source="resource_enum")
-        return [], {"external_domains": []}
+        return [], {"external_domains": [], "failed": False, "failed_seeds": 0}
 
     max_workers = min(parallelism, len(live_urls))
 
@@ -274,7 +317,7 @@ def run_hakrawler_crawler(
                 _crawl_single_url,
                 url, docker_image, depth, threads, timeout,
                 include_subs, insecure, allowed_hosts, custom_headers,
-                exclude_patterns, discovered_urls, urls_lock, max_urls,
+                exclude_patterns, discovered_urls, urls_lock, max_urls, health,
             ): url
             for url in live_urls
         }
@@ -287,6 +330,8 @@ def run_hakrawler_crawler(
                     external_domain_entries.extend(externals)
             except Exception as e:
                 print(f"[!][Hakrawler] Worker error: {e}")
+                with urls_lock:
+                    health["failed"] += 1
 
     _scope.finish("resource_enum", host_source="resource_enum")
 
@@ -294,8 +339,12 @@ def run_hakrawler_crawler(
     print(f"[+][Hakrawler] Discovered {len(urls_list)} URLs")
     if filtered_out_of_scope > 0:
         print(f"[+][Hakrawler] Filtered {filtered_out_of_scope} out-of-scope URLs")
+    if health["failed"]:
+        print(f"[!][Hakrawler] {health['failed']} seed(s) came back empty with an error or no "
+              f"clean exit")
 
-    return urls_list, {"external_domains": external_domain_entries}
+    return urls_list, {"external_domains": external_domain_entries,
+                       "failed": health["failed"] > 0, "failed_seeds": health["failed"]}
 
 
 def pull_hakrawler_docker_image(docker_image: str) -> bool:

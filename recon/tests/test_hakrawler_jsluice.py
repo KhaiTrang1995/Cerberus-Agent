@@ -173,8 +173,10 @@ def test_hakrawler_run_applies_exclude_patterns():
     print("PASS: test_hakrawler_run_applies_exclude_patterns")
 
 
-def test_hakrawler_stderr_is_devnull():
-    """Verify stderr uses DEVNULL to prevent deadlocks."""
+def test_hakrawler_stderr_can_never_deadlock_the_reader():
+    """stderr must never be a PIPE: stdout is read line by line and nothing drains
+    a second pipe, so a chatty hakrawler would block. It goes to a temporary file,
+    which also keeps it readable to tell a failed seed from an empty one."""
     from recon.helpers.resource_enum.hakrawler_helpers import run_hakrawler_crawler
 
     captured_kwargs = {}
@@ -198,8 +200,9 @@ def test_hakrawler_stderr_is_devnull():
             custom_headers=[], exclude_patterns=[],
         )
 
-    assert captured_kwargs.get('stderr') == subprocess.DEVNULL
-    print("PASS: test_hakrawler_stderr_is_devnull")
+    stderr = captured_kwargs.get('stderr')
+    assert stderr is not subprocess.PIPE
+    assert hasattr(stderr, "write") and hasattr(stderr, "seek")
 
 
 # ===========================================================================

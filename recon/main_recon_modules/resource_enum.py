@@ -878,6 +878,13 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
     elif not KITERUNNER_ENABLED and not ZAP_AJAX_SPIDER_ENABLED:
         print("\n[-][ResourceEnum] All URL discovery tools disabled (Katana, Hakrawler, GAU, ParamSpider, Kiterunner, ZAP Ajax Spider)")
 
+    # Hakrawler gets its own copy: every other consumer reads target_urls as is.
+    # Ordered here, on the main thread, before any crawler starts.
+    hakrawler_seeds = target_urls
+    if HAKRAWLER_ENABLED and settings.get('AI_IN_PIPELINE') and settings.get('HAKRAWLER_JEV_SEED_ORDER'):
+        from recon.helpers.ai_planner.crawl_seed_order import hakrawler_seed_order
+        hakrawler_seeds = hakrawler_seed_order(target_urls, recon_data)
+
     with ThreadPoolExecutor(max_workers=4) as executor:
         futures = {}
 
@@ -904,7 +911,7 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
         if HAKRAWLER_ENABLED:
             futures['hakrawler'] = executor.submit(
                 run_hakrawler_crawler,
-                target_urls,
+                hakrawler_seeds,
                 HAKRAWLER_DOCKER_IMAGE,
                 HAKRAWLER_DEPTH,
                 HAKRAWLER_THREADS,
@@ -959,6 +966,8 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
                         target_urls, HAKRAWLER_TIMEOUT, HAKRAWLER_PARALLELISM) + 120
                     hakrawler_urls, hakrawler_meta = future.result(timeout=hakrawler_wait)
                     print(f"[+][Hakrawler] Completed: {len(hakrawler_urls)} URLs")
+                    if hakrawler_meta.get("failed"):
+                        jsluice_feed_cut.append("hakrawler")
                 elif name == 'gau':
                     gau_workers = min(5, len(target_domains))
                     gau_per_domain_timeout = GAU_TIMEOUT * len(GAU_PROVIDERS) + 120
@@ -1157,7 +1166,10 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
                         if len(parts) >= 1 and parts[0]:
                             base_paths.add(parts[0])
                 if base_paths:
-                    discovered_base_paths = select_base_paths(base_paths, FFUF_SMART_FUZZ_MAX_BASE_PATHS)
+                    from recon.helpers.ai_planner.ffuf_base_paths import ranker_for
+                    discovered_base_paths = select_base_paths(
+                        base_paths, FFUF_SMART_FUZZ_MAX_BASE_PATHS,
+                        ranker=ranker_for(settings, recon_data))
                     print(f"[*][FFuf] Smart fuzz: targeting {len(discovered_base_paths)} discovered base paths")
 
             effective_extensions = FFUF_EXTENSIONS
@@ -1673,6 +1685,17 @@ def run_resource_enum(recon_data: dict, output_file: Optional[Path] = None, sett
             f"rag={ai_summary.get('rag_paths', 0)}, "
             f"prompt-params={ai_summary.get('prompt_params', 0)}"
         )
+
+    # Empty results that look like a failure become coverage gaps; the
+    # unexplained ones go to the Jev layer. Before the save, so its shadow
+    # records reach the recon JSON.
+    from recon.helpers.ai_planner.tool_health import finish_tool_health
+    finish_tool_health(
+        settings,
+        jev=bool(settings.get('AI_IN_PIPELINE') and settings.get('RESOURCE_ENUM_JEV_TOOL_HEALTH')),
+        recon_data=recon_data,
+        extra_headers=[*KATANA_CUSTOM_HEADERS, *HAKRAWLER_CUSTOM_HEADERS, *FFUF_CUSTOM_HEADERS,
+                       *ZAP_AJAX_SPIDER_CUSTOM_HEADERS, *ARJUN_CUSTOM_HEADERS, *KITERUNNER_HEADERS])
 
     # Add to recon_data
     recon_data['resource_enum'] = resource_enum_result
