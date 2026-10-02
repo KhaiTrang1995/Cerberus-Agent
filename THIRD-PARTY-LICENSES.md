@@ -405,7 +405,7 @@ The agent container (`agentic/Dockerfile`) bundles multiple language runtimes fo
 
 ## AGPL-3.0 Source Code Availability
 
-In compliance with the AGPL-3.0 license, the complete corresponding source code for all AGPL-licensed components is available at the repositories listed above. If you have received a RedAmon Docker image containing any of these tools and cannot access their source code at the listed repositories, please contact the maintainers at devergo.sam@gmail.com and we will provide the source code.
+In compliance with the AGPL-3.0 license, the complete corresponding source code for all AGPL-licensed components is available at the repositories listed above. If you have received a RedAmon Docker image containing any of these tools and cannot access their source code at the listed repositories, please contact the maintainers at samuele@redamon.org and we will provide the source code.
 
 ## License Compatibility Note
 

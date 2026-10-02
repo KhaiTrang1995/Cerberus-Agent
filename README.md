@@ -24,7 +24,7 @@
 
 <p align="center">
   <a href="https://github.com/samugit83/redamon/stargazers"><img height="24" src="https://img.shields.io/github/stars/samugit83/redamon?style=flat&color=2E8B57&label=Stars" alt="GitHub Stars"/></a>
-  <img height="24" src="https://img.shields.io/badge/v6.23.0-release-2E8B57?style=flat" alt="Version 6.23.0"/>
+  <img height="24" src="https://img.shields.io/badge/v6.24.0-release-2E8B57?style=flat" alt="Version 6.24.0"/>
   <img height="24" src="https://img.shields.io/badge/WARNING-SECURITY%20TOOL-B22222?style=flat" alt="Security Tool Warning"/>
   <img height="24" src="https://img.shields.io/badge/LICENSE-MIT-4169A1?style=flat" alt="MIT License"/>
   <img height="24" src="https://img.shields.io/badge/AI-AUTONOMOUS%20AGENT-6A5ACD?style=flat&logo=openai&logoColor=white" alt="AI Powered"/>
@@ -1055,7 +1055,7 @@ Contributions are welcome! Please read [CONTRIBUTING.md](CONTRIBUTING.md) for gu
 
 ## Contact
 
-For questions, feedback, or collaboration inquiries: **devergo.sam@gmail.com**
+For questions, feedback, or collaboration inquiries: **samuele@redamon.org**
 
 **Sponsorship:** RedAmon is free and MIT licensed, and stays that way. If you would like to sponsor the project, write to the same address. Sponsorship helps cover development and testing costs.
 

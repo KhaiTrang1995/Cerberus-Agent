@@ -206,7 +206,7 @@ Share your RedAmon experience with the community — record videos, write about 
 **How to submit:**
 
 1. Publish your content (YouTube, LinkedIn, blog, etc.)
-2. Send an email to **devergo.sam@gmail.com** with:
+2. Send an email to **samuele@redamon.org** with:
    - **Subject:** `[RedAmon Showcase] <your content title>`
    - **Link** to the video, post, or article
    - **Your LinkedIn profile URL** (so we can tag you in the announcement)
