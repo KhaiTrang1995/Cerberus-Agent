@@ -26,7 +26,7 @@ from fastapi import Depends, FastAPI, File, Form, Query, UploadFile, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
 from langchain_core.messages import SystemMessage, HumanMessage
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 
 from llm_guard import (master_key_is_weak, require_internal_auth,
                        require_internal_auth_only, require_master_internal_auth)
@@ -1304,6 +1304,113 @@ async def jev_takeover_classify(body: TakeoverClassifyRequest):
         lambda key: jev_hooks.takeover_classify(key, body.hostname, body.expected_provider,
                                                 body.status_code, body.headers or {},
                                                 body.response_sample),
+    )
+
+
+# /jev/* hooks with no /llm/* twin: a deterministic step recon used to take alone.
+# Their request models are their own and tightly bounded, because nothing upstream
+# shaped them; recon validates each response shape before using it.
+
+class FfufBasePathsRequest(BaseModel):
+    candidates: List[str] = Field(min_length=1, max_length=400)
+    cap: int = Field(ge=1, le=50)
+    user_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+    @field_validator("candidates")
+    @classmethod
+    def _distinct_bounded_paths(cls, value):
+        if any(not p or len(p) > 200 for p in value):
+            raise ValueError("each candidate is 1-200 characters")
+        if len(set(value)) != len(value):
+            raise ValueError("candidates must be distinct")
+        return value
+
+
+class PageTypeItem(BaseModel):
+    url: str = ""
+    host: str = ""
+    status_code: int = Field(default=0, ge=0, le=999)
+    content_length: int = Field(default=0, ge=0)
+    word_count: int = Field(default=0, ge=0)
+    line_count: int = Field(default=0, ge=0)
+    response_time_ms: int = Field(default=0, ge=0)
+    is_cdn: bool = False
+    title: str = ""
+    server: str = ""
+    cname: str = ""
+    headers: dict = Field(default_factory=dict)
+    body: str = ""
+
+
+class PageTypeRequest(BaseModel):
+    pages: List[PageTypeItem] = Field(min_length=1, max_length=50)
+    user_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+
+class ToolHealthRequest(BaseModel):
+    tool: Literal["katana", "hakrawler", "gau", "paramspider", "kiterunner", "ffuf", "arjun", "jsluice"]
+    return_code: int
+    elapsed_s: float = Field(ge=0)
+    seed_count: int = Field(ge=0)
+    stderr: str = Field(min_length=1)
+    user_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+
+class CrawlSeedHost(BaseModel):
+    hostname: str = Field(min_length=1, max_length=255)
+    title: str = ""
+    server: str = ""
+    status_code: int = Field(default=0, ge=0, le=999)
+    content_length: int = Field(default=0, ge=0)
+    word_count: int = Field(default=0, ge=0)
+    line_count: int = Field(default=0, ge=0)
+    url_count: int = Field(default=0, ge=0)
+
+
+class CrawlSeedOrderRequest(BaseModel):
+    hosts: List[CrawlSeedHost] = Field(min_length=1, max_length=400)
+    user_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+
+@app.post("/jev/ffuf-base-paths", tags=["LLM"], dependencies=[Depends(require_internal_auth)])
+async def jev_ffuf_base_paths(body: FfufBasePathsRequest):
+    import jev_hooks
+    return await _run_jev(
+        "ffuf-base-paths", body.user_id or "", body.project_id or "", len(body.candidates),
+        lambda key: jev_hooks.ffuf_base_paths(key, body.candidates, body.cap),
+    )
+
+
+@app.post("/jev/page-type", tags=["LLM"], dependencies=[Depends(require_internal_auth)])
+async def jev_page_type(body: PageTypeRequest):
+    import jev_hooks
+    return await _run_jev(
+        "page-type", body.user_id or "", body.project_id or "",
+        len(body.pages) * len(jev_hooks.PAGE_CLASSES),
+        lambda key: jev_hooks.page_type(key, [p.model_dump() for p in body.pages]),
+    )
+
+
+@app.post("/jev/tool-health", tags=["LLM"], dependencies=[Depends(require_internal_auth)])
+async def jev_tool_health(body: ToolHealthRequest):
+    import jev_hooks
+    return await _run_jev(
+        "tool-health", body.user_id or "", body.project_id or "", 1,
+        lambda key: jev_hooks.tool_health(key, body.tool, body.return_code, body.elapsed_s,
+                                          body.seed_count, body.stderr),
+    )
+
+
+@app.post("/jev/crawl-seed-order", tags=["LLM"], dependencies=[Depends(require_internal_auth)])
+async def jev_crawl_seed_order(body: CrawlSeedOrderRequest):
+    import jev_hooks
+    return await _run_jev(
+        "crawl-seed-order", body.user_id or "", body.project_id or "", len(body.hosts),
+        lambda key: jev_hooks.crawl_seed_order(key, [h.model_dump() for h in body.hosts]),
     )
 
 

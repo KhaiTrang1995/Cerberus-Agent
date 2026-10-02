@@ -54,3 +54,43 @@ async def test_a_rejected_key_is_jev_auth():
     with pytest.raises(JevError) as err:
         await jev_client.list_models(BAD_KEY)
     assert err.value.error_type == "jev_auth"
+
+
+# ---------------------------------------------------------------------------
+# The per-item hooks, end to end against the live API. Synthetic items only
+# (reserved .test names); about 2,500 input tokens for the four together.
+# ---------------------------------------------------------------------------
+
+import jev_hooks  # noqa: E402
+
+
+async def test_ffuf_base_paths_live_ranks_only_the_candidates():
+    cands = ["admin", "static/img", "api/v1"]
+    out = await jev_hooks.ffuf_base_paths(KEY, cands, 2)
+    assert len(out["ranked"]) == 2 and set(out["ranked"]) <= set(cands)
+    assert len(out["scores"]) == 3 and all(0.0 <= s <= 1.0 for s in out["scores"])
+
+
+async def test_page_type_live_labels_from_the_closed_set():
+    page = {"url": "http://parked.example.test/", "host": "parked.example.test", "status_code": 200,
+            "content_length": 900, "word_count": 40, "line_count": 12, "title": "This domain is for sale",
+            "server": "nginx", "headers": {"Server": "nginx"},
+            "body": "<html><h1>This domain is for sale</h1><p>Make an offer today.</p></html>"}
+    out = await jev_hooks.page_type(KEY, [page])
+    (label,) = out["labels"]
+    assert label["page_class"] in set(jev_hooks.PAGE_CLASSES) | {"app"}
+    assert 0 <= label["confidence"] <= 100
+
+
+async def test_tool_health_live_returns_a_verdict():
+    out = await jev_hooks.tool_health(KEY, "katana", 0, 31.0, 3, "context deadline exceeded")
+    assert isinstance(out["transient"], bool) and 0 <= out["confidence"] <= 100
+
+
+async def test_crawl_seed_order_live_scores_every_host():
+    hosts = [{"hostname": "shop.example.test", "title": "Shop - Sign in", "server": "nginx",
+              "status_code": 200, "content_length": 52000, "word_count": 3100, "url_count": 4},
+             {"hostname": "cdn.example.test", "title": "", "server": "cloudfront",
+              "status_code": 403, "content_length": 0, "word_count": 0, "url_count": 1}]
+    out = await jev_hooks.crawl_seed_order(KEY, hosts)
+    assert len(out["scores"]) == 2 and all(0.0 <= s <= 1.0 for s in out["scores"])

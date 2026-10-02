@@ -53,6 +53,9 @@ run_in_image() {
         -e COVERAGE_FILE=/tmp/redamon.coverage \
         -e HOME=/tmp \
         -e REDAMON_TEST_PARALLEL="$PARALLEL" \
+        `# The live tier's TypeSafe key, passed by NAME so its value never` \
+        `# reaches a command line; absent from the host, it stays unset.` \
+        ${TYPESAFE_AI:+-e TYPESAFE_AI} \
         --entrypoint sh \
         "$IMAGE" -c "$PREP $*"
 }

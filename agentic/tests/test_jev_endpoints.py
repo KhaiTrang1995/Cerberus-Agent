@@ -37,6 +37,16 @@ WAF_BODY = {"url": "http://t/", "status_code": 403, "headers": {"cf-ray": "x"},
 TAKEOVER_BODY = {"hostname": "h.t", "expected_provider": "heroku", "status_code": 404,
                  "headers": {}, "response_sample": "nope", "model": "ignored",
                  "user_id": "u1", "project_id": "p1"}
+BASE_PATHS_BODY = {"candidates": ["admin", "img", "api/v1"], "cap": 2,
+                   "user_id": "u1", "project_id": "p1"}
+PAGE_TYPE_BODY = {"pages": [{"url": "http://app.example.test/", "host": "app.example.test",
+                             "status_code": 200, "title": "Welcome", "body": "hi"}],
+                  "user_id": "u1", "project_id": "p1"}
+TOOL_HEALTH_BODY = {"tool": "katana", "return_code": 0, "elapsed_s": 3.5, "seed_count": 4,
+                    "stderr": "context deadline exceeded", "user_id": "u1", "project_id": "p1"}
+CRAWL_SEED_BODY = {"hosts": [{"hostname": "a.example.test", "title": "x"},
+                             {"hostname": "b.example.test"}],
+                   "user_id": "u1", "project_id": "p1"}
 
 
 @pytest.fixture(scope="module")
@@ -61,6 +71,17 @@ def _clear_owner_cache():
     jev_client._owner_cache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _fresh_rate_limit():
+    """Every request here is user u1, and the per-user bucket holds 60: a file this
+    size would otherwise start answering 429 halfway through, for reasons unrelated
+    to the test that sees it."""
+    import llm_guard
+    llm_guard.reset_state()
+    yield
+    llm_guard.reset_state()
+
+
 def _owner_ok():
     return patch("jev_client.verify_owner", AsyncMock(return_value=None))
 
@@ -75,6 +96,10 @@ PATHS = {
     "/jev/nuclei-tags": NUCLEI_BODY,
     "/jev/waf-classify": WAF_BODY,
     "/jev/takeover-classify": TAKEOVER_BODY,
+    "/jev/ffuf-base-paths": BASE_PATHS_BODY,
+    "/jev/page-type": PAGE_TYPE_BODY,
+    "/jev/tool-health": TOOL_HEALTH_BODY,
+    "/jev/crawl-seed-order": CRAWL_SEED_BODY,
 }
 
 
@@ -308,3 +333,99 @@ def test_an_unexpected_error_inside_a_hook_is_a_fixed_503_logged_by_class_only(c
     assert resp.json()["error_type"] == "jev_bad_response"
     assert CANARY not in resp.text and CANARY not in caplog.text
     assert any("RuntimeError" in r.getMessage() and r.getMessage().startswith("jev ") for r in caplog.records), caplog.text
+
+
+# ---------------------------------------------------------------------------
+# The per-item endpoints: bounded request models and response shapes
+# ---------------------------------------------------------------------------
+
+def _noul_answers_for(req):
+    body = _json.loads(req.content)
+    return httpx.Response(200, json={"model": "jev-1.13.0", "usage": {}, "answers": {
+        name: {"type": "noul", "noul": 0.8} for name in body["questions"]}})
+
+
+@pytest.mark.parametrize("path,patch_body", [
+    ("/jev/ffuf-base-paths", {"candidates": ["a", "a"]}),                  # duplicates
+    ("/jev/ffuf-base-paths", {"candidates": []}),
+    ("/jev/ffuf-base-paths", {"candidates": [f"d{i}" for i in range(401)]}),
+    ("/jev/ffuf-base-paths", {"candidates": ["x" * 201]}),
+    ("/jev/ffuf-base-paths", {"candidates": [""]}),
+    ("/jev/ffuf-base-paths", {"cap": 0}),
+    ("/jev/ffuf-base-paths", {"cap": 51}),
+    ("/jev/page-type", {"pages": []}),
+    ("/jev/page-type", {"pages": [{"url": "u"}] * 51}),
+    ("/jev/page-type", {"pages": [{"status_code": -1}]}),
+    ("/jev/page-type", {"pages": [{"word_count": -5}]}),
+    ("/jev/tool-health", {"tool": "nmap"}),                                # not a crawler we ask about
+    ("/jev/tool-health", {"stderr": ""}),
+    ("/jev/tool-health", {"elapsed_s": -1}),
+    ("/jev/crawl-seed-order", {"hosts": []}),
+    ("/jev/crawl-seed-order", {"hosts": [{"hostname": ""}]}),
+    ("/jev/crawl-seed-order", {"hosts": [{"hostname": "h"}] * 401}),
+])
+def test_the_per_item_request_models_refuse_out_of_bounds_bodies(client, path, patch_body):
+    s1 = AsyncMock()
+    with _owner_ok(), _providers([JEV_ROW]), patch("jev_client.system_one", s1):
+        resp = _post(client, path, {**PATHS[path], **patch_body})
+    assert resp.status_code == 422, resp.text
+    s1.assert_not_called()
+
+
+def test_ffuf_base_paths_success_shape(client):
+    with _owner_ok(), _providers([JEV_ROW]), _mock_typesafe(_noul_answers_for):
+        resp = _post(client, "/jev/ffuf-base-paths", BASE_PATHS_BODY)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"ranked": ["admin", "api/v1"], "scores": [0.8, 0.8, 0.8],
+                           "model": "jev-1.13.0"}
+
+
+def test_page_type_success_shape(client):
+    with _owner_ok(), _providers([JEV_ROW]), _mock_typesafe(_noul_answers_for):
+        resp = _post(client, "/jev/page-type", PAGE_TYPE_BODY)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"labels": [{"page_class": "login_only", "confidence": 80}],
+                           "model": "jev-1.13.0"}
+
+
+def test_tool_health_success_shape(client):
+    with _owner_ok(), _providers([JEV_ROW]), _mock_typesafe(_noul_answers_for):
+        resp = _post(client, "/jev/tool-health", TOOL_HEALTH_BODY)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"transient": True, "confidence": 80, "model": "jev-1.13.0"}
+
+
+def test_crawl_seed_order_success_shape(client):
+    with _owner_ok(), _providers([JEV_ROW]), _mock_typesafe(_noul_answers_for):
+        resp = _post(client, "/jev/crawl-seed-order", CRAWL_SEED_BODY)
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"scores": [0.8, 0.8], "model": "jev-1.13.0"}
+
+
+@pytest.mark.parametrize("path,questions", [
+    ("/jev/ffuf-base-paths", 3), ("/jev/page-type", 5), ("/jev/tool-health", 1),
+    ("/jev/crawl-seed-order", 2),
+])
+def test_the_per_item_log_line_counts_the_questions_asked(client, caplog, path, questions):
+    caplog.set_level(logging.INFO)
+    with _owner_ok(), _providers([JEV_ROW]), _mock_typesafe(_noul_answers_for):
+        _post(client, path, PATHS[path])
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("jev ")]
+    assert any(f" questions={questions} model=jev-1.13.0 " in ln and ln.endswith(" ok") for ln in lines), lines
+
+
+def test_a_jev_answer_out_of_range_fails_the_per_item_hook_closed(client):
+    """A NaN or a value above 1 on any one item fails the whole call (503), so recon
+    falls back instead of ranking on a forged score."""
+    def nan_answers(req):
+        body = _json.loads(req.content)
+        names = list(body["questions"])
+        answers = {n: {"type": "noul", "noul": 0.5} for n in names}
+        answers[names[-1]] = {"type": "noul", "noul": 1.5}
+        return httpx.Response(200, json={"model": "jev-1.13.0", "answers": answers})
+
+    for path in ("/jev/ffuf-base-paths", "/jev/page-type", "/jev/crawl-seed-order", "/jev/tool-health"):
+        with _owner_ok(), _providers([JEV_ROW]), _mock_typesafe(nan_answers):
+            resp = _post(client, path, PATHS[path])
+        assert resp.status_code == 503, (path, resp.text)
+        assert resp.json()["error_type"] == "jev_bad_response"

@@ -1,10 +1,15 @@
-"""Jev questions for the four recon AI hooks, and the mapping back to the
-existing `/llm/*` response shapes.
+"""Jev questions for the recon hooks.
+
+Two kinds. The four engine switches (FFuf extensions, Nuclei tags, WAF, takeover)
+map their answers back to the existing `/llm/*` response shapes. The per-item
+hooks (FFuf base paths, page type, tool health, crawl-seed order) have no LLM
+twin and return shapes of their own, which recon validates.
 
 Containment here is code-enforced floors and closed answer sets, not prompt
 wording: a Jev answer can only rank, tune or annotate, never drop coverage
 below the static fallback. Target-derived bytes go into the `state` as data
-(wrapped), never concatenated into an instruction.
+(wrapped), never concatenated into an instruction; a per-item hook names an item
+by its index, never by quoting it.
 
 Question wording is versioned with the pinned model: a prompt change is a
 deliberate edit alongside JEV_MODEL.
@@ -245,7 +250,261 @@ async def takeover_classify(key: str, hostname: str, expected_provider: str,
     }
 
 
+# ---------------------------------------------------------------------------
+# Per-item hooks: the items ARE the state
+# ---------------------------------------------------------------------------
+
+#: Item state per request. TypeSafe takes about 64k tokens per request; at about
+#: four characters a token this leaves room for the questions and wrap markers.
+_ITEM_STATE_CHARS = 120_000
+
+
+async def _ask_items(key: str, shared: dict, items: dict, questions: dict) -> dict:
+    """Ask per-item questions, sending each request only its own items.
+
+    `_ask` re-sends one state with every chunk, which is right for one header set
+    and many questions, and wrong here: a scan's worth of items would exceed the
+    request limit. `items` maps an item id to its state; `questions` maps the same
+    id to that item's questions. A chunk closes at JEV_MAX_QUESTIONS_PER_CALL
+    questions or _ITEM_STATE_CHARS of item state, whichever comes first (an item
+    larger than the budget goes alone; the per-field clips bound it).
+    Sequential and all-or-nothing, like `_ask`.
+    """
+    answers: dict[str, Any] = {}
+    chunk_items: dict[str, Any] = {}
+    chunk_questions: dict[str, Any] = {}
+    chunk_chars = 0
+
+    async def flush():
+        result = await jev_client.system_one(
+            key, JEV_MODEL, {**shared, "items": chunk_items}, chunk_questions)
+        answers.update(result["answers"])
+
+    for item_id, item_state in items.items():
+        item_questions = questions[item_id]
+        size = len(json.dumps(item_state))
+        if chunk_questions and (
+                len(chunk_questions) + len(item_questions) > JEV_MAX_QUESTIONS_PER_CALL
+                or chunk_chars + size > _ITEM_STATE_CHARS):
+            await flush()
+            chunk_items, chunk_questions, chunk_chars = {}, {}, 0
+        chunk_items[item_id] = item_state
+        chunk_questions.update(item_questions)
+        chunk_chars += size
+    if chunk_questions:
+        await flush()
+    return answers
+
+
+# ---------------------------------------------------------------------------
+# FFuf smart-fuzz base paths
+# ---------------------------------------------------------------------------
+
+#: Candidates per request body. A large crawl yields thousands of directories;
+#: recon asks about at most this many and fills any slot left with its random pick.
+FFUF_BASE_PATHS_MAX = 400
+FFUF_BASE_PATH_CHARS = 200
+
+
+async def ffuf_base_paths(key: str, candidates: list, cap: int) -> dict:
+    """Rank FFuf smart-fuzz base paths.
+
+    Returns `{"ranked", "scores", "model"}`: `scores[i]` is the noul for
+    `candidates[i]`, and `ranked` is at most `cap` candidates ordered by
+    (-noul, path), so ties are deterministic. Every ranked string is one of the
+    candidates; nothing is invented and nothing below the cap is dropped that the
+    random pick would have kept, because the cap cuts the same number either way.
+
+    The directory names come from the target's own links, so each one is state
+    data named by index (`path_3`), never quoted in a question.
+    """
+    paths = list(candidates)[:FFUF_BASE_PATHS_MAX]
+    items = {f"path_{i}": wrap_untrusted(_clip(p, FFUF_BASE_PATH_CHARS), label="TARGET_PATH")
+             for i, p in enumerate(paths)}
+    questions = {
+        f"path_{i}": {f"path_{i}": _noul(
+            f"Is the directory in item path_{i} likely to hold sensitive, administrative or "
+            f"application content, rather than static assets?")}
+        for i in range(len(paths))
+    }
+    answers = await _ask_items(key, {}, items, questions) if paths else {}
+
+    scores = [answers[f"path_{i}"]["noul"] for i in range(len(paths))]
+    order = sorted(range(len(paths)), key=lambda i: (-scores[i], paths[i]))
+    return {
+        "ranked": [paths[i] for i in order[:max(cap, 0)]],
+        "scores": scores,
+        "model": JEV_MODEL,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Page type
+# ---------------------------------------------------------------------------
+
+#: The closed label set. "app" is not asked: it is what a page is when no other
+#: class reaches PAGE_CLASS_THRESHOLD, so an unsure answer fails toward scanning.
+PAGE_CLASSES = ("login_only", "parked", "default", "placeholder", "error")
+
+#: A class wins only at or above this noul. Higher than _YES because a label says
+#: what a page IS; a 0.55 "maybe parked" is left as an app.
+PAGE_CLASS_THRESHOLD = 0.70
+
+_PAGE_QUESTIONS = {
+    "login_only": ("only a login or single-sign-on wall, with no application content "
+                   "reachable without credentials"),
+    "parked": "a domain-parking or domain-for-sale page",
+    "default": ("a web server's or vendor's default landing page left in place, such as a "
+                "fresh nginx, Apache or IIS install page"),
+    "placeholder": ("a placeholder such as a 'coming soon' or empty holding page, with no "
+                    "application behind it"),
+    "error": ("an error page rather than real content: a soft 404, an access-denied wall, "
+              "or an error page returned with a 200 status"),
+}
+
+_PAGE_BODY_CHARS = 4_000
+_PAGE_HEADERS_CHARS = 2_000
+_PAGE_URL_CHARS = 500
+_PAGE_FIELD_CHARS = 300
+
+
+def _page_state(page: dict) -> dict:
+    """One page's state: our own numbers plain, every target-derived string wrapped."""
+    def wrapped(field, limit, label):
+        return wrap_untrusted(_clip(page.get(field), limit), label=label)
+
+    return {
+        "status_code": page.get("status_code", 0),
+        "content_length": page.get("content_length", 0),
+        "word_count": page.get("word_count", 0),
+        "line_count": page.get("line_count", 0),
+        "response_time_ms": page.get("response_time_ms", 0),
+        "is_cdn": bool(page.get("is_cdn", False)),
+        "url": wrapped("url", _PAGE_URL_CHARS, "TARGET_URL"),
+        "host": wrapped("host", _PAGE_FIELD_CHARS, "TARGET_HOST"),
+        "cname": wrapped("cname", _PAGE_FIELD_CHARS, "TARGET_DNS"),
+        "title": wrapped("title", _PAGE_FIELD_CHARS, "TARGET_TITLE"),
+        "server": wrapped("server", _PAGE_FIELD_CHARS, "TARGET_SERVER"),
+        "headers": wrap_untrusted(_clip(json.dumps(page.get("headers") or {}), _PAGE_HEADERS_CHARS),
+                                  label="TARGET_HEADERS"),
+        "body": wrapped("body", _PAGE_BODY_CHARS, "TARGET_BODY"),
+    }
+
+
+async def page_type(key: str, pages: list) -> dict:
+    """Label each page: `{"labels": [{"page_class", "confidence"}], "model"}`.
+
+    One request per page, sequential and all-or-nothing, with five nouls about
+    "the page in the state". Not batched by index like the other per-item hooks:
+    measured live on jev-1.13.0, a login page in a request with other pages scored
+    0.55 for login_only and 0.92 alone. A page's state has a dozen fields, and the
+    answers blur across items.
+
+    A page takes the class with the highest noul at or above PAGE_CLASS_THRESHOLD
+    (ties go to the earlier class), else "app". Confidence is in the label taken:
+    the winning noul, or for "app" one minus the highest noul, so a 0.65 "maybe
+    parked" reads as a weak app.
+    """
+    questions = {cls: _noul(f"The page in the state is {_PAGE_QUESTIONS[cls]}.") for cls in PAGE_CLASSES}
+    labels = []
+    for page in pages:
+        answers = await _ask(key, {"page": _page_state(page)}, questions)
+        nouls = {cls: answers[cls]["noul"] for cls in PAGE_CLASSES}
+        best = max(PAGE_CLASSES, key=lambda c: (nouls[c], -PAGE_CLASSES.index(c)))
+        if nouls[best] >= PAGE_CLASS_THRESHOLD:
+            labels.append({"page_class": best, "confidence": round(nouls[best] * 100)})
+        else:
+            labels.append({"page_class": "app", "confidence": round((1 - nouls[best]) * 100)})
+    return {"labels": labels, "model": JEV_MODEL}
+
+
+# ---------------------------------------------------------------------------
+# Tool health
+# ---------------------------------------------------------------------------
+
+#: The tools whose empty result recon may ask about. Trusted: recon names the tool
+#: it ran, from this list; the endpoint refuses any other value.
+TOOL_HEALTH_TOOLS = ("katana", "hakrawler", "gau", "paramspider", "kiterunner",
+                     "ffuf", "arjun", "jsluice")
+_STDERR_CHARS = 4_000
+
+
+async def tool_health(key: str, tool: str, return_code: int, elapsed_s: float,
+                      seed_count: int, stderr: str) -> dict:
+    """Is an empty result's error output transient? `{"transient", "confidence", "model"}`.
+
+    stderr is not trusted: crawlers echo target URLs into it. Recon redacts header
+    values before sending; here it is clipped and wrapped like any target bytes.
+    """
+    questions = {
+        "transient": _noul(
+            "The tool's error output in the state describes a transient failure (a timeout, "
+            "a network or rate-limit error, a crashed or killed container) rather than a "
+            "permanent one (a bad option, a missing file, an invalid or refused target).",
+            true="A transient failure: running the tool again could succeed",
+            false="A permanent failure, or no failure at all"),
+    }
+    state = {
+        "tool": tool,
+        "return_code": return_code,
+        "elapsed_s": elapsed_s,
+        "seed_count": seed_count,
+        "stderr": wrap_untrusted(_clip(stderr, _STDERR_CHARS), label="TOOL_STDERR"),
+    }
+    answers = await _ask(key, state, questions)
+    noul = answers["transient"]["noul"]
+    return {
+        "transient": noul >= _YES,
+        "confidence": round(max(noul, 1 - noul) * 100),
+        "model": JEV_MODEL,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Crawl-seed order
+# ---------------------------------------------------------------------------
+
+#: Hosts per request body; recon scores at most this many per scan and keeps the
+#: rest in alphabetical order after the scored ones.
+CRAWL_SEED_HOSTS_MAX = 400
+
+
+def _host_state(host: dict) -> dict:
+    return {
+        "status_code": host.get("status_code", 0),
+        "content_length": host.get("content_length", 0),
+        "word_count": host.get("word_count", 0),
+        "line_count": host.get("line_count", 0),
+        "url_count": host.get("url_count", 0),
+        "hostname": wrap_untrusted(_clip(host.get("hostname"), _PAGE_FIELD_CHARS), label="TARGET_HOST"),
+        "title": wrap_untrusted(_clip(host.get("title"), _PAGE_FIELD_CHARS), label="TARGET_TITLE"),
+        "server": wrap_untrusted(_clip(host.get("server"), _PAGE_FIELD_CHARS), label="TARGET_SERVER"),
+    }
+
+
+async def crawl_seed_order(key: str, hosts: list) -> dict:
+    """Score each host for crawl order: `{"scores": [noul per host], "model"}`.
+
+    Ordering only: recon sorts by (-score, hostname) and never drops a host, so
+    the answer changes which hosts a crawler reaches first under its URL cap,
+    never which hosts it may crawl.
+    """
+    hosts = list(hosts)[:CRAWL_SEED_HOSTS_MAX]
+    items = {f"host_{i}": _host_state(h) for i, h in enumerate(hosts)}
+    questions = {
+        f"host_{i}": {f"host_{i}": _noul(
+            f"Is the host in item host_{i} likely to have a rich web application surface "
+            f"(many pages, forms, APIs or an admin area) rather than a thin or static site?")}
+        for i in range(len(hosts))
+    }
+    answers = await _ask_items(key, {}, items, questions) if hosts else {}
+    return {"scores": [answers[f"host_{i}"]["noul"] for i in range(len(hosts))],
+            "model": JEV_MODEL}
+
+
 __all__ = [
     "JevError", "JEV_MAX_QUESTIONS_PER_CALL", "FFUF_JEV_CATALOG",
     "ffuf_extensions", "nuclei_tags", "waf_classify", "takeover_classify",
+    "FFUF_BASE_PATHS_MAX", "PAGE_CLASSES", "TOOL_HEALTH_TOOLS", "CRAWL_SEED_HOSTS_MAX",
+    "ffuf_base_paths", "page_type", "tool_health", "crawl_seed_order",
 ]
