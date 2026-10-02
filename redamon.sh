@@ -3226,6 +3226,27 @@ _map_core_changes() {
         [[ " ${rebuild_core[*]-} ${restart_only[*]-} " == *" recon-orchestrator "* ]] \
             || restart_only+=(recon-orchestrator)
     fi
+
+    # The orchestrator imports graph_db (its Neo4jClient) and, for /defaults,
+    # recon/project_settings.py and recon/settings_registry.py from its read-only
+    # mounts. Python keeps them cached until the process restarts.
+    if echo "$changed_files" | grep -qE "^(graph_db/|recon/(project_settings|settings_registry)\.py$)"; then
+        [[ " ${rebuild_core[*]-} ${restart_only[*]-} " == *" recon-orchestrator "* ]] \
+            || restart_only+=(recon-orchestrator)
+    fi
+}
+
+# graph_db/ is COPY-baked into these tool images. The orchestrator mounts the live
+# copy over it at spawn, except where it cannot resolve the host path (Docker
+# Desktop / WSL2, issue #169), and there the baked copy runs. Appends to the
+# CALLER's `rebuild_tools`; runs outside _map_core_changes so a release that also
+# changes docker-compose.yml (which skips that map) still rebuilds them.
+_map_baked_graph_db() {
+    echo "$1" | grep -q "^graph_db/" || return 0
+    local img
+    for img in recon vuln-scanner github-secret-hunter supply-chain supply-chain-analyzer; do
+        [[ " ${rebuild_tools[*]-} " == *" $img "* ]] || rebuild_tools+=("$img")
+    done
 }
 
 cmd_update() {
@@ -3393,6 +3414,7 @@ cmd_update() {
     if echo "$changed_files" | grep -q "^scanners/supply_chain_analyzer/"; then
         rebuild_tools+=(supply-chain-analyzer)
     fi
+    _map_baked_graph_db "$changed_files"
     # capture-proxy / traffic-ingest (HTTP Traffic Capture): both share the
     # redamon-capture-proxy:latest image, built from scanners/capture_proxy/. It is in the
     # "capture" profile — never started by `up`, but SPAWNED on demand by the

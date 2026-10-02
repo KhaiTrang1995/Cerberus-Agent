@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`./redamon.sh update` no longer leaves stale graph code running:** a `graph_db/` change restarts the orchestrator and rebuilds the tool images that bundle it, and a change to the recon settings modules restarts the orchestrator.
 - **Concurrent scans no longer lose crawler output.** The Docker broker could drop a tool's output stream mid-run, so Katana and Hakrawler found nothing while their containers exited cleanly.
 - **Findings a run did not re-check are no longer pruned:** jsluice secrets when their crawl fails, nmap and Nuclei findings on skipped or timed-out targets, unscanned or stopped GVM targets, and stopped, failed, partial or throttled TruffleHog and GitHub hunts.
 - **A Nuclei setup failure skips only Nuclei.** A template-update timeout or a missing Docker no longer skips the CVE lookup and the security checks.
