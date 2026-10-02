@@ -18,7 +18,6 @@ Usage:
 import os
 import signal
 import sys
-import json
 import time
 from pathlib import Path
 from datetime import datetime
@@ -44,6 +43,7 @@ from gvm_scan.gvm_scanner import (
     load_recon_file,
     save_vuln_results,
     update_graph_from_gvm_results,
+    write_json_atomic,
     GVM_AVAILABLE,
 )
 
@@ -348,9 +348,8 @@ def run_vulnerability_scan(
     
     def save_incremental():
         """Save current results incrementally."""
-        with open(output_file, 'w') as f:
-            json.dump(results, f, indent=2)
-    
+        write_json_atomic(output_file, results)
+
     try:
         # =====================================================================
         # PHASE 1: Scan IPs (one at a time for incremental saving)
@@ -426,11 +425,17 @@ def run_vulnerability_scan(
                 print(f"    [+] Progress saved to {output_file}")
 
                 failure_streak = check_failure_streak(hostname_results, failure_streak, hostname)
-        
-        # Final save
+
+        # Every target is scanned: from here a stop is only noted, so it cannot
+        # cut the final save in half.
+        _STOP_INTERRUPTS_SCAN = False
         save_vuln_results(results, project_id)
 
     except ScanAborted as e:
+        # First, before anything that can be interrupted: a stop raised in here
+        # would escape this handler, skip the save and the graph write below,
+        # and leave a half-written JSON for the orchestrator's backstop.
+        _STOP_INTERRUPTS_SCAN = False
         # Not an error path to hide: report it, keep the partial findings, and
         # fall through to the normal summary/graph update below.
         print(f"\n[!] {e}")
@@ -484,8 +489,25 @@ def run_vulnerability_scan(
             print("[*] Prune skipped: the run did not reach every target")
         else:
             _prune_gvm_findings(graph_stats, project_id, keep_hosts=unscanned)
+        if results.get("interrupted") or _STOP_REQUESTED:
+            _record_stopped_write(results, project_id)
 
     return results
+
+
+def _record_stopped_write(results: dict, project_id: str):
+    """Save a stopped run's results again, now carrying `graph_update`.
+
+    The orchestrator re-ingests a stopped run's file unless it can tell this
+    write landed. The Domain stamp it also checks does not exist on an IP-mode
+    project, so without this every IP-mode stop wrote the whole run twice. Only
+    a stopped run is re-saved: a run nobody stopped keeps its file exactly as
+    the final save left it.
+    """
+    try:
+        save_vuln_results(results, project_id)
+    except Exception as e:
+        print(f"    [!] Could not record the graph write in the results file: {e}")
 
 
 #: When this GVM run started, for the prune. Set once recon shows live targets,

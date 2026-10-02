@@ -97,11 +97,50 @@ test('cancels non-terminal queue rows before deleting the project (C-7)', async 
 test('calls the orchestrator stop endpoints for the running scan types', async () => {
   await DELETE(del(), params('p1'))
   const stopCalls = h.orchestratorFetch.mock.calls
-    .map(c => String(c[0]))
+    .map(c => String(c[0]).split('?')[0])
     .filter(u => u.endsWith('/stop'))
   expect(stopCalls.some(u => u.includes('/recon/p1/stop'))).toBe(true)
   expect(stopCalls.some(u => u.includes('/gvm/p1/stop'))).toBe(true)
   expect(stopCalls.some(u => u.includes('/supply-chain/p1/stop'))).toBe(true)
+})
+
+describe('test_regression_gvm_backstop_writes_after_project_delete', () => {
+  // The GVM and GitHub-hunt stops ingest the stopped run's saved JSON before
+  // removing the container. A project delete clears the graph right after its
+  // stops, so that ingest could only land after the clear, leaving nodes for a
+  // project that no longer exists. The delete asks both stops to skip it.
+  const stopUrl = (kind: string) => h.orchestratorFetch.mock.calls
+    .map(c => String(c[0]))
+    .find(u => u.split('?')[0].endsWith(`/${kind}/p1/stop`))
+
+  test('the GVM and GitHub-hunt stops skip the backstop ingest', async () => {
+    expect((await DELETE(del(), params('p1'))).status).toBe(200)
+    for (const kind of ['gvm', 'github-hunt']) {
+      const url = new URL(stopUrl(kind) as string)
+      expect(url.searchParams.get('ingest')).toBe('false')
+    }
+  })
+
+  test('the other stops are called exactly as before', async () => {
+    await DELETE(del(), params('p1'))
+    for (const kind of ['recon', 'supply-chain']) {
+      expect(stopUrl(kind)).toMatch(new RegExp(`/${kind}/p1/stop$`))
+    }
+  })
+
+  test('the stops still finish before the graph is cleared', async () => {
+    const order: string[] = []
+    h.orchestratorFetch.mockImplementation(async (url: string) => {
+      if (String(url).includes('/gvm/p1/stop')) order.push('gvm-stop')
+      return { ok: true, json: async () => ({ deleted: [] }) }
+    })
+    h.projectDelete.mockImplementation(async () => {
+      order.push('delete')
+      return { id: 'p1', userId: 'u1' }
+    })
+    await DELETE(del(), params('p1'))
+    expect(order).toEqual(['gvm-stop', 'delete'])
+  })
 })
 
 test('a failed cancel does not abort the delete (best-effort)', async () => {

@@ -553,9 +553,17 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
     // keyed by run-id, not project, so they are not stopped here; they finish on
     // their own and their orphaned nodes are swept by the graph read-path
     // reconcile.
+    // GVM and the GitHub hunt write a stopped run's saved results to the graph
+    // before removing the container, as a backstop for a scan killed mid-write.
+    // The graph is cleared below, so here that write could only land after the
+    // clear and leave the deleted project's nodes behind: ingest=false skips it.
+    const skipBackstop = new Set(['gvm', 'github-hunt'])
     await Promise.allSettled([
       ...['recon', 'gvm', 'github-hunt', 'supply-chain'].map(kind =>
-        orchestratorFetch(`${RECON_ORCHESTRATOR_URL}/${kind}/${id}/stop`, { method: 'POST' }),
+        orchestratorFetch(
+          `${RECON_ORCHESTRATOR_URL}/${kind}/${id}/stop${skipBackstop.has(kind) ? '?ingest=false' : ''}`,
+          { method: 'POST' },
+        ),
       ),
       // TruffleHog is run-keyed (one run per source, several in parallel), so a
       // single project-level stop would leave every source but one running with

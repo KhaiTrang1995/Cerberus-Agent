@@ -236,6 +236,20 @@ def _env_size(name: str, default: str) -> str:
     return raw if raw else default
 
 
+class _GvmStopClaim:
+    """A GVM stop still waiting out the grace period and its backstop write.
+
+    `ingest` is read just before the backstop would start, so a project delete
+    arriving mid-stop can still switch it off; nothing switches it back on.
+    """
+
+    __slots__ = ("state", "ingest")
+
+    def __init__(self, state: GvmState, ingest: bool):
+        self.state = state
+        self.ingest = ingest
+
+
 class ContainerManager:
     """Manages Docker containers for recon, GVM scan, GitHub hunt, and TruffleHog processes"""
 
@@ -2726,7 +2740,21 @@ class ContainerManager:
         -- gvm status is polled on the same cadence as recon, same freeze risk."""
         return await self._run_blocking(self._get_gvm_status_sync, project_id)
 
+    def _gvm_stop_claims(self) -> dict:
+        """project_id -> the _GvmStopClaim of the stop in flight for it.
+
+        Created on first use: a manager built with __new__ skips __init__.
+        """
+        return self.__dict__.setdefault("_gvm_stopping", {})
+
     def _get_gvm_status_sync(self, project_id: str) -> GvmState:
+        claim = self._gvm_stop_claims().get(project_id)
+        if claim is not None:
+            # The container exits during the stop. Inspected here it would read
+            # as a finished run: ERROR (which a start does not refuse) and
+            # auto-removed from under the stop's backstop.
+            return claim.state
+
         if project_id in self.gvm_states:
             state = self.gvm_states[project_id]
 
@@ -2794,6 +2822,10 @@ class ContainerManager:
         current_state = await self.get_gvm_status(project_id)
         if current_state.status in (GvmStatus.RUNNING, GvmStatus.PAUSED):
             raise ValueError(f"GVM scan already active for project {project_id}")
+        # A stop still in flight owns the container and the results file: a
+        # start now would force-remove the one and overwrite the other.
+        if project_id in self._gvm_stop_claims():
+            raise ValueError(f"GVM scan for project {project_id} is still stopping")
 
         # Memory admission (Part 1): reserve this scan's RAM envelope or reject.
         await self._admit_scan("gvm", project_id, user_id=user_id)
@@ -2943,9 +2975,24 @@ class ContainerManager:
 
         return state
 
-    async def stop_gvm_scan(self, project_id: str, timeout: int = 10) -> GvmState:
-        """Stop a running GVM scan process"""
+    async def stop_gvm_scan(self, project_id: str, timeout: int = 10,
+                            ingest: bool = True) -> GvmState:
+        """Stop a running GVM scan process.
+
+        `ingest=False` skips the backstop write of the stopped run's saved
+        results. A project delete passes it: it clears the graph next, and a
+        backstop landing after that clear would leave the deleted project's
+        nodes behind.
+        """
         state = await self.get_gvm_status(project_id)
+
+        # Checked after the last await, so two stops cannot both claim the run.
+        claims = self._gvm_stop_claims()
+        in_flight = claims.get(project_id)
+        if in_flight is not None:
+            if not ingest:
+                in_flight.ingest = False
+            return in_flight.state
 
         if state.status not in (GvmStatus.RUNNING, GvmStatus.PAUSED):
             return state
@@ -2953,6 +3000,9 @@ class ContainerManager:
         state.status = GvmStatus.STOPPING
 
         if state.container_id:
+            claim = _GvmStopClaim(state, ingest)
+            claims[project_id] = claim
+
             def _stop(cid: str) -> None:
                 container = self.client.containers.get(cid)
                 if container.status == "paused":
@@ -2961,7 +3011,8 @@ class ContainerManager:
                 # BEFORE removing it, as stop_github_hunt does: if the scan was
                 # SIGKILLed before its own graph write, the JSON it saved after
                 # each target is the only copy of what it found.
-                self._ingest_gvm_after_stop(state, container)
+                if claim.ingest:
+                    self._ingest_gvm_after_stop(state, container)
                 container.remove()
             try:
                 # Off the event loop: the stop waits out the grace period and the
@@ -2975,8 +3026,12 @@ class ContainerManager:
             except Exception as e:
                 state.status = GvmStatus.ERROR
                 state.error = f"Failed to stop: {e}"
+            finally:
+                if claims.get(project_id) is claim:
+                    del claims[project_id]
 
-        if project_id in self.gvm_states:
+        # Only the state this stop owns, never a run that replaced it meanwhile.
+        if self.gvm_states.get(project_id) is state:
             del self.gvm_states[project_id]
 
         return state
@@ -3015,6 +3070,14 @@ class ContainerManager:
                 return
             data = json.loads(out_path.read_text())
             if not isinstance(data, dict) or not data.get("scans"):
+                return
+            if data.get("graph_update") is not None:
+                # The scan re-saves a stopped run with this key only once its
+                # own write has landed (gvm_scan/main.py). The Domain stamp
+                # below cannot say so for an IP-mode project, which has no
+                # Domain node.
+                logger.info(f"[gvm] {state.project_id} stopped run already in "
+                            "the graph (the scan wrote it)")
                 return
 
             from graph_db import Neo4jClient
@@ -3430,8 +3493,13 @@ class ContainerManager:
 
         return state
 
-    async def stop_github_hunt(self, project_id: str, timeout: int = 10) -> GithubHuntState:
-        """Stop a running GitHub hunt process"""
+    async def stop_github_hunt(self, project_id: str, timeout: int = 10,
+                               ingest: bool = True) -> GithubHuntState:
+        """Stop a running GitHub hunt process.
+
+        `ingest=False` skips the backstop ingest, as for stop_gvm_scan: a
+        project delete clears the graph right after this stop.
+        """
         state = await self.get_github_hunt_status(project_id)
 
         if state.status not in (GithubHuntStatus.RUNNING, GithubHuntStatus.PAUSED):
@@ -3448,7 +3516,8 @@ class ContainerManager:
                 # BEFORE removing it: the container had `timeout` seconds to save
                 # and write the graph itself. If SIGKILL came first, this is the
                 # last chance to keep the run's findings.
-                self._ingest_github_hunt(state)
+                if ingest:
+                    self._ingest_github_hunt(state)
                 container.remove()
                 state.status = GithubHuntStatus.IDLE
                 state.completed_at = datetime.now(timezone.utc)

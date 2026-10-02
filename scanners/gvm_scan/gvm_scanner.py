@@ -1125,11 +1125,32 @@ def save_vuln_results(
     output_dir.mkdir(parents=True, exist_ok=True)
     output_file = output_dir / f"gvm_{project_id}.json"
 
-    with open(output_file, 'w') as f:
-        json.dump(results, f, indent=2)
+    write_json_atomic(output_file, results)
 
     print(f"[+] Results saved to: {output_file}")
     return output_file
+
+
+def write_json_atomic(path: Path, data) -> None:
+    """Replace `path` with `data` as JSON in one step.
+
+    A stop can land mid-write (the SIGTERM handler raises, or SIGKILL after the
+    grace period), and an open('w') + dump cut there leaves a truncated file:
+    the previous save is gone and the orchestrator's stop backstop cannot parse
+    what is left. The temp file sits in the same directory so the rename never
+    crosses a filesystem, and open() gives it the mode the file always had.
+    """
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, 'w') as f:
+            json.dump(data, f, indent=2)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def update_graph_from_gvm_results(

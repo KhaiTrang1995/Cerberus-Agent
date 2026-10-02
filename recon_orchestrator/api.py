@@ -1745,12 +1745,16 @@ async def get_gvm_status(project_id: str):
 
 
 @app.post("/gvm/{project_id}/stop", response_model=GvmState)
-async def stop_gvm_scan(project_id: str):
-    """Stop a running GVM scan process"""
+async def stop_gvm_scan(project_id: str, ingest: bool = True):
+    """Stop a running GVM scan process.
+
+    `?ingest=false` skips writing the stopped run's saved results to the graph;
+    the project delete passes it because it clears the graph next.
+    """
     if not container_manager:
         raise HTTPException(status_code=503, detail="Service not initialized")
 
-    state = await container_manager.stop_gvm_scan(project_id)
+    state = await container_manager.stop_gvm_scan(project_id, ingest=ingest)
     return state
 
 
@@ -1869,12 +1873,15 @@ async def get_github_hunt_status(project_id: str):
 
 
 @app.post("/github-hunt/{project_id}/stop", response_model=GithubHuntState)
-async def stop_github_hunt(project_id: str):
-    """Stop a running GitHub Secret Hunt process"""
+async def stop_github_hunt(project_id: str, ingest: bool = True):
+    """Stop a running GitHub Secret Hunt process.
+
+    `?ingest=false` skips the backstop graph write, as for the GVM stop.
+    """
     if not container_manager:
         raise HTTPException(status_code=503, detail="Service not initialized")
 
-    state = await container_manager.stop_github_hunt(project_id)
+    state = await container_manager.stop_github_hunt(project_id, ingest=ingest)
     return state
 
 
