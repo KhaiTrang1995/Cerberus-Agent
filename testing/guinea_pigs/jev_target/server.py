@@ -95,8 +95,30 @@ a REST API under /api/v1 and a reporting dashboard.</p>
 <script src="/static/app.js"></script></body></html>
 """
 
-# A generic page for any discovered path, so crawled dirs resolve 200 and
-# remain in scope for smart fuzz.
+# What the app really serves. Everything else is a 404, except the few words a
+# directory wordlist is likely to hit under a real directory: those answer 200,
+# so a smart-fuzz hit under /admin proves /admin was the directory fuzzed (a
+# catch-all 200 would be filtered out by FFuf's auto-calibration instead).
+_DIRS = {"admin", "api", "backup", "config", "uploads", "images", "blog", "docs",
+         "reports", "billing", "user", "internal", "static"}
+_PAGES = {"/admin/dashboard", "/api/v1", "/api/v1/users", "/backup/db.sql",
+          "/config/settings.php", "/uploads/list", "/images/logo.png", "/blog/post-1",
+          "/docs/api", "/reports/latest", "/billing/invoices", "/user/profile.php",
+          "/internal/metrics", "/search", "/login", "/about"}
+_HITS = {"index", "test", "old", "backup", "config", "users", "upload", "temp", "tmp",
+         "data", "files", "logs", "private", "dev", "staging"}
+
+
+def _served(path: str) -> bool:
+    clean = path.rstrip("/") or "/"
+    if clean in _PAGES or clean.lstrip("/") in _DIRS:
+        return True
+    parts = [p for p in clean.split("/") if p]
+    return len(parts) >= 2 and parts[0] in _DIRS and parts[-1].split(".")[0] in _HITS
+
+
+# A generic page for any served path, so crawled dirs resolve 200 and stay in
+# scope for smart fuzz.
 def _page(path: str) -> bytes:
     title = path.strip("/").split("/")[0].capitalize() or "Page"
     return (f"""<!doctype html>
@@ -156,13 +178,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, LOGIN)
         if path == "/about":
             return self._send(200, ABOUT)
-        if path.startswith("/api/"):
-            return self._send(200, b'{"status":"ok","items":[]}', "application/json")
         if path == "/robots.txt":
             return self._send(200, b"User-agent: *\nDisallow: /admin\n", "text/plain")
-        if path.rstrip("/") == "" or len(path) <= 1:
+        if not _served(path):
             return self._send(404, b"Not Found")
-        # Any other discovered directory answers 200 so it stays in scope.
+        if path.startswith("/api/"):
+            return self._send(200, b'{"status":"ok","items":[]}', "application/json")
         return self._send(200, _page(path))
 
     def _waf(self):

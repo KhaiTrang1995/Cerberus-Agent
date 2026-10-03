@@ -10,6 +10,7 @@
 #   192.88.96.10  richapp - full PHP/Apache app, many dirs, JS bundle, /login
 #   192.88.96.20  waf     - Jev-only WAF challenge (no vendor header)
 #   192.88.96.30  thin    - "coming soon" placeholder
+#   192.88.96.90  richapp2 - a second rich app that sorts last (crawl order)
 #
 # Create an IP-mode project over all three addresses.
 
@@ -31,6 +32,28 @@ services:
     networks:
       jev_lab:
         ipv4_address: 192.88.96.10
+
+  # A second rich app that sorts LAST alphabetically (192.88.96.90 > .30), so the
+  # Hakrawler seed order has something to move: Jev ranks it with the first host,
+  # the A-Z list leaves it in the second half.
+  jev-richapp2:
+    build: .
+    image: redamon-jev-target:latest
+    container_name: redamon-jev-richapp2
+    restart: unless-stopped
+    depends_on:
+      - jev-richapp
+    environment:
+      ROLE: richapp
+      PORT: "80"
+    mem_limit: 128m
+    pids_limit: 128
+    cpus: 0.5
+    volumes:
+      - ./server.py:/app/server.py:ro
+    networks:
+      jev_lab:
+        ipv4_address: 192.88.96.90
 
   jev-waf:
     build: .
