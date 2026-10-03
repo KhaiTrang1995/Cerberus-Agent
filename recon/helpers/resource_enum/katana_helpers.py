@@ -14,6 +14,7 @@ import uuid
 from typing import Dict, List, Tuple
 from urllib.parse import urlparse
 
+from recon.helpers.docker_helpers import pull_image_or_use_local
 from .form_helpers import parse_forms_from_html
 
 
@@ -372,7 +373,7 @@ def fetch_forms_from_urls(
 
 def pull_katana_docker_image(docker_image: str) -> bool:
     """
-    Pull the Katana Docker image if not present.
+    Pull the Katana Docker image, or use the copy already on this host if the pull fails.
     
     Args:
         docker_image: Docker image name to pull
@@ -380,15 +381,6 @@ def pull_katana_docker_image(docker_image: str) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    try:
-        print(f"[*][Katana] Pulling Katana image: {docker_image}...")
-        result = subprocess.run(
-            ["docker", "pull", docker_image],
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    print(f"[*][Katana] Pulling Katana image: {docker_image}...")
+    return pull_image_or_use_local(docker_image, "Katana")
 

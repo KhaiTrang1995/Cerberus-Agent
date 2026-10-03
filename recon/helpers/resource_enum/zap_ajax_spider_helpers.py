@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Dict, Iterable, List
 from urllib.parse import parse_qs, urlparse
 
+from recon.helpers.docker_helpers import pull_image_or_use_local
+
 
 SOURCE_NAME = "zap_ajax_spider"
 ZAP_CONTEXT_NAME = "redamon-zap-ajax-context"
@@ -372,18 +374,9 @@ def merge_zap_ajax_into_by_base_url(
 
 
 def pull_zap_ajax_docker_image(docker_image: str) -> bool:
-    """Pull the configured ZAP Docker image."""
-    try:
-        print(f"[*][ZAP Ajax] Pulling ZAP image: {docker_image}...")
-        result = subprocess.run(
-            ["docker", "pull", docker_image],
-            capture_output=True,
-            text=True,
-            timeout=300,
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    """Pull the configured ZAP Docker image, or use the copy already on this host if the pull fails."""
+    print(f"[*][ZAP Ajax] Pulling ZAP image: {docker_image}...")
+    return pull_image_or_use_local(docker_image, "ZAP Ajax")
 
 
 def run_zap_ajax_spider(

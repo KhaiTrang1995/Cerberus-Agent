@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import uuid
 from pathlib import Path
+from typing import Optional
 
 # Volume name for persistent nuclei templates
 NUCLEI_TEMPLATES_VOLUME = "nuclei-templates"
@@ -35,6 +36,42 @@ def is_docker_running() -> bool:
         return result.returncode == 0
     except Exception:
         return False
+
+
+def _image_on_host(docker_image: str) -> bool:
+    """True when the image is already in the local Docker store. Never raises."""
+    try:
+        result = subprocess.run(["docker", "images", "-q", docker_image],
+                                capture_output=True, text=True, timeout=30)
+        return result.returncode == 0 and bool(result.stdout.strip())
+    except Exception:
+        return False
+
+
+def pull_image_or_use_local(docker_image: str, label: str, *,
+                            platform: Optional[str] = None, timeout: int = 300) -> bool:
+    """Pull `docker_image` so a moving tag stays current, and fall back to the copy
+    already on this host when the pull fails. Never raises.
+
+    A pull fails for reasons that say nothing about the image: no DNS, a registry
+    rate limit, an offline host. Treating that as "tool unavailable" silently drops
+    the tool from the run, even though it would have worked from the local copy.
+    False only when the pull failed AND there is no local copy.
+    """
+    cmd = ["docker", "pull"] + (["--platform", platform] if platform else []) + [docker_image]
+    reason = ""
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode == 0:
+            return True
+        lines = (result.stderr or "").strip().splitlines()
+        reason = lines[-1][:140] if lines else f"exit {result.returncode}"
+    except Exception as e:  # noqa: BLE001 - a failed pull must never raise into a scan
+        reason = type(e).__name__
+    if _image_on_host(docker_image):
+        print(f"[!][{label}] Pull failed ({reason}) - using the image already on this host")
+        return True
+    return False
 
 
 def _kill_container(name: str) -> None:
@@ -98,17 +135,8 @@ def pull_nuclei_docker_image(docker_image: str) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    try:
-        print(f"[*][Docker] Pulling Docker image: {docker_image}...")
-        result = subprocess.run(
-            ["docker", "pull", docker_image],
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    print(f"[*][Docker] Pulling Docker image: {docker_image}...")
+    return pull_image_or_use_local(docker_image, "Docker")
 
 
 def ensure_templates_volume(docker_image: str, auto_update: bool = False) -> bool:
@@ -234,15 +262,6 @@ def pull_katana_docker_image(docker_image: str) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    try:
-        print(f"[*][Docker] Pulling Katana image: {docker_image}...")
-        result = subprocess.run(
-            ["docker", "pull", docker_image],
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    print(f"[*][Docker] Pulling Katana image: {docker_image}...")
+    return pull_image_or_use_local(docker_image, "Docker")
 

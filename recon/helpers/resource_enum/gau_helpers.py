@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from urllib.parse import urlparse, parse_qs
 
+from recon.helpers.docker_helpers import pull_image_or_use_local
 from .classification import classify_parameter, classify_endpoint
 
 
@@ -43,7 +44,7 @@ def _cleanup_temp_dir(temp_dir: Path):
 
 def pull_gau_docker_image(docker_image: str) -> bool:
     """
-    Pull the GAU Docker image if not present.
+    Pull the GAU Docker image, or use the copy already on this host if the pull fails.
     
     Args:
         docker_image: Docker image name to pull
@@ -51,22 +52,9 @@ def pull_gau_docker_image(docker_image: str) -> bool:
     Returns:
         True if successful, False otherwise
     """
-    try:
-        print(f"[*][GAU] Pulling GAU image: {docker_image}...")
-        pull_cmd = ["docker", "pull"]
-        if _is_arm64_host():
-            pull_cmd.extend(["--platform", "linux/amd64"])
-        pull_cmd.append(docker_image)
-
-        result = subprocess.run(
-            pull_cmd,
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    print(f"[*][GAU] Pulling GAU image: {docker_image}...")
+    return pull_image_or_use_local(
+        docker_image, "GAU", platform="linux/amd64" if _is_arm64_host() else None)
 
 
 def filter_gau_url(url: str, blacklist_extensions: List[str]) -> bool:

@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
+from recon.helpers.docker_helpers import pull_image_or_use_local
 from recon.helpers.resource_enum import tool_health
 
 
@@ -348,18 +349,9 @@ def run_hakrawler_crawler(
 
 
 def pull_hakrawler_docker_image(docker_image: str) -> bool:
-    """Pull the Hakrawler Docker image if not present."""
-    try:
-        print(f"[*][Hakrawler] Pulling Hakrawler image: {docker_image}...")
-        result = subprocess.run(
-            ["docker", "pull", docker_image],
-            capture_output=True,
-            text=True,
-            timeout=300
-        )
-        return result.returncode == 0
-    except Exception:
-        return False
+    """Pull the Hakrawler Docker image, or use the copy already on this host if the pull fails."""
+    print(f"[*][Hakrawler] Pulling Hakrawler image: {docker_image}...")
+    return pull_image_or_use_local(docker_image, "Hakrawler")
 
 
 def merge_hakrawler_into_by_base_url(

@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.24.2] - 2026-10-03
+
+### Fixed
+
+- **Katana, Hakrawler, GAU, ZAP and Nuclei keep running when an image pull fails** (a DNS blip, a registry rate limit, no network) and the image is already on the host. They used to be skipped for that run, so a scan could finish with no crawler at all. The pull is still tried first, so a `:latest` tag stays current whenever the registry is reachable.
+
 ## [6.24.1] - 2026-10-02
 
 ### Changed
